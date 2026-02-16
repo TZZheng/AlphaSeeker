@@ -13,12 +13,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ddgs import DDGS
 import trafilatura
-
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # ---------------------------------------------------------------------------
 # Layer 1: Search (returns URLs + snippets)
 # ---------------------------------------------------------------------------
 
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
 def search_web(query: str, max_results: int = 5) -> List[Dict[str, str]]:
     """
     Performs a web search using DuckDuckGo text search.
@@ -38,6 +39,7 @@ def search_web(query: str, max_results: int = 5) -> List[Dict[str, str]]:
         return []
 
 
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
 def search_news(query: str, max_results: int = 5) -> List[Dict[str, str]]:
     """
     Performs a news search using DuckDuckGo news endpoint.
@@ -71,6 +73,7 @@ def search_news(query: str, max_results: int = 5) -> List[Dict[str, str]]:
 # Layer 2: Read (extracts full article text from URLs)
 # ---------------------------------------------------------------------------
 
+@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=5))
 def read_url(url: str, max_chars: int = 8000) -> Optional[str]:
     """
     Fetches and extracts clean article text from a URL using trafilatura.

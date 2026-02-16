@@ -17,6 +17,10 @@ def main():
         print("Error: OPENAI_API_KEY is not set. Please create a .env file.")
         return
 
+    if not os.getenv("GOOGLE_API_KEY"):
+        print("Error: GOOGLE_API_KEY is not set. Please add it to your .env file.")
+        return
+
     print("AlphaSeeker MVP Agent")
     print("---------------------")
     query = input("Enter your request (e.g., 'Analyze AAPL for the last 1y'): ")

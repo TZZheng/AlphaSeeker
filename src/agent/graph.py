@@ -11,10 +11,11 @@ Flow:
 from typing import TypedDict, Annotated, Literal, Dict, List
 import os
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
 # Import our schema and tools
@@ -26,14 +27,18 @@ from src.tools.peers import fetch_peer_metrics, discover_peers
 from src.tools.web_search import search_web, search_news, deep_search
 from src.tools.sec_filings import search_and_read_filings
 from src.tools.company_profile import fetch_company_profile
+from src.llm_manager import get_llm
 
-# --- LLM Setup ---
-llm = ChatOpenAI(
-    model="kimi-k2.5",
-    temperature=0,
-    base_url="https://api.moonshot.ai/v1",
-    api_key=os.getenv("OPENAI_API_KEY")
-)
+# --- Model Assignments ---
+# Change any of these to swap a step to a different model.
+# Prefix determines provider: "gemini-*" → Google, "kimi-*" → Moonshot, "sf/*" → SiliconFlow
+MODEL_PLAN     = "sf/Qwen/Qwen3-14B"   # trivial extraction
+MODEL_CONDENSE = "sf/Qwen/Qwen3-14B"   # summarization / condensation
+MODEL_FOLLOWUP = "sf/Qwen/Qwen3-14B"   # search query generation
+MODEL_MAP      = "sf/Qwen/Qwen3-14B"   # fact extraction from chunks
+MODEL_REDUCE   = "sf/Qwen/Qwen3-14B"   # organize facts into briefs
+MODEL_SECTION  = "kimi-k2.5"                    # professional report writing
+MODEL_SUMMARY  = "kimi-k2.5"                    # investment summary synthesis
 
 # --- Constants ---
 SECTION_ORDER = [
@@ -117,6 +122,7 @@ def condense_context(
     if focus_areas:
         focus_instruction = f"\nPay special attention to: {focus_areas}"
 
+    # Initial Prompt
     condense_prompt = f"""You are condensing a long document for {purpose}.
 The original is {len(text):,} characters but the budget is ~{target_chars:,} characters.
 
@@ -131,15 +137,51 @@ RULES:
 CONDENSE THIS:
 {text}
 """
+    
+    current_prompt = condense_prompt
+    
+    # Retry loop (max 2 attempts)
+    for attempt in range(2):
+        try:
+            response = get_llm(MODEL_CONDENSE).invoke([HumanMessage(content=current_prompt)])
+            condensed = response.content
+            
+            # Check length constraint
+            if len(condensed) <= max_chars:
+                print(f"  Condensed {len(text):,} → {len(condensed):,} chars ({purpose[:100]}...)")
+                return condensed
+            
+            # Failed length check
+            print(f"  Warning: Condensation (Attempt {attempt+1}) output {len(condensed):,} chars > limit {max_chars:,}")
+            
+            # Save debug info
+            timestamp = int(time.time())
+            debug_dir = "data/debug"
+            os.makedirs(debug_dir, exist_ok=True)
+            debug_file = f"{debug_dir}/condensation_fail_{timestamp}_{attempt}.txt"
+            with open(debug_file, "w", encoding="utf-8") as f:
+                f.write(f"--- ORIGINAL TEXT ({len(text)} chars) ---\n")
+                f.write(text)
+                f.write(f"\n\n--- FAILED CONDENSATION ({len(condensed)} chars) ---\n")
+                f.write(condensed)
+            print(f"  Saved debug context to {debug_file}")
 
-    try:
-        response = llm.invoke([HumanMessage(content=condense_prompt)])
-        condensed = response.content
-        print(f"  Condensed {len(text):,} → {len(condensed):,} chars ({purpose[:40]}...)")
-        return condensed
-    except Exception as e:
-        print(f"  Condensation failed ({e}), falling back to truncation")
-        return text[:max_chars]
+            # Prepare retry prompt - asking to shorten the previous output
+            current_prompt = f"""
+Your previous summary was {len(condensed):,} characters, which exceeds the limit of {max_chars:,} characters.
+Please shorten it significantly while keeping the key facts.
+
+Previous Output:
+{condensed}
+"""
+        except Exception as e:
+            print(f"  Condensation attempt {attempt+1} failed ({e})")
+            # If we hit an exception (e.g. API error), we proceed to fallback
+            break
+
+    # Fallback to strict truncation if retries failed or errored
+    print(f"  Condensation failed after retries, falling back to strict truncation")
+    return text[:max_chars]
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +351,7 @@ Output ONLY the queries, one per line, no numbering or formatting.
 """
 
     try:
-        response = llm.invoke([HumanMessage(content=prompt)])
+        response = get_llm(MODEL_FOLLOWUP).invoke([HumanMessage(content=prompt)])
         lines = [q.strip() for q in response.content.strip().split("\n") if q.strip()]
         # Filter out empty lines and lines that look like headers
         queries = [q for q in lines if len(q) > 15 and not q.startswith("#") and not q.startswith("*")]
@@ -330,7 +372,7 @@ def planner(state: AgentState):
     Identify the main ticker symbol.
     Leave the peers list EMPTY — peers will be discovered automatically using data-driven analysis.
     """)
-    structured_llm = llm.with_structured_output(AnalysisPlan)
+    structured_llm = get_llm(MODEL_PLAN).with_structured_output(AnalysisPlan)
     try:
         messages = [system_prompt] + recent_messages
         plan = structured_llm.invoke(messages)
@@ -475,7 +517,7 @@ def research_qualitative(state: AgentState):
         industry_hint = metadata.get("industry", "")
 
     # ============================
-    # PHASE 1: Generic queries
+    # PHASE 1: Generic queries (Parallelized)
     # ============================
     query_categories = build_research_queries(ticker, company_name, sector_hint, industry_hint)
 
@@ -491,23 +533,55 @@ def research_qualitative(state: AgentState):
 
     print(f"Phase 1: {len(all_text_queries)} text queries + {len(all_news_queries)} news queries")
 
-    text_results = deep_search(
-        queries=all_text_queries,
-        urls_per_query=3,
-        max_workers=15,
-        max_chars_per_url=8000,
-        search_delay=0.3,
-        use_news=False,
-    )
+    # Functions for parallel execution
+    def run_text_search():
+        return deep_search(
+            queries=all_text_queries,
+            urls_per_query=3,
+            max_workers=5,   # Reduced from 15 to 5 to share bandwidth
+            max_chars_per_url=8000,
+            search_delay=0.5, # Slightly increased delay for safety
+            use_news=False,
+        )
 
-    news_results = deep_search(
-        queries=all_news_queries,
-        urls_per_query=3,
-        max_workers=15,
-        max_chars_per_url=6000,
-        search_delay=0.3,
-        use_news=True,
-    )
+    def run_news_search():
+        return deep_search(
+            queries=all_news_queries,
+            urls_per_query=3,
+            max_workers=5,   # Reduced from 15 to 5
+            max_chars_per_url=6000,
+            search_delay=0.5,
+            use_news=True,
+        )
+    
+    def run_sec_search():
+        try:
+            results = search_and_read_filings(
+                company_name=company_name or ticker,
+                ticker=ticker,
+                form_types=["10-K", "10-Q", "8-K"],
+                max_filings=5,
+                max_chars_per_filing=12000,
+            )
+            print(f"SEC: Found {len(results)} filings")
+            return results
+        except Exception as e:
+            print(f"SEC filing search failed: {e}")
+            return []
+
+    # Execute Phase 1 + SEC in parallel
+    text_results = []
+    news_results = []
+    sec_results = []
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        future_text = executor.submit(run_text_search)
+        future_news = executor.submit(run_news_search)
+        future_sec = executor.submit(run_sec_search)
+
+        text_results = future_text.result()
+        news_results = future_news.result()
+        sec_results = future_sec.result()
 
     # Collect Phase 1 snippets for the LLM to read
     phase1_snippets = "\n".join([
@@ -517,7 +591,7 @@ def research_qualitative(state: AgentState):
     ])
 
     # ============================
-    # PHASE 2: LLM follow-up queries (company-specific depth)
+    # PHASE 2: LLM follow-up queries (Parallelized)
     # ============================
     followup_queries = generate_followup_queries(
         ticker=ticker,
@@ -531,41 +605,36 @@ def research_qualitative(state: AgentState):
     followup_results = []
     if followup_queries:
         print(f"Phase 2: Running {len(followup_queries)} LLM-generated follow-up queries")
-        followup_results = deep_search(
-            queries=followup_queries,
-            urls_per_query=3,
-            max_workers=15,
-            max_chars_per_url=8000,
-            search_delay=0.3,
-            use_news=False,
-        )
+        
+        def run_followup_text():
+            return deep_search(
+                queries=followup_queries,
+                urls_per_query=3,
+                max_workers=5,
+                max_chars_per_url=8000,
+                search_delay=0.5,
+                use_news=False,
+            )
 
-        # Also run a subset through news for recency
-        followup_news = deep_search(
-            queries=followup_queries[:8],
-            urls_per_query=2,
-            max_workers=15,
-            max_chars_per_url=6000,
-            search_delay=0.3,
-            use_news=True,
-        )
-        followup_results.extend(followup_news)
+        def run_followup_news():
+            # Also run a subset through news for recency
+            return deep_search(
+                queries=followup_queries[:8],
+                urls_per_query=2,
+                max_workers=5,
+                max_chars_per_url=6000,
+                search_delay=0.5,
+                use_news=True,
+            )
 
-    # ============================
-    # SEC Filings
-    # ============================
-    sec_results = []
-    try:
-        sec_results = search_and_read_filings(
-            company_name=company_name or ticker,
-            ticker=ticker,
-            form_types=["10-K", "10-Q", "8-K"],
-            max_filings=5,
-            max_chars_per_filing=12000,
-        )
-        print(f"SEC: Found {len(sec_results)} filings")
-    except Exception as e:
-        print(f"SEC filing search failed: {e}")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_f_text = executor.submit(run_followup_text)
+            future_f_news = executor.submit(run_followup_news)
+            
+            f_text_results = future_f_text.result()
+            f_news_results = future_f_news.result()
+            
+        followup_results = f_text_results + f_news_results
 
     # ============================
     # Consolidate all research
@@ -628,8 +697,8 @@ def synthesize_research(state: AgentState):
     # Each batch gets summarized by the LLM to extract key facts
     all_text_items = list(research_data.values())
     
-    # Combine into manageable chunks (~20KB each, ~5K tokens)
-    CHUNK_SIZE = 20000
+    # Combine into manageable chunks (~50KB each, ~10K tokens)
+    CHUNK_SIZE = 50000
     chunks = []
     current_chunk = ""
     for text in all_text_items:
@@ -662,14 +731,15 @@ Focus on:
 - Industry dynamics and competitive positioning
 - Management commentary and guidance
 
-Output a bullet-point list of key facts. Include ALL numbers, dates, and names.
-Do NOT summarize — extract raw facts.
+Output a bullet-point list of the **most critical** research points. 
+For financial data, focus only on the **most important data points** (e.g., Guidance, Revenue, Margins, RPO, Debt), but for the data you select, you MUST replicate the numbers, tables, and fiscal periods EXACTLY as they appear.
+Do NOT approximate — choose the most important data and replicate it precisely.
 
 RAW TEXT:
 {chunk}
 """
         try:
-            response = llm.invoke([HumanMessage(content=map_prompt)])
+            response = get_llm(MODEL_MAP).invoke([HumanMessage(content=map_prompt)])
             extracted_facts.append(response.content)
             print(f"  MAP chunk {i+1}/{len(chunks)}: extracted {len(response.content)} chars of facts")
         except Exception as e:
@@ -707,7 +777,7 @@ EXTRACTED FACTS:
 {all_facts}
 """
         try:
-            response = llm.invoke([HumanMessage(content=reduce_prompt)])
+            response = get_llm(MODEL_REDUCE).invoke([HumanMessage(content=reduce_prompt)])
             research_brief[section_key] = response.content
             print(f"  REDUCE {section_key}: {len(response.content)} chars")
         except Exception as e:
@@ -751,14 +821,12 @@ def generate_section(state: AgentState):
     section_brief = research_brief.get(next_section_key, "No research brief available.")
 
     # Prompt Construction
+    # Static content (Profile, Financials, Peer Data) is placed FIRST so it can be cached across the loop.
+    # Variable content (Section Instructions, Research Brief) is placed LAST.
     prompt = f"""
     You are a Senior Equity Research Analyst for AlphaSeeker.
-    Generate the **{next_section_key.replace('_', ' ').upper()}** section for {ticker}.
     
-    ## GUIDANCE
-    {SECTION_PROMPTS[next_section_key]}
-    
-    ## DATA SOURCES
+    ## DATA SOURCES (Context)
     
     ### Company Profile (Ground Truth for Identity)
     {profile_content}
@@ -769,8 +837,16 @@ def generate_section(state: AgentState):
     ### Peer Comparison
     {peer_content}
     
-    ### Deep Research Brief (from 50+ articles, news, and SEC filings)
+    ---
+    
+    ## YOUR TASK
+    Generate the **{next_section_key.replace('_', ' ').upper()}** section for {ticker}.
+    
+    ### Deep Research Brief (Specific to this section)
     {section_brief}
+    
+    ### Section Guidance
+    {SECTION_PROMPTS[next_section_key]}
     
     ## CRITICAL INSTRUCTIONS
     - Output must be a valid 'ResearchSection' object.
@@ -784,7 +860,7 @@ def generate_section(state: AgentState):
     - Be LONG and DETAILED. Target 1000+ words. This is a professional research report.
     """
 
-    structured_llm = llm.with_structured_output(ResearchSection)
+    structured_llm = get_llm(MODEL_SECTION).with_structured_output(ResearchSection)
 
     try:
         section = structured_llm.invoke([HumanMessage(content=prompt)])
@@ -834,6 +910,11 @@ def generate_summary(state: AgentState):
     3. **Catalysts**: What specific events will unlock value? Include dates when possible.
     4. **Recommendation**: BUY/SELL/HOLD and Target Price with scenario analysis.
     5. **References**: List the actual data sources used.
+    
+    ## FORMATTING RULES
+    - **Negative Numbers**: ALWAYS use a leading minus sign (e.g., "-$500M", "-$1.2B"). NEVER use parentheses like "($500M)" or "$(500M)".
+    - **Currency**: Standardize on "$" for USD.
+    - **Markdown**: Do not use LaTeX-style math formatting (no `$(...)`). Use standard bold/italics.
     """ 
     
     class ExecutiveSummary(BaseModel):
@@ -844,7 +925,7 @@ def generate_summary(state: AgentState):
         key_catalysts: str
         references: List[str]
         
-    structured_llm = llm.with_structured_output(ExecutiveSummary)
+    structured_llm = get_llm(MODEL_SUMMARY).with_structured_output(ExecutiveSummary)
     
     try:
         summary = structured_llm.invoke([HumanMessage(content=prompt)])

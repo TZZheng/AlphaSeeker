@@ -31,8 +31,9 @@ AlphaSeeker is an autonomous equity research agent that generates CFA-standard i
 | `company_profile.py` | Identity, ownership, institutional holders | `yfinance` |
 | `financials.py` | Income, balance sheet, cash flow (annual + quarterly + TTM + ratios) | `yfinance` |
 | `peers.py` | Data-driven peer discovery and comparison metrics | `yfinance` |
-| `web_search.py` | DDG text search, DDG news search, parallel full-page reading | `duckduckgo-search`, `trafilatura` |
+| `web_search.py` | DDG text search, DDG news search, parallel full-page reading | `ddgs`, `trafilatura` |
 | `sec_filings.py` | SEC EDGAR filing search and text extraction (10-K, 10-Q, 8-K) | SEC EFTS API |
+| `analysis.py` | Analysis utilities | — |
 
 ### Agent Layer (Graph Nodes)
 
@@ -50,6 +51,23 @@ AlphaSeeker is an autonomous equity research agent that generates CFA-standard i
 | `generate_summary` | Synthesizes all sections into investment summary + target price |
 | `verify_content` | Validates report completeness |
 | `save_report` | Writes final Markdown report to `reports/` |
+
+### LLM Manager (`llm_manager.py`)
+
+A centralized model registry with rate-limit resilience:
+
+- **`get_llm(model_name)`** — Returns a configured LangChain `ChatModel` instance, lazy-initialized and cached.
+- **`RateLimitWrapper`** — Wraps Gemini models with automatic 429 retry + model fallback. Uses a Factory Pattern so `with_structured_output` and `bind_tools` bindings are correctly reconstructed when switching models.
+- **Fallback chain** — `gemini-3-flash-preview` → `gemini-2.5-flash` → `gemini-2.5-pro` → `gemini-2.0-flash` → `gemini-exp-1206`.
+- **Provider routing** — Prefix determines provider: `gemini-*` → Google, `kimi-*` → Moonshot AI, `sf/*` → SiliconFlow.
+
+### Intelligent Context Condensation
+
+Replaces hard truncation (`text[:N]`) with LLM-driven condensation (`condense_context`). When text exceeds a character budget, the LLM extracts core facts, numbers, and named entities — preventing information loss at the tail end of long documents. Used in:
+
+- Follow-up query generation (company profile + initial snippets)
+- Data file reading for section generation
+- Investment summary generation
 
 ### Schema Layer
 
@@ -91,12 +109,12 @@ Phase 1: GENERIC SEARCH         Phase 2: LLM FOLLOW-UP         Layer 3: SYNTHESI
 
 1. **Business Strategy** — business model, products, technology, competitive advantage
 2. **Financial Performance** — earnings, backlog, margins, debt, capex, guidance
-3. **Ownership & Governance** — shareholders, NVIDIA stake, insiders, board
-4. **Competitive Landscape** — vs hyperscalers, pricing, benchmarks
+3. **Ownership & Governance** — shareholders, strategic investors, insiders, board
+4. **Competitive Landscape** — vs rivals, pricing, benchmarks
 5. **Risks & Headwinds** — lawsuits, delays, downgrades, customer concentration
 6. **Catalysts & Events** — product launches, partnerships, capacity expansion
 7. **Analyst Sentiment** — price targets, bull/bear cases, short interest
-8. **Industry & Macro** — TAM, GPU demand/supply, power constraints
+8. **Industry & Macro** — TAM, supply/demand, power constraints
 
 ## Report Output
 
@@ -117,38 +135,59 @@ CFA Institute Equity Research standard sections:
 ## Tech Stack
 
 | Component | Technology |
-|-----------|-----------|
+|-----------|------------|
 | Orchestration | LangGraph |
-| LLM | Moonshot AI (`kimi-k2-turbo-preview`) |
+| LLM — Report Writing | Moonshot AI (`kimi-k2.5`) |
+| LLM — Extraction / Condensation | SiliconFlow (`Qwen3-VL-32B-Instruct`) |
+| LLM — Fallback | Google Gemini (5-model fallback chain) |
+| LLM Management | Custom `RateLimitWrapper` + model registry |
 | Schema Validation | Pydantic |
 | Market Data | `yfinance` |
-| Web Research | `duckduckgo-search`, `trafilatura` |
+| Web Research | `ddgs`, `trafilatura` |
 | SEC Filings | SEC EDGAR EFTS API (no key needed) |
 | Visualization | `matplotlib` |
-| Runtime | Python 3.10+, managed by `uv` |
+| Runtime | Python 3.11+, managed by `uv` |
+
+## Model Assignments
+
+Each pipeline step is mapped to a specific LLM. Edit `graph.py` to swap:
+
+| Step | Default Model | Rationale |
+|------|--------------|-----------|
+| Planning | `sf/Qwen/Qwen3-VL-32B-Instruct` | Trivial extraction |
+| Condensation | `sf/Qwen/Qwen3-VL-32B-Instruct` | Summarization |
+| Follow-up Queries | `sf/Qwen/Qwen3-VL-32B-Instruct` | Search query generation |
+| MAP (fact extraction) | `sf/Qwen/Qwen3-VL-32B-Instruct` | Bulk fact extraction |
+| REDUCE (brief synthesis) | `sf/Qwen/Qwen3-VL-32B-Instruct` | Organize facts |
+| Section Writing | `kimi-k2.5` | Professional report quality |
+| Investment Summary | `kimi-k2.5` | Synthesis quality |
 
 ## Project Structure
 
 ```
 AlphaSeeker/
-├── main.py                    # Entry point — interactive CLI
-├── pyproject.toml             # Dependencies (uv)
+├── main.py                        # Entry point — interactive CLI
+├── pyproject.toml                 # Dependencies (uv)
 ├── src/
-│   ├── schemas.py             # Pydantic models (AnalysisPlan, ResearchReport, AgentState)
+│   ├── schemas.py                 # Pydantic models (AnalysisPlan, ResearchReport, AgentState)
+│   ├── llm_manager.py             # Centralized model registry + RateLimitWrapper
 │   ├── agent/
-│   │   └── graph.py           # LangGraph workflow (12 nodes, 50+ query research)
+│   │   └── graph.py               # LangGraph workflow (12 nodes, 50+ query research)
 │   └── tools/
-│       ├── market_data.py     # OHLCV price data fetcher
-│       ├── visualization.py   # Price + volume chart generator
-│       ├── company_profile.py # Company identity + ownership + holders
-│       ├── financials.py      # Annual/quarterly/TTM financials + key ratios
-│       ├── peers.py           # Data-driven peer discovery + comparison
-│       ├── web_search.py      # DDG text/news search + trafilatura page reader
-│       └── sec_filings.py     # SEC EDGAR filing search + text extraction
-├── reports/                   # Generated Markdown reports
-├── charts/                    # Generated price charts
-├── data/                      # Cached CSV data files
+│       ├── market_data.py         # OHLCV price data fetcher
+│       ├── visualization.py       # Price + volume chart generator
+│       ├── company_profile.py     # Company identity + ownership + holders
+│       ├── financials.py          # Annual/quarterly/TTM financials + key ratios
+│       ├── peers.py               # Data-driven peer discovery + comparison
+│       ├── web_search.py          # DDG text/news search + trafilatura page reader
+│       ├── sec_filings.py         # SEC EDGAR filing search + text extraction
+│       └── analysis.py            # Analysis utilities
+├── reports/                       # Generated Markdown reports
+├── charts/                        # Generated price charts (PNG)
+├── data/                          # Cached CSV / Markdown data files
 └── tests/
+    ├── test_schemas.py            # Schema validation tests
+    └── verify_financial_fallback.py  # Financial fallback verification
 ```
 
 ## Quickstart
@@ -158,11 +197,15 @@ AlphaSeeker/
 git clone <repo-url> && cd AlphaSeeker
 uv sync
 
-# 2. Set API key (Moonshot AI)
-echo "OPENAI_API_KEY=your-moonshot-api-key" > .env
+# 2. Set API keys
+cat > .env << 'EOF'
+OPENAI_API_KEY=your-moonshot-api-key
+GOOGLE_API_KEY=your-google-api-key
+SILICONFLOW_API_KEY=your-siliconflow-api-key
+EOF
 
 # 3. Run
 echo "Analyze CRWV" | uv run python main.py
 ```
 
-Output: `reports/CRWV_initiation_report.md` (~60KB, CFA-standard equity research report)
+Output: `reports/CRWV_initiation_report.md` (~68KB, CFA-standard equity research report)

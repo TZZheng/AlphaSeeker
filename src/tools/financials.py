@@ -2,7 +2,8 @@ import yfinance as yf
 import pandas as pd
 import os
 from datetime import datetime
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, List
+from src.tools.web_search import search_web, deep_search
 
 
 class FinancialsError(Exception):
@@ -35,6 +36,13 @@ def fetch_financial_metrics(ticker: str) -> Tuple[str, Dict[str, Any]]:
         info = stock.info
 
         # --- Key Ratios ---
+        # yfinance 404s often result in empty info or missing keys, but no exception.
+        
+        # DEBUG: Print info to see what's actually returned on 404
+        print(f"DEBUG info keys: {list(info.keys())}")
+        print(f"DEBUG marketCap: {info.get('marketCap')}")
+        print(f"DEBUG totalRevenue: {info.get('totalRevenue')}")
+
         pe_ratio = info.get('trailingPE', 'N/A')
         forward_pe = info.get('forwardPE', 'N/A')
         market_cap = info.get('marketCap', 'N/A')
@@ -51,11 +59,18 @@ def fetch_financial_metrics(ticker: str) -> Tuple[str, Dict[str, Any]]:
         operating_cashflow = info.get('operatingCashflow', 'N/A')
         total_revenue = info.get('totalRevenue', 'N/A')
         fiscal_year_end = info.get('lastFiscalYearEnd', 'N/A')
-
         # --- Annual Statements (last 2 years) ---
         income_stmt = stock.income_stmt.iloc[:, :2] if not stock.income_stmt.empty else pd.DataFrame()
         balance_sheet = stock.balance_sheet.iloc[:, :2] if not stock.balance_sheet.empty else pd.DataFrame()
         cash_flow = stock.cashflow.iloc[:, :2] if not stock.cashflow.empty else pd.DataFrame()
+        
+
+        
+        # CRITICAL CHECK:
+        # If we have market data (info) but NO financial statements, it's likely a data provider issue 
+        # (common for recent IPOs). In this case, we MUST trigger the fallback to get actual reports.
+        if income_stmt.empty and balance_sheet.empty:
+            raise FinancialsError("Financial statements are empty (recent IPO?).")
 
         # --- Quarterly Statements (last 4 quarters) ---
         q_income_stmt = stock.quarterly_income_stmt.iloc[:, :4] if not stock.quarterly_income_stmt.empty else pd.DataFrame()
@@ -76,7 +91,7 @@ def fetch_financial_metrics(ticker: str) -> Tuple[str, Dict[str, Any]]:
             if not numeric_cols.empty:
                 ttm_cf_series = numeric_cols.sum(axis=1)
                 ttm_cashflow = ttm_cf_series.to_frame(name="TTM (sum of last 4Q)")
-
+        
         # --- ESG Data ---
         try:
             esg_df = stock.sustainability
@@ -86,7 +101,7 @@ def fetch_financial_metrics(ticker: str) -> Tuple[str, Dict[str, Any]]:
                 esg_data = "ESG data not available."
         except Exception:
             esg_data = "ESG data fetch failed."
-
+        
         # --- Format as Markdown ---
         md = f"# Financial Analysis for {ticker}\n\n"
 
@@ -110,7 +125,7 @@ def fetch_financial_metrics(ticker: str) -> Tuple[str, Dict[str, Any]]:
 
         md += "## ESG Data\n"
         md += f"{esg_data}\n\n"
-
+        
         # --- Annual Statements ---
         md += "## Annual Financial Statements\n"
 
@@ -148,7 +163,7 @@ def fetch_financial_metrics(ticker: str) -> Tuple[str, Dict[str, Any]]:
         if not ttm_cashflow.empty:
             md += "### TTM Cash Flow (Sum of Last 4 Quarters)\n"
             md += ttm_cashflow.to_markdown() + "\n\n"
-
+        
         # --- Save ---
         data_dir = os.path.join(os.getcwd(), "data")
         os.makedirs(data_dir, exist_ok=True)
@@ -174,7 +189,106 @@ def fetch_financial_metrics(ticker: str) -> Tuple[str, Dict[str, Any]]:
 
         return file_path, metadata
 
-    except FinancialsError:
-        raise
+    except FinancialsError as e:
+        print(f"Financials check failed for {ticker} ({e}). Attempting fallback...")
+        return fetch_financials_fallback(ticker)
     except Exception as e:
-        raise FinancialsError(f"Failed to fetch financials for {ticker}. Error: {str(e)}")
+        print(f"yfinance failed for {ticker} ({e}). Attempting fallback to web search...")
+        return fetch_financials_fallback(ticker)
+
+
+def fetch_financials_fallback(ticker: str) -> Tuple[str, Dict[str, Any]]:
+    """
+    Fallback method to find financial data via web search when yfinance fails.
+    Prioritizes "Investor Relations" pages for public companies, then generic estimates.
+    """
+    print(f"Fallback: Searching for financial data for {ticker}...")
+    
+    # Strategy 1: Investor Relations / Official Reports (for public companies like CRWV)
+    ir_queries = [
+        f"{ticker} Investor Relations financial results 2024 2025",
+        f"{ticker} quarterly earnings report 10-Q 10-K",
+        f"{ticker} financial statements revenue net income",
+    ]
+    
+    # Strategy 2: Generic Estimates (for private companies or missing data)
+    generic_queries = [
+        f"{ticker} revenue valuation last funding round",
+        f"{ticker} annual revenue growth rate",
+    ]
+    
+    # Execute IR search first
+    ir_results = deep_search(
+        queries=ir_queries,
+        urls_per_query=2,
+        max_workers=5,
+        max_chars_per_url=6000,
+        search_delay=0.5,
+    )
+    
+    # Check if IR search yielded good results (look for keywords in titles)
+    good_ir_hits = 0
+    for r in ir_results:
+        title_lower = r.get("title", "").lower()
+        if any(x in title_lower for x in ["investor", "report", "earnings", "results", "quarter", "10-k", "10-q"]):
+            good_ir_hits += 1
+            
+    print(f"Fallback: Found {good_ir_hits} high-quality IR results.")
+    
+    # Execute generic search if IR results are weak, or just add them for breadth
+    generic_results = []
+    if good_ir_hits < 3:
+         generic_results = deep_search(
+            queries=generic_queries,
+            urls_per_query=2,
+            max_workers=5,
+            max_chars_per_url=4000,
+            search_delay=0.5,
+        )
+         
+    all_results = ir_results + generic_results
+    
+    if not all_results:
+        raise FinancialsError(f"Fallback search failed to find any financial data for {ticker}")
+
+    # Compile into Markdown
+    md = f"# Financial Analysis for {ticker} (Web Search Fallback)\n\n"
+    md += "> **Note**: Official data via API was unavailable. These are search results from Investor Relations and news sources.\n\n"
+    
+    dt = datetime.now().strftime('%Y-%m-%d')
+    
+    md += "## Financial Search Results\n\n"
+    
+    for r in all_results:
+        title = r.get("title", "No Title")
+        url = r.get("url", "#")
+        # Use full text if available and reasonable length, else snippet
+        content = r.get("full_text")
+        if not content:
+            content = r.get("snippet", "No content available.")
+        
+        # Truncate very long content for the report to avoid massive file
+        if len(content) > 3000:
+            content = content[:3000] + "\n... [truncated]"
+            
+        md += f"### [{title}]({url})\n\n"
+        md += f"{content}\n\n---\n\n"
+
+    # Save
+    data_dir = os.path.join(os.getcwd(), "data")
+    os.makedirs(data_dir, exist_ok=True)
+    filename = f"{ticker}_financials_fallback_{datetime.now().strftime('%Y%m%d')}.md"
+    file_path = os.path.join(data_dir, filename)
+
+    with open(file_path, "w") as f:
+        f.write(md)
+        
+    metadata = {
+        "source": "Web Search (Fallback)",
+        "data_date": dt,
+        "methodology": "Aggregated search results from Investor Relations and News",
+        "is_fallback": True
+    }
+    
+    print(f"Fallback successful: Saved to {file_path}")
+    return file_path, metadata
