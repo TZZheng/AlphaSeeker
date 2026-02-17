@@ -1,8 +1,8 @@
 """
 Peer Analysis Tool — data-driven peer discovery and comparison.
 
-Uses yfinance sector/industry data and market-cap filtering to find
-real comparable companies, rather than relying on LLM hallucination.
+Uses web search and LLM extraction to identify competitors, then validates them
+via yfinance to categorize them into Giants, Peers, and Disruptors.
 """
 
 import yfinance as yf
@@ -10,6 +10,13 @@ import pandas as pd
 import os
 from datetime import datetime
 from typing import List, Tuple, Dict, Any, Optional
+from langchain_core.messages import HumanMessage
+
+from src.tools.web_search import search_web
+from src.llm_manager import get_llm
+
+# Use a cheap/fast model for extraction
+MODEL_PEER_EXTRACTION = "sf/Qwen/Qwen3-14B"  # or similar fast model
 
 
 class PeerAnalysisError(Exception):
@@ -17,12 +24,8 @@ class PeerAnalysisError(Exception):
     pass
 
 
-# --- Well-known sector peer pools ---
-# These are curated lists of liquid, well-known companies per sector/industry.
-# yfinance does not provide a "find peers" API, so we maintain a lookup table
-# of candidates that can be filtered by market-cap proximity.
+# --- Well-known sector peer pools (Fallback only) ---
 INDUSTRY_PEER_CANDIDATES: Dict[str, List[str]] = {
-    # AI / Semiconductors / Data Infrastructure
     "Semiconductors": [
         "NVDA", "AMD", "INTC", "AVGO", "QCOM", "TSM", "MRVL", "MU",
         "LRCX", "KLAC", "AMAT", "ON", "NXPI", "TXN", "ADI",
@@ -47,7 +50,6 @@ INDUSTRY_PEER_CANDIDATES: Dict[str, List[str]] = {
     "Computer Hardware": [
         "AAPL", "DELL", "HPQ", "HPE", "SMCI", "LNVGY",
     ],
-    # Cloud / Hyperscaler-adjacent
     "Cloud Infrastructure": [
         "AMZN", "MSFT", "GOOGL", "ORCL", "IBM", "SNOW", "NET",
     ],
@@ -60,142 +62,282 @@ TECHNOLOGY_FALLBACK = [
 ]
 
 
-def discover_peers(
-    ticker: str,
-    sector: Optional[str] = None,
-    industry: Optional[str] = None,
-    market_cap: Optional[float] = None,
-    max_peers: int = 5,
-) -> List[str]:
+def extract_peers_from_text(text: str) -> List[str]:
     """
-    Discovers comparable peers using sector/industry matching and market-cap filtering.
-
-    Strategy:
-      1. Look up the target's industry in INDUSTRY_PEER_CANDIDATES.
-      2. If no industry match, fall back to TECHNOLOGY_FALLBACK.
-      3. Filter by market-cap proximity (within 0.1× to 10× of target).
-      4. Sort by market-cap closeness and return top N.
+    Extracts potential competitor names/tickers from raw research text using an LLM.
 
     Args:
-        ticker: Target stock ticker.
-        sector: Target company's sector (from yfinance .info).
-        industry: Target company's industry (from yfinance .info).
-        market_cap: Target company's market cap.
-        max_peers: Maximum number of peers to return.
+        text: Raw text containing company mentions.
 
     Returns:
-        List of peer ticker symbols.
+        List of competitor names/tickers (strings).
     """
-    # Determine candidate pool
-    candidates: List[str] = []
+    if not text:
+        return []
 
-    if industry and industry in INDUSTRY_PEER_CANDIDATES:
-        candidates = INDUSTRY_PEER_CANDIDATES[industry]
-    else:
-        # Try partial matching on industry keywords
-        if industry:
-            industry_lower = industry.lower()
-            for key, tickers in INDUSTRY_PEER_CANDIDATES.items():
-                if any(word in key.lower() for word in industry_lower.split()):
-                    candidates.extend(tickers)
-        # Fallback
-        if not candidates:
+    prompt = f"""
+You are an expert financial analyst. 
+Identify the KEY PUBLIC AND PRIVATE COMPETITORS mentioned in the following text.
+Focus on companies that are direct rivals, larger incumbents, or emerging disruptors.
+
+TEXT:
+{text[:15000]}  # Truncate to avoid context limit if necessary
+
+Return ONLY a comma-separated list.
+Rules:
+1. If the company is PUBLIC, provide the VALID TICKER (e.g. MSFT, GOOGL, AMD).
+2. If the company is PRIVATE, provide the full name (e.g. OpenAI, Anthropic).
+3. Do NOT include the target company itself if mentioned.
+
+Example: "MSFT, GOOGL, OpenAI, Anthropic"
+"""
+    try:
+        response = get_llm(MODEL_PEER_EXTRACTION).invoke([HumanMessage(content=prompt)])
+        content = response.content.replace("\n", "").strip()
+        # Clean up list
+        peers = [p.strip() for p in content.split(",") if p.strip()]
+        # Remove empty strings and artifacts
+        cleaned = []
+        for p in peers:
+            clean_p = p.strip(" .-_*")
+            if len(clean_p) > 1:
+                cleaned.append(clean_p)
+        return list(set(cleaned))  # Deduplicate
+    except Exception as e:
+        print(f"Warning: Peer extraction failed: {e}")
+        return []
+
+
+def _find_ticker_from_web(company_name: str) -> Optional[str]:
+    """Attempts to find a ticker for a company name via web search."""
+    try:
+        print(f"  Searching for ticker for '{company_name}'...")
+        # Simple search
+        results = search_web(f"stock ticker symbol for {company_name}", max_results=1)
+        if not results:
+            return None
+        
+        snippet = (results[0].get("body", "") + " " + results[0].get("title", "")).upper()
+        
+        # Heuristic: look for (NASDAQ: XXX) or (NYSE: XXX) or "Ticker: XXX"
+        # Since we don't want to use another LLM call to save time/cost, 
+        # let's ask the cheap LLM to extract it quickly.
+        
+        prompt = f"""
+        Extract the stock ticker for {company_name} from this text, or return "None".
+        Text: {snippet[:500]}
+        Return ONLY the ticker (e.g. MSFT).
+        """
+        response = get_llm(MODEL_PEER_EXTRACTION).invoke([HumanMessage(content=prompt)])
+        ticker = response.content.strip().strip(".").split()[0] # basic cleanup
+        
+        if len(ticker) <= 5 and ticker.isalpha() and ticker != "NONE":
+            print(f"  Found ticker: {ticker}")
+            return ticker
+        return None
+    except Exception as e:
+        print(f"  Ticker search failed: {e}")
+        return None
+
+
+def evaluate_candidates(
+    candidates: List[str],
+    target_ticker: str,
+) -> Dict[str, List[str]]:
+    """
+    Validates candidates via yfinance and categorizes them into Giants, Peers, and Disruptors.
+
+    Args:
+        candidates: List of company names or tickers.
+        target_ticker: The ticker of the subject company.
+
+    Returns:
+        Dict with keys "Giants", "Peers", "Disruptors".
+    """
+    # 1. Get Target Market Cap
+    target_mcap = None
+    try:
+        t_info = yf.Ticker(target_ticker).info
+        target_mcap = t_info.get("marketCap")
+    except Exception:
+        pass
+
+    if not target_mcap:
+        # If we can't get target market cap, just return flat list as "Peers"
+        print(f"Warning: Could not fetch market cap for {target_ticker}")
+        valid_peers = []
+        for c in candidates:
+             if _is_valid_ticker(c):
+                 valid_peers.append(c)
+        return {"Peers": valid_peers[:10], "Giants": [], "Disruptors": []}
+
+    # 2. Categorize
+    giants = []
+    peers = []
+    disruptors = []
+
+    # If no candidates provided, try fallback based on target's industry
+    if not candidates:
+        print("No candidates provided, attempting industry fallback...")
+        industry = t_info.get("industry")
+        if industry and industry in INDUSTRY_PEER_CANDIDATES:
+            candidates = INDUSTRY_PEER_CANDIDATES[industry]
+        else:
             candidates = TECHNOLOGY_FALLBACK
 
-    # Remove the target itself
-    candidates = [c for c in candidates if c.upper() != ticker.upper()]
+    # Deduplicate and remove target
+    unique_candidates = list(set([c.upper() for c in candidates]))
+    
+    # Remove target name variations
+    target_ticker_upper = target_ticker.upper()
+    target_name_parts = t_info.get("shortName", "").upper().split()
+    
+    filtered_candidates = []
+    for c in unique_candidates:
+        if c == target_ticker_upper: continue
+        # Simple name check
+        if any(part in c for part in target_name_parts if len(part) > 3): continue
+        filtered_candidates.append(c)
 
-    # Remove duplicates
-    candidates = list(dict.fromkeys(candidates))
+    print(f"Evaluating {len(filtered_candidates)} peer candidates...")
 
-    if not market_cap or market_cap == "N/A":
-        # Can't filter by market cap; return first N candidates
-        return candidates[:max_peers]
-
-    # Filter and rank by market-cap proximity
-    scored: List[Tuple[str, float, float]] = []  # (ticker, mcap, distance)
-
-    for candidate in candidates:
+    for cand in filtered_candidates:
         try:
-            info = yf.Ticker(candidate).info
-            c_mcap = info.get("marketCap")
-            if c_mcap and c_mcap > 0:
-                ratio = c_mcap / market_cap
-                # Accept peers within 0.05x to 20x market cap
-                if 0.05 <= ratio <= 20:
-                    distance = abs(1.0 - ratio)
-                    scored.append((candidate, c_mcap, distance))
-        except Exception:
-            continue
+            # Check if it's a known private co or just a weird name
+            if "PRIVATE" in cand:
+                 disruptors.append(cand)
+                 continue
 
-    # Sort by closeness to target market cap
-    scored.sort(key=lambda x: x[2])
+            # Try as ticker
+            stock = yf.Ticker(cand)
+            info = stock.info
+            mcap = info.get("marketCap")
+            
+            # If valid ticker found
+            if mcap and mcap > 0:
+                ratio = mcap / target_mcap
+                if ratio > 5.0:
+                    giants.append(cand)
+                elif ratio < 0.1:
+                    disruptors.append(cand) 
+                else:
+                    peers.append(cand)
+                continue
 
-    return [t[0] for t in scored[:max_peers]]
+            # If failed, it might be a name ("Microsoft")
+            # Try to resolve to ticker
+            resolved_ticker = None
+            if len(cand) > 5 or " " in cand:
+                resolved_ticker = _find_ticker_from_web(cand)
+            
+            if resolved_ticker:
+                # Retry with resolved ticker
+                stock = yf.Ticker(resolved_ticker)
+                info = stock.info
+                mcap = info.get("marketCap")
+                if mcap and mcap > 0:
+                    cand = resolved_ticker # Use the ticker
+                    ratio = mcap / target_mcap
+                    if ratio > 5.0:
+                        giants.append(cand)
+                    elif ratio < 0.1:
+                        disruptors.append(cand) 
+                    else:
+                        peers.append(cand)
+                    continue
+
+            # If still no valid ticker, assume private disruptor
+            if len(cand) > 3: # Ignore very short garbage
+                disruptors.append(f"{cand.title()} (Private)")
+
+        except Exception as e:
+             # print(f"  Error checking {cand}: {e}")
+             if len(cand) > 3:
+                disruptors.append(f"{cand.title()} (Private)")
+
+    return {
+        "Giants": giants[:3],      # Top 3 Giants
+        "Peers": peers[:5],        # Top 5 Direct Peers
+        "Disruptors": disruptors[:5] # Top 5 Disruptors/Startups
+    }
+
+
+def _is_valid_ticker(ticker: str) -> bool:
+    try:
+        info = yf.Ticker(ticker).info
+        return "marketCap" in info
+    except:
+        return False
 
 
 def fetch_peer_metrics(
-    tickers: List[str],
+    categorized_peers: Dict[str, List[str]],
     target_ticker: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     """
-    Fetches comparative metrics for a list of tickers.
-
-    Collects more data points than before: revenue, margins, EV/EBITDA,
-    revenue growth, FCF — not just price and P/E.
+    Fetches comparative metrics for categorized peers.
 
     Args:
-        tickers: List of stock symbols (e.g., ['AAPL', 'MSFT', 'GOOGL']).
-        target_ticker: The primary ticker being analyzed (highlighted in output).
+        categorized_peers: Dict with "Giants", "Peers", "Disruptors".
+        target_ticker: The primary ticker being analyzed.
 
     Returns:
         Tuple of (absolute path to saved Markdown file, metadata dict).
-
-    Raises:
-        PeerAnalysisError: If no data could be fetched.
     """
-    if not tickers:
-        raise PeerAnalysisError("No tickers provided for peer analysis.")
-
     stats: List[Dict[str, Any]] = []
+    
+    # Flatten list but keep track of category
+    all_items = []
+    for cat, ticker_list in categorized_peers.items():
+        for t in ticker_list:
+            all_items.append((t, cat))
+    
+    if target_ticker:
+         # Prepend target
+         all_items.insert(0, (target_ticker, "Target"))
 
-    for ticker in tickers:
+    if not all_items:
+         raise PeerAnalysisError("No peers to fetch metrics for.")
+
+    for ticker_raw, category in all_items:
+        ticker = ticker_raw.split(" (Private)")[0] # Clean up private names for display
+        is_private = "(Private)" in ticker_raw
+
         try:
+            if is_private:
+                # Private company -> Minimal info
+                stats.append({
+                    "Ticker": "Private",
+                    "Company": ticker,
+                    "Type": category,
+                    "Price": "N/A",
+                    "Market Cap": "N/A",
+                    "P/E (Fwd)": "N/A",
+                    "Rev Growth": "N/A",
+                    "Ev/EBITDA": "N/A",
+                    "Gross Margin": "N/A",
+                })
+                continue
+
+            # Public company
             stock = yf.Ticker(ticker)
             info = stock.info
 
-            # 1-year performance
-            hist = stock.history(period="1y")
-            if not hist.empty:
-                start_price = hist['Close'].iloc[0]
-                end_price = hist['Close'].iloc[-1]
-                perf_1y = ((end_price - start_price) / start_price) * 100
-            else:
-                perf_1y = None
-
             mcap = info.get('marketCap')
-            revenue = info.get('totalRevenue')
-            ev = info.get('enterpriseValue')
-            ev_ebitda = info.get('enterpriseToEbitda')
+            # Skip if really broken
+            if not mcap and category != "Target": 
+                 continue
 
             stats.append({
                 "Ticker": ticker,
                 "Company": info.get("shortName", ticker),
-                "Sector": info.get('sector', 'N/A'),
-                "Industry": info.get('industry', 'N/A'),
+                "Type": category,
                 "Price": info.get('currentPrice', info.get('regularMarketPrice', 'N/A')),
                 "Market Cap": _fmt(mcap),
-                "EV": _fmt(ev),
-                "1y Change (%)": f"{perf_1y:.1f}" if perf_1y is not None else "N/A",
-                "P/E (Trailing)": _round(info.get('trailingPE')),
-                "P/E (Forward)": _round(info.get('forwardPE')),
-                "EV/EBITDA": _round(ev_ebitda),
+                "P/E (Fwd)": _round(info.get('forwardPE')),
                 "Rev Growth": _pct(info.get('revenueGrowth')),
+                "Ev/EBITDA": _round(info.get('enterpriseToEbitda')),
                 "Gross Margin": _pct(info.get('grossMargins')),
-                "Op Margin": _pct(info.get('operatingMargins')),
-                "Revenue (TTM)": _fmt(revenue),
-                "FCF": _fmt(info.get('freeCashflow')),
-                "D/E": _round(info.get('debtToEquity')),
             })
 
         except Exception as e:
@@ -203,7 +345,7 @@ def fetch_peer_metrics(
             continue
 
     if not stats:
-        raise PeerAnalysisError("Failed to fetch data for any of the provided tickers.")
+        raise PeerAnalysisError("Failed to fetch data for any tickers.")
 
     df = pd.DataFrame(stats)
 
@@ -225,11 +367,8 @@ def fetch_peer_metrics(
 
     metadata: Dict[str, Any] = {
         "source": "Yahoo Finance (Market Data + Info)",
-        "peers_analyzed": [s["Ticker"] for s in stats],
-        "methodology": {
-            "1y Change (%)": "((Last Close - First Close) / First Close) * 100 over 1y period",
-            "Peer Selection": "Data-driven: sector/industry match + market-cap proximity filter",
-        },
+        "peers_analyzed": [s["Ticker"] for s in stats if s["Ticker"] != "Private"],
+        "private_competitors": [s["Company"] for s in stats if s["Ticker"] == "Private"],
     }
 
     return file_path, metadata
@@ -271,4 +410,3 @@ def _pct(value: Any) -> str:
         return f"{float(value) * 100:.1f}%"
     except (ValueError, TypeError):
         return str(value)
-

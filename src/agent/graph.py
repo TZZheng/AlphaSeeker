@@ -3,7 +3,7 @@ AlphaSeeker LangGraph workflow — Deep Research Edition.
 
 Flow:
   planner → fetch_data → generate_chart → fetch_company_profile
-    → fetch_financials → analyze_peers → research_qualitative (50+ queries, deep read)
+    → fetch_financials → research_qualitative (50+ queries, deep read)
     → synthesize_research (map-reduce LLM extraction)
     → generate_section (loop 6 times) → generate_summary → verify → save → END
 """
@@ -23,7 +23,7 @@ from src.schemas import AgentState, AnalysisPlan, ResearchReport, ResearchSectio
 from src.tools.market_data import fetch_historical_data
 from src.tools.visualization import plot_price_history
 from src.tools.financials import fetch_financial_metrics
-from src.tools.peers import fetch_peer_metrics, discover_peers
+from src.tools.peers import fetch_peer_metrics, evaluate_candidates, extract_peers_from_text
 from src.tools.web_search import search_web, search_news, deep_search
 from src.tools.sec_filings import search_and_read_filings
 from src.tools.company_profile import fetch_company_profile
@@ -47,6 +47,7 @@ SECTION_ORDER = [
     "financial_analysis",
     "valuation_analysis",
     "investment_risks",
+    "competitor_analysis",
     "esg_analysis"
 ]
 
@@ -84,6 +85,12 @@ SECTION_PROMPTS = {
         "Analyze **Environmental** (Carbon/Waste/Energy consumption), **Social** (Labor/Safety), and "
         "**Governance** (Board/Alignment/Insider activity) factors. "
         "Include data center power consumption, cooling infrastructure, and sustainability initiatives."
+    ),
+    "competitor_analysis": (
+        "Provide a detailed **Competitor Analysis**. "
+        "Use the specific peer data provided to compare the target against 'Giants' (Review relative size/metrics) "
+        "and 'Disruptors' (Technology/Innovation threats). "
+        "Include a comparative table if data is available."
     ),
 }
 
@@ -281,6 +288,7 @@ def generate_followup_queries(
     industry: str,
     profile_text: str,
     initial_snippets: str,
+    categorized_peers: Dict[str, List[str]] = {},
 ) -> List[str]:
     """
     Phase 2: Uses the LLM to generate company-specific deep-dive queries
@@ -290,6 +298,8 @@ def generate_followup_queries(
     and initial search snippets, then produces targeted follow-up queries
     that a human analyst would ask (e.g., "NVIDIA equity stake in CoreWeave"
     for CRWV, or "Ozempic patent cliff timeline" for Novo Nordisk).
+    
+    Now also includes peer-specific comparative queries.
 
     Args:
         ticker: Stock ticker symbol.
@@ -298,6 +308,7 @@ def generate_followup_queries(
         industry: GICS industry.
         profile_text: Company profile markdown text.
         initial_snippets: Concatenated snippets from Phase 1 search results.
+        categorized_peers: Dict of Giants/Peers/Disruptors.
 
     Returns:
         List of 15-25 targeted follow-up search queries.
@@ -327,6 +338,11 @@ You have already gathered the following information:
 ## Initial Research Snippets
 {condensed_snippets}
 
+## Identified Peers
+Giants: {', '.join(categorized_peers.get('Giants', []))}
+Direct Peers: {', '.join(categorized_peers.get('Peers', []))}
+Disruptors/Private: {', '.join(categorized_peers.get('Disruptors', []))}
+
 ---
 
 Based on what you've learned, generate 15-25 SPECIFIC follow-up search queries to find
@@ -338,7 +354,7 @@ information that a professional equity research report would need. Focus on:
 4. **Known risks and controversies** — name actual lawsuits, regulatory actions, analyst downgrades
 5. **Industry-specific metrics** — use actual industry terminology and KPIs
 6. **Recent M&A and partnerships** — name actual acquisition targets, deal values
-7. **Competitive benchmarking** — name actual competitors for head-to-head comparison
+7. **Competitive Benchmarking** — Compare {ticker} vs SPECIFIC peers (e.g. "vs {categorized_peers.get('Giants', ['Giant'])[0]} margins", "vs {categorized_peers.get('Disruptors', ['Startup'])[0]} technology")
 
 IMPORTANT RULES:
 - Every query should contain the company name or ticker
@@ -346,6 +362,7 @@ IMPORTANT RULES:
 - Do NOT use generic queries — those were already done in Phase 1
 - Target information gaps — what's missing from the snippets above?
 - Include 3-4 queries specifically about BEAR CASE / risks / what could go wrong
+- Include 3-4 queries comparing against specific Giants or Disruptors
 
 Output ONLY the queries, one per line, no numbering or formatting.
 """
@@ -448,42 +465,7 @@ def fetch_financials(state: AgentState):
         return {"financials_path": None, "error": None}
 
 
-def analyze_peers(state: AgentState):
-    """Discovers peers using data-driven approach, then fetches comparison metrics."""
-    if state.get("error"): return state
 
-    ticker = state["ticker"]
-    metadata_store = state.get("source_metadata", {})
-    profile_meta = metadata_store.get("company_profile", {})
-
-    sector = profile_meta.get("sector")
-    industry = profile_meta.get("industry")
-    market_cap = profile_meta.get("market_cap")
-
-    try:
-        discovered_peers = discover_peers(
-            ticker=ticker,
-            sector=sector,
-            industry=industry,
-            market_cap=market_cap,
-            max_peers=5,
-        )
-        print(f"Discovered peers for {ticker}: {discovered_peers}")
-
-        if not discovered_peers:
-            print("Warning: No peers discovered, skipping peer analysis.")
-            return {"peer_data_path": None, "error": None}
-
-        all_tickers = [ticker] + discovered_peers
-        file_path, metadata = fetch_peer_metrics(all_tickers, target_ticker=ticker)
-
-        new_metadata = metadata_store.copy()
-        new_metadata["peers"] = metadata
-        return {"peer_data_path": file_path, "source_metadata": new_metadata, "error": None}
-
-    except Exception as e:
-        print(f"Warning: Peer analysis failed: {e}")
-        return {"peer_data_path": None, "error": None}
 
 
 def research_qualitative(state: AgentState):
@@ -593,6 +575,8 @@ def research_qualitative(state: AgentState):
     # ============================
     # PHASE 2: LLM follow-up queries (Parallelized)
     # ============================
+    
+    # Pass categorized peers to query generator for comparison queries
     followup_queries = generate_followup_queries(
         ticker=ticker,
         company_name=company_name,
@@ -600,6 +584,7 @@ def research_qualitative(state: AgentState):
         industry=industry_hint,
         profile_text=profile_text,
         initial_snippets=phase1_snippets,
+        categorized_peers={}, # Peer analysis now done later in flow
     )
 
     followup_results = []
@@ -673,7 +658,12 @@ def research_qualitative(state: AgentState):
           f"{len(sec_results)} SEC filings, {len(followup_queries)} follow-up queries")
     print(f"Total raw research text: {total_chars:,} characters (~{total_chars // 4:,} tokens)")
 
-    return {"research_data": research_data, "error": None}
+    return {
+        "research_data": research_data, 
+        "error": None,
+        "peer_data_path": peer_data_path,
+        "source_metadata": new_metadata
+    }
 
 
 def synthesize_research(state: AgentState):
@@ -786,7 +776,153 @@ EXTRACTED FACTS:
 
     print(f"Synthesis REDUCE complete: {sum(len(v) for v in research_brief.values()):,} chars total brief")
 
-    return {"research_brief": research_brief, "error": None}
+    return {"research_brief": research_brief, "extracted_facts": all_facts, "error": None}
+
+
+def review_and_expand_peers(state: AgentState):
+    """
+    Iterative Peer Analysis Node.
+    
+    1. Infer potential peers from the 'extracted_facts' (synthesis output).
+    2. Validate and categorize them via `evaluate_candidates`.
+    3. Generate specific comparison queries for the valid peers.
+    4. Run a targeted deep search.
+    5. Generate a 'competitor_analysis' brief for the final report.
+    """
+    if state.get("error"): return state
+    
+    ticker = state["ticker"]
+    extracted_facts = state.get("extracted_facts", "")
+    
+    if not extracted_facts:
+        print("Warning: No facts available for peer inference.")
+        return state
+
+    print("--- Reviewing and Expanding Peers ---")
+
+    # 1. Infer Peers
+    extracted_candidates = extract_peers_from_text(extracted_facts[:25000]) # Pass synthesized context
+    print(f"Inferred candidates from Key Facts: {extracted_candidates}")
+    
+    # 2. Validate/Categorize
+    categorized_peers = evaluate_candidates(extracted_candidates, ticker)
+    print(f"Validated Categories: {categorized_peers}")
+    
+    # 3. Targeted Queries
+    # We want specific comparisons now that we know who the real peers are
+    peer_queries = []
+    
+    # Giants: Compare scale/margins
+    for p in categorized_peers.get("Giants", []):
+         peer_queries.append(f"{ticker} vs {p} revenue growth margin comparison")
+         peer_queries.append(f"{ticker} competitive advantage vs {p}")
+         
+    # Peers: Compare features/pricing
+    for p in categorized_peers.get("Peers", []):
+         peer_queries.append(f"{ticker} vs {p} product feature comparison")
+         peer_queries.append(f"{ticker} market share vs {p}")
+
+    # Disruptors: Assess threat
+    for p in categorized_peers.get("Disruptors", []):
+         clean_name = p.replace(" (Private)", "")
+         peer_queries.append(f"{ticker} vs {clean_name} technology comparison")
+         peer_queries.append(f"{clean_name} funding valuation revenue vs {ticker}")
+
+    print(f"Generated {len(peer_queries)} targeted peer queries.")
+    
+    # 4. Run Search & Extract
+    # We use a Map-Reduce approach for the peer research too:
+    # Search -> Extract Facts -> Synthesize Brief
+    peer_research_facts = ""
+    
+    if peer_queries:
+        try:
+            print(f"Running peer research with {len(peer_queries)} queries...")
+            results = deep_search(
+                queries=peer_queries[:12], # Limit to save time
+                urls_per_query=2,
+                max_workers=4,
+                use_news=False
+            )
+            
+            # Consolidate raw text
+            raw_peer_text = ""
+            for r in results:
+                raw_peer_text += f"### {r['title']}\n{r.get('snippet', '')}\n\n"
+            
+            # Extract Key Facts (The "Extract" Step)
+            if raw_peer_text:
+                extraction_prompt = f"""
+                You are analyzing competitors for {ticker}.
+                Extract key comparative facts from the search results below.
+                
+                Focus on:
+                - Specific revenue, growth, and margin comparisons vs {ticker}.
+                - Product feature differences and benchmarks.
+                - Market share data.
+                - Specific threats from disruptors (technology claims, funding).
+                
+                RAW SEARCH RESULTS:
+                {raw_peer_text[:25000]}
+                """
+                try:
+                    extract_response = get_llm(MODEL_MAP).invoke([HumanMessage(content=extraction_prompt)])
+                    peer_research_facts = extract_response.content
+                    print(f"Extracted {len(peer_research_facts)} chars of peer facts.")
+                except Exception as e:
+                    print(f"Peer fact extraction failed: {e}")
+                    peer_research_facts = raw_peer_text[:5000] # Fallback to raw text
+
+        except Exception as e:
+            print(f"Peer search failed: {e}")
+
+    # 5. Summarize into Brief
+    # We combine the inferred facts + NEW extracted peer facts to write the brief
+    competitor_brief_prompt = f"""
+    You are writing the **Competitor Analysis** brief for {ticker}.
+    
+    Use the following data:
+    
+    ## Validated Peers
+    Giants: {categorized_peers.get('Giants')}
+    Direct Peers: {categorized_peers.get('Peers')}
+    Disruptors: {categorized_peers.get('Disruptors')}
+    
+    ## Extracted Peer Research (New Findings)
+    {peer_research_facts}
+    
+    ## Context from Main Research
+    {extracted_facts[:10000]}
+    
+    Requirements:
+    - Compare {ticker} against its Giants (David vs Goliath analysis).
+    - Compare {ticker} against Direct Peers (Head-to-head).
+    - Analyze threats from Disruptors/Startups.
+    - Output a structured brief with headers.
+    - CITE specific numbers and metrics where available.
+    """
+    
+    new_briefs = state.get("research_brief", {}).copy()
+    try:
+        response = get_llm(MODEL_REDUCE).invoke([HumanMessage(content=competitor_brief_prompt)])
+        new_briefs["competitor_analysis"] = response.content
+    except Exception as e:
+        print(f"Competitor brief generation failed: {e}")
+        new_briefs["competitor_analysis"] = "Analysis failed."
+
+    # 6. Fetch Metrics (for the table in the report)
+    new_metadata = state.get("source_metadata", {}).copy()
+    try:
+        path, metadata = fetch_peer_metrics(categorized_peers, target_ticker=ticker)
+        new_metadata["peers"] = metadata
+    except Exception:
+        pass
+
+    return {
+        "categorized_peers": categorized_peers,
+        "research_brief": new_briefs,
+        "source_metadata": new_metadata
+    }
 
 
 def generate_section(state: AgentState):
@@ -1054,9 +1190,9 @@ workflow.add_node("fetch_data", fetch_data)
 workflow.add_node("generate_chart", generate_chart)
 workflow.add_node("fetch_company_profile", fetch_company_profile_node)
 workflow.add_node("fetch_financials", fetch_financials)
-workflow.add_node("analyze_peers", analyze_peers)
 workflow.add_node("research_qualitative", research_qualitative)
 workflow.add_node("synthesize_research", synthesize_research)
+workflow.add_node("review_and_expand_peers", review_and_expand_peers) # NEW
 workflow.add_node("generate_section", generate_section)
 workflow.add_node("generate_summary", generate_summary)
 workflow.add_node("verify_content", verify_content)
@@ -1068,12 +1204,12 @@ workflow.add_conditional_edges("planner", check_error, {"continue": "fetch_data"
 workflow.add_conditional_edges("fetch_data", check_error, {"continue": "generate_chart", "end": END})
 workflow.add_conditional_edges("generate_chart", check_error, {"continue": "fetch_company_profile", "end": END})
 
-# Company profile → financials → peers → deep research → synthesis → section loop
+# Company profile → financials → deep research (with integrated peer analysis) → synthesis → section loop
 workflow.add_edge("fetch_company_profile", "fetch_financials")
-workflow.add_edge("fetch_financials", "analyze_peers")
-workflow.add_edge("analyze_peers", "research_qualitative")
+workflow.add_edge("fetch_financials", "research_qualitative")
 workflow.add_edge("research_qualitative", "synthesize_research")
-workflow.add_edge("synthesize_research", "generate_section")
+workflow.add_edge("synthesize_research", "review_and_expand_peers")
+workflow.add_edge("review_and_expand_peers", "generate_section")
 
 # The Section Loop
 workflow.add_conditional_edges(

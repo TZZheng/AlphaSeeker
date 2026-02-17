@@ -42,6 +42,7 @@ class ResearchReport(BaseModel):
     valuation_analysis: ResearchSection = Field(..., description="Relative + Intrinsic/Absolute Valuation")
     investment_risks: ResearchSection = Field(..., description="Operational, Regulatory, Financial Risks")
     esg_analysis: ResearchSection = Field(..., description="Environmental, Social, Governance factors")
+    competitor_analysis: ResearchSection = Field(..., description="Deep dive into key competitors, giants, and disruptors.")
     
     references: List[str] = Field(..., description="List of data sources used.")
 
@@ -58,10 +59,12 @@ class AgentState(TypedDict):
     chart_path: Optional[str]
     financials_path: Optional[str]
     peer_data_path: Optional[str]
+    categorized_peers: Optional[Dict[str, List[str]]] # {"Giants": [...], "Peers": [...], "Disruptors": [...]}
     company_profile_path: Optional[str]
     
     # Qualitative Data
     research_data: Optional[Dict[str, str]] # {"annual_report_risks": "...", "industry_trends": "..."}
+    extracted_facts: Optional[str] # Combined facts from map-reduce synthesis for inference
     research_brief: Optional[Dict[str, str]] # LLM-synthesized brief per section topic
     
     plan: Optional[AnalysisPlan]
