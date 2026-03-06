@@ -658,10 +658,10 @@ def research_qualitative(state: AgentState):
           f"{len(sec_results)} SEC filings, {len(followup_queries)} follow-up queries")
     print(f"Total raw research text: {total_chars:,} characters (~{total_chars // 4:,} tokens)")
 
+    new_metadata = state.get("source_metadata", {}).copy()
     return {
         "research_data": research_data, 
         "error": None,
-        "peer_data_path": peer_data_path,
         "source_metadata": new_metadata
     }
 
@@ -912,8 +912,9 @@ def review_and_expand_peers(state: AgentState):
 
     # 6. Fetch Metrics (for the table in the report)
     new_metadata = state.get("source_metadata", {}).copy()
+    peer_data_path = None
     try:
-        path, metadata = fetch_peer_metrics(categorized_peers, target_ticker=ticker)
+        peer_data_path, metadata = fetch_peer_metrics(categorized_peers, target_ticker=ticker)
         new_metadata["peers"] = metadata
     except Exception:
         pass
@@ -921,7 +922,8 @@ def review_and_expand_peers(state: AgentState):
     return {
         "categorized_peers": categorized_peers,
         "research_brief": new_briefs,
-        "source_metadata": new_metadata
+        "source_metadata": new_metadata,
+        "peer_data_path": peer_data_path
     }
 
 
@@ -1079,6 +1081,7 @@ def generate_summary(state: AgentState):
             valuation_analysis=sections["valuation_analysis"],
             investment_risks=sections["investment_risks"],
             esg_analysis=sections["esg_analysis"],
+            competitor_analysis=sections["competitor_analysis"],
             references=summary.references
         )
         

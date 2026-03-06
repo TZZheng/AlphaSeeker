@@ -21,3 +21,7 @@ trigger: always_on
 - Use docstrings for all functions.
 - No loose scripts; use modular design.
 - Clean up test codes after verification.
+- update README.md to record the update of the project
+
+## Other standards
+- If I prohibit you from doing something, write a knowledge base about that.
