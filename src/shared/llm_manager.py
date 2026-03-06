@@ -9,7 +9,7 @@ To add a new provider, add an ``elif`` branch in ``_build_model``.
 
 Usage::
 
-    from src.llm_manager import get_llm
+    from src.shared.llm_manager import get_llm
 
     llm = get_llm("gemini-3-flash-preview")   # extraction tasks
     llm = get_llm("kimi-k2.5")                # writing tasks
@@ -241,7 +241,7 @@ def _build_model(model_name: str) -> "BaseChatModel":
     else:
         raise ValueError(
             f"Unknown model '{model_name}'. "
-            "Add a builder branch in src/llm_manager.py."
+            "Add a builder branch in src/shared/llm_manager.py."
         )
 
 

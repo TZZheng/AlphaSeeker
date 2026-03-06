@@ -19,15 +19,15 @@ from langgraph.graph import StateGraph, START, END
 from pydantic import BaseModel, Field
 
 # Import our schema and tools
-from src.schemas import AgentState, AnalysisPlan, ResearchReport, ResearchSection
-from src.tools.market_data import fetch_historical_data
-from src.tools.visualization import plot_price_history
-from src.tools.financials import fetch_financial_metrics
-from src.tools.peers import fetch_peer_metrics, evaluate_candidates, extract_peers_from_text
-from src.tools.web_search import search_web, search_news, deep_search
-from src.tools.sec_filings import search_and_read_filings
-from src.tools.company_profile import fetch_company_profile
-from src.llm_manager import get_llm
+from src.agents.equity.schemas import AgentState, AnalysisPlan, ResearchReport, ResearchSection
+from src.agents.equity.tools.market_data import fetch_historical_data
+from src.agents.equity.tools.visualization import plot_price_history
+from src.agents.equity.tools.financials import fetch_financial_metrics
+from src.agents.equity.tools.peers import fetch_peer_metrics, evaluate_candidates, extract_peers_from_text
+from src.agents.equity.tools.web_search import search_web, search_news, deep_search
+from src.agents.equity.tools.sec_filings import search_and_read_filings
+from src.agents.equity.tools.company_profile import fetch_company_profile
+from src.shared.llm_manager import get_llm
 
 # --- Model Assignments ---
 # Change any of these to swap a step to a different model.

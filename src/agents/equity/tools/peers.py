@@ -12,8 +12,8 @@ from datetime import datetime
 from typing import List, Tuple, Dict, Any, Optional
 from langchain_core.messages import HumanMessage
 
-from src.tools.web_search import search_web
-from src.llm_manager import get_llm
+from src.agents.equity.tools.web_search import search_web
+from src.shared.llm_manager import get_llm
 
 # Use a cheap/fast model for extraction
 MODEL_PEER_EXTRACTION = "sf/Qwen/Qwen3-14B"  # or similar fast model

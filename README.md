@@ -48,3 +48,97 @@ graph TD
 - **Focus:** Physical assets like Crude Oil, Gold, Copper, Agriculture.
 - **Data Sources:** EIA (Energy Information Administration) inventory reports, CFTC Commitments of Traders (COT), futures curve data (contango/backwardation).
 - **Output:** Supply/demand imbalances and price trend analysis.
+
+## Project Structure
+
+The folder layout mirrors the Supervisor + Sub-Agents architecture. Each sub-agent is a fully self-contained package. Shared infrastructure lives in `src/shared/`.
+
+```
+AlphaSeeker/
+│
+├── main.py                          # Entry point — CLI that routes user prompt to Supervisor
+├── pyproject.toml                   # Project dependencies (managed by uv)
+│
+├── docs/
+│   ├── equity_agent.md              # Deep-dive documentation for the Equity Sub-Agent
+│   ├── macro_agent.md               # (Planned) Documentation for the Macro Sub-Agent
+│   └── commodity_agent.md           # (Planned) Documentation for the Commodity Sub-Agent
+│
+├── src/
+│   │
+│   ├── supervisor/                  # Top-level orchestrator — routes and synthesizes
+│   │   ├── __init__.py
+│   │   ├── graph.py                 # LangGraph graph: intent router → sub-agents → synthesizer
+│   │   ├── router.py                # Intent classification: maps prompt → EntityType enum
+│   │   └── synthesizer.py           # LLM synthesis node: merges multi-agent outputs
+│   │
+│   ├── agents/                      # One sub-package per specialized sub-agent
+│   │   │
+│   │   ├── equity/                  # Sub-Agent 1: Equity Research (active)
+│   │   │   ├── __init__.py
+│   │   │   ├── graph.py             # LangGraph graph: 12-node equity research pipeline
+│   │   │   ├── nodes.py             # All node functions (planner, fetch, research, generate, etc.)
+│   │   │   ├── schemas.py           # Equity-specific Pydantic models (AnalysisPlan, ResearchReport)
+│   │   │   └── tools/
+│   │   │       ├── __init__.py
+│   │   │       ├── market_data.py   # OHLCV price history via yfinance
+│   │   │       ├── company_profile.py # Company identity, ownership, institutional holders
+│   │   │       ├── financials.py    # Income, balance sheet, cash flow, TTM, key ratios
+│   │   │       ├── peers.py         # Peer discovery and comparison table
+│   │   │       ├── sec_filings.py   # SEC EDGAR: 10-K, 10-Q, 8-K text extraction
+│   │   │       ├── web_search.py    # DDG text/news search + full-page reading (trafilatura)
+│   │   │       ├── visualization.py # Price + volume chart generator (matplotlib)
+│   │   │       └── analysis.py      # Financial ratio and analysis utilities
+│   │   │
+│   │   ├── macro/                   # Sub-Agent 2: Macro & Nation (planned)
+│   │   │   ├── __init__.py
+│   │   │   ├── graph.py             # LangGraph graph for macro research pipeline
+│   │   │   ├── nodes.py             # Node functions (fetch indicators, write macro brief)
+│   │   │   ├── schemas.py           # Macro-specific Pydantic models (MacroPlan, MacroReport)
+│   │   │   └── tools/
+│   │   │       ├── __init__.py
+│   │   │       ├── fred.py          # FRED API: interest rates, CPI, GDP, employment data
+│   │   │       ├── world_bank.py    # World Bank API: cross-country economic indicators
+│   │   │       └── web_search.py    # Macro-specific web search wrapper
+│   │   │
+│   │   └── commodity/               # Sub-Agent 3: Commodity (planned)
+│   │       ├── __init__.py
+│   │       ├── graph.py             # LangGraph graph for commodity research pipeline
+│   │       ├── nodes.py             # Node functions (fetch supply/demand, write report)
+│   │       ├── schemas.py           # Commodity-specific Pydantic models (CommodityReport)
+│   │       └── tools/
+│   │           ├── __init__.py
+│   │           ├── eia.py           # EIA API: oil and gas inventory reports
+│   │           ├── cftc.py          # CFTC COT reports: speculative long/short positioning
+│   │           ├── futures.py       # Futures curve data (contango / backwardation)
+│   │           └── web_search.py    # Commodity-specific web search wrapper
+│   │
+│   └── shared/                      # Infrastructure shared across all agents
+│       ├── __init__.py
+│       ├── llm_manager.py           # LLM registry, RateLimitWrapper, and model fallback chain
+│       ├── schemas.py               # Cross-agent Pydantic models: SubAgentRequest, SubAgentResponse
+│       └── web_search.py            # Base web search utils (DDG + trafilatura page reader)
+│
+├── reports/                         # Generated Markdown research reports (output)
+├── charts/                          # Generated price charts PNG (output)
+├── data/                            # Cached CSV and Markdown data files (runtime cache)
+│
+└── tests/
+    ├── test_supervisor.py           # Tests for intent routing and final synthesis
+    ├── agents/
+    │   ├── test_equity_agent.py     # Tests for the equity research pipeline
+    │   ├── test_macro_agent.py      # (Planned) Tests for the macro pipeline
+    │   └── test_commodity_agent.py  # (Planned) Tests for the commodity pipeline
+    └── shared/
+        ├── test_llm_manager.py      # Tests for LLM fallback and rate-limit handling
+        └── test_schemas.py          # Pydantic model validation tests
+```
+
+### Key Design Principles
+
+| Principle | Implementation |
+|-----------|----------------|
+| **Isolation** | Each sub-agent in `agents/*/` owns its own graph, nodes, schemas, and tools. No cross-agent imports. |
+| **Shared Infrastructure** | `src/shared/` holds code used by all agents: LLM manager, base web search, and cross-agent schemas. |
+| **Uniform Interface** | All sub-agents accept `SubAgentRequest` and return `SubAgentResponse` (defined in `shared/schemas.py`), so the Supervisor can call any agent identically. |
+| **Independent Extensibility** | Adding a new sub-agent means creating a new folder `agents/<domain>/` without modifying any existing agent. |

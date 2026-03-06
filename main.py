@@ -10,7 +10,7 @@ from langchain_core.messages import HumanMessage
 # Ensure src is in python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from src.agent.graph import app
+from src.agents.equity.graph import app
 
 def main():
     if not os.getenv("OPENAI_API_KEY"):
