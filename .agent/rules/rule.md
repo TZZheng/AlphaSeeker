@@ -22,6 +22,6 @@ trigger: always_on
 - No loose scripts; use modular design.
 - Clean up test codes after verification.
 - update README.md to record the update of the project
-
+- look for TODO.md to find non-finished actionable items, and tick the item when finish one.
 ## Other standards
 - If I prohibit you from doing something, write a knowledge base about that.

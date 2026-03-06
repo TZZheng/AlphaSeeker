@@ -1,211 +1,50 @@
-# AlphaSeeker: AI Equity Research Agent
+# AlphaSeeker: Multi-Agent Quantitative Research System
 
-AlphaSeeker is an autonomous equity research agent that generates CFA-standard initiation reports. It uses LLMs for reasoning and synthesis, while strictly executing Python code for data retrieval — ensuring zero hallucination on financial figures.
+## Core Vision
+AlphaSeeker is evolving from a single linear equity research pipeline into a **Multi-Agent Orchestration System**. The system will feature a top-level **Supervisor Agent** that acts as the intelligent routing and synthesis engine, managing a fleet of specialized **Sub-Agents**, where each sub-agent is a domain expert in a specific asset class or research methodology.
 
-## Core Philosophy
+This architecture ensures scalability, high cohesion (sub-agents do one thing perfectly), and loose coupling (new asset classes or data sources can be easily added as independent agents).
 
-1. **Deterministic Execution** — All data (prices, financials, ownership) is fetched via code, never hallucinated.
-2. **Structured Reasoning** — Queries decompose into structured `AnalysisPlan`s via Pydantic models.
-3. **Deep Research** — 50+ web queries, full-page article reading, and SEC filing ingestion feed a multi-stage analysis.
+## Architecture: Supervisor & Sub-Agents Pattern
 
-## System Architecture
-
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                         LangGraph Orchestrator                         │
-│                                                                        │
-│  planner → fetch_data → chart → profile → financials → peers           │
-│       → research_qualitative (50+ queries, full-page read)             │
-│       → synthesize_research (MAP-REDUCE LLM extraction)                │
-│       → generate_section (×6 loop) → generate_summary                  │
-│       → verify → save                                                  │
-└──────────────────────────────────────────────────────────────────────────┘
-```
-
-### Data Collection Layer (Tools)
-
-| Module | Purpose | Source |
-|--------|---------|--------|
-| `market_data.py` | OHLCV price history | `yfinance` |
-| `visualization.py` | Technical price chart | `matplotlib` |
-| `company_profile.py` | Identity, ownership, institutional holders | `yfinance` |
-| `financials.py` | Income, balance sheet, cash flow (annual + quarterly + TTM + ratios) | `yfinance` |
-| `peers.py` | Data-driven peer discovery and comparison metrics | `yfinance` |
-| `web_search.py` | DDG text search, DDG news search, parallel full-page reading | `ddgs`, `trafilatura` |
-| `sec_filings.py` | SEC EDGAR filing search and text extraction (10-K, 10-Q, 8-K) | SEC EFTS API |
-| `analysis.py` | Analysis utilities | — |
-
-### Agent Layer (Graph Nodes)
-
-| Node | Description |
-|------|-------------|
-| `planner` | Decomposes user query → `AnalysisPlan` (ticker, subtasks) |
-| `fetch_data` | Downloads 1Y OHLCV data to CSV |
-| `generate_chart` | Plots price + volume chart (PNG) |
-| `fetch_company_profile` | Saves company description, ownership, top holders to Markdown |
-| `fetch_financials` | Saves annual/quarterly financials + TTM + key ratios to Markdown |
-| `analyze_peers` | Discovers peers by sector/industry/market cap, saves comparison table |
-| `research_qualitative` | 50+ queries across 8 categories → full-page reads → 5 SEC filings |
-| `synthesize_research` | MAP: chunk raw text → extract facts; REDUCE: per-section research briefs |
-| `generate_section` | Loops 6× to generate each CFA-standard section with structured output |
-| `generate_summary` | Synthesizes all sections into investment summary + target price |
-| `verify_content` | Validates report completeness |
-| `save_report` | Writes final Markdown report to `reports/` |
-
-### LLM Manager (`llm_manager.py`)
-
-A centralized model registry with rate-limit resilience:
-
-- **`get_llm(model_name)`** — Returns a configured LangChain `ChatModel` instance, lazy-initialized and cached.
-- **`RateLimitWrapper`** — Wraps Gemini models with automatic 429 retry + model fallback. Uses a Factory Pattern so `with_structured_output` and `bind_tools` bindings are correctly reconstructed when switching models.
-- **Fallback chain** — `gemini-3-flash-preview` → `gemini-2.5-flash` → `gemini-2.5-pro` → `gemini-2.0-flash` → `gemini-exp-1206`.
-- **Provider routing** — Prefix determines provider: `gemini-*` → Google, `kimi-*` → Moonshot AI, `sf/*` → SiliconFlow.
-
-### Intelligent Context Condensation
-
-Replaces hard truncation (`text[:N]`) with LLM-driven condensation (`condense_context`). When text exceeds a character budget, the LLM extracts core facts, numbers, and named entities — preventing information loss at the tail end of long documents. Used in:
-
-- Follow-up query generation (company profile + initial snippets)
-- Data file reading for section generation
-- Investment summary generation
-
-### Schema Layer
-
-All internal communication uses **Pydantic models** (`src/schemas.py`):
-
-- `AnalysisPlan` — Planner output (ticker, subtasks, peers)
-- `ResearchSection` — Title + Markdown content with `[n]` citations
-- `ResearchReport` — Full CFA-standard report (summary, thesis, 6 sections, references)
-- `AgentState` — LangGraph `TypedDict` carrying all data between nodes
-
-## Deep Research Pipeline
-
-The three-layer research architecture solves the "snippet problem" — where search engines return 200-char abstracts that lack critical facts. A **two-phase query system** ensures both breadth and domain-specific depth for any ticker:
-
-### Phase 1: Generic Queries (Industry-Agnostic)
-
-~40 templated queries using only `{company_name}`, `{ticker}`, `{sector}`, `{industry}` — no hardcoded domain jargon. Works identically for a GPU hyperscaler, a pharma company, or a regional bank.
-
-### Phase 2: LLM Follow-Up Queries (Company-Specific)
-
-After Phase 1 collects initial snippets, the LLM reads the company profile + snippets and generates 15-25 **targeted follow-up queries** using specific names, products, and terms it learned. For example:
-- For **CRWV**: "NVIDIA equity stake CoreWeave percentage", "CoreWeave Denton TX data center delays"
-- For **NVO**: "Ozempic patent cliff timeline Novo Nordisk", "Wegovy insurance coverage expansion 2025"
-- For **JPM**: "JPMorgan Chase First Republic acquisition integration", "Jamie Dimon succession planning"
-
-```
-Phase 1: GENERIC SEARCH         Phase 2: LLM FOLLOW-UP         Layer 3: SYNTHESIZE
-┌──────────────────────┐        ┌──────────────────────┐        ┌──────────────────┐
-│ ~40 template queries │──────▶│ LLM reads snippets + │──────▶│ MAP: extract     │
-│ ~15 news queries     │       │ profile → generates  │        │   facts per chunk │
-│ (works for ANY co.)  │       │ 15-25 targeted       │        │ REDUCE: brief    │
-│                      │       │ follow-up queries    │        │   per section    │
-└──────────────────────┘        └──────────────────────┘        └──────────────────┘
-  Breadth: 8 categories          Depth: domain-specific          6 focused briefs
-  ~120 URLs                      ~75 URLs                        ~33 KB synthesized
+```mermaid
+graph TD
+    User([User Prompt]) --> Supervisor[Supervisor Agent]
+    Supervisor --"Classifies Intent"--> Router{Intent Router}
+    
+    Router --Equity--> Agent1[Equity Sub-Agent]
+    Router --Macro/Nation--> Agent2[Macro Sub-Agent]
+    Router --Commodity--> Agent3[Commodity Sub-Agent]
+    
+    Agent1 --> Synthesizer[Synthesizer Node]
+    Agent2 --> Synthesizer
+    Agent3 --> Synthesizer
+    
+    Synthesizer --> Final([Final Integrated Response])
 ```
 
-### Query Categories (8)
+### 1. Supervisor Agent
+**Role:** The system's brain and orchestrator. It does not pull data directly. Instead, it:
+1. Takes the natural language input.
+2. Understands the underlying intent and required data constraints.
+3. Delegates tasks to one or more appropriate sub-agents.
+4. Synthesizes their individual outputs into a coherent final response.
+- **Intent Router:** Determines whether the prompt is about equities, macroeconomic trends, commodities, or requires historical institutional research.
+- **Synthesizer:** Merges reports. For example, if a user asks about "The impact of rising interest rates on JPMorgan," the Supervisor can call the **Macro Agent** (for rate trends) and the **Equity Agent** (for JPM financials) and merge their findings.
 
-1. **Business Strategy** — business model, products, technology, competitive advantage
-2. **Financial Performance** — earnings, backlog, margins, debt, capex, guidance
-3. **Ownership & Governance** — shareholders, strategic investors, insiders, board
-4. **Competitive Landscape** — vs rivals, pricing, benchmarks
-5. **Risks & Headwinds** — lawsuits, delays, downgrades, customer concentration
-6. **Catalysts & Events** — product launches, partnerships, capacity expansion
-7. **Analyst Sentiment** — price targets, bull/bear cases, short interest
-8. **Industry & Macro** — TAM, supply/demand, power constraints
+### 2. Specialized Sub-Agents
 
-## Report Output
+**Sub-Agent 1: Equity Research Agent (Current AlphaSeeker)**
+- **Focus:** Single public companies (stocks). *(See [docs/equity_agent.md](docs/equity_agent.md) for full architecture and capabilities of this sub-agent)*
+- **Capabilities:** Fetches pricing, company profiles, financials, SEC filings; conducts web research; generates CFA-standard initiation reports.
+- **Upcoming Upgrades:** Earnings call analysis, insider trading tracking.
 
-CFA Institute Equity Research standard sections:
+**Sub-Agent 2: Macro & Nation Agent (Planned)**
+- **Focus:** Global economics, interest rates, inflation, employment, national policies.
+- **Data Sources:** FRED API (Federal Reserve Economic Data), World Bank API, OECD.
+- **Output:** Macro-outlook briefs and economic indicator summaries.
 
-1. **Investment Summary** (generated last, presented first)
-   - Rating + Target Price
-   - Mispricing Thesis
-   - Key Catalysts
-2. **Business Description** — Economics, revenue models, product mix
-3. **Industry Analysis** — Porter's 5 Forces, moat, competitive positioning
-4. **Financial Analysis** — Quality of earnings, TTM metrics, debt structure
-5. **Valuation Analysis** — Relative (vs peers) + DCF scenario analysis
-6. **Investment Risks** — Operational, financial, regulatory
-7. **ESG Analysis** — Environmental, social, governance factors
-8. **References** — Cited data sources
-
-## Tech Stack
-
-| Component | Technology |
-|-----------|------------|
-| Orchestration | LangGraph |
-| LLM — Report Writing | Moonshot AI (`kimi-k2.5`) |
-| LLM — Extraction / Condensation | SiliconFlow (`Qwen3-VL-32B-Instruct`) |
-| LLM — Fallback | Google Gemini (5-model fallback chain) |
-| LLM Management | Custom `RateLimitWrapper` + model registry |
-| Schema Validation | Pydantic |
-| Market Data | `yfinance` |
-| Web Research | `ddgs`, `trafilatura` |
-| SEC Filings | SEC EDGAR EFTS API (no key needed) |
-| Visualization | `matplotlib` |
-| Runtime | Python 3.11+, managed by `uv` |
-
-## Model Assignments
-
-Each pipeline step is mapped to a specific LLM. Edit `graph.py` to swap:
-
-| Step | Default Model | Rationale |
-|------|--------------|-----------|
-| Planning | `sf/Qwen/Qwen3-VL-32B-Instruct` | Trivial extraction |
-| Condensation | `sf/Qwen/Qwen3-VL-32B-Instruct` | Summarization |
-| Follow-up Queries | `sf/Qwen/Qwen3-VL-32B-Instruct` | Search query generation |
-| MAP (fact extraction) | `sf/Qwen/Qwen3-VL-32B-Instruct` | Bulk fact extraction |
-| REDUCE (brief synthesis) | `sf/Qwen/Qwen3-VL-32B-Instruct` | Organize facts |
-| Section Writing | `kimi-k2.5` | Professional report quality |
-| Investment Summary | `kimi-k2.5` | Synthesis quality |
-
-## Project Structure
-
-```
-AlphaSeeker/
-├── main.py                        # Entry point — interactive CLI
-├── pyproject.toml                 # Dependencies (uv)
-├── src/
-│   ├── schemas.py                 # Pydantic models (AnalysisPlan, ResearchReport, AgentState)
-│   ├── llm_manager.py             # Centralized model registry + RateLimitWrapper
-│   ├── agent/
-│   │   └── graph.py               # LangGraph workflow (12 nodes, 50+ query research)
-│   └── tools/
-│       ├── market_data.py         # OHLCV price data fetcher
-│       ├── visualization.py       # Price + volume chart generator
-│       ├── company_profile.py     # Company identity + ownership + holders
-│       ├── financials.py          # Annual/quarterly/TTM financials + key ratios
-│       ├── peers.py               # Data-driven peer discovery + comparison
-│       ├── web_search.py          # DDG text/news search + trafilatura page reader
-│       ├── sec_filings.py         # SEC EDGAR filing search + text extraction
-│       └── analysis.py            # Analysis utilities
-├── reports/                       # Generated Markdown reports
-├── charts/                        # Generated price charts (PNG)
-├── data/                          # Cached CSV / Markdown data files
-└── tests/
-    ├── test_schemas.py            # Schema validation tests
-    └── verify_financial_fallback.py  # Financial fallback verification
-```
-
-## Quickstart
-
-```bash
-# 1. Clone and install
-git clone <repo-url> && cd AlphaSeeker
-uv sync
-
-# 2. Set API keys
-cat > .env << 'EOF'
-OPENAI_API_KEY=your-moonshot-api-key
-GOOGLE_API_KEY=your-google-api-key
-SILICONFLOW_API_KEY=your-siliconflow-api-key
-EOF
-
-# 3. Run
-echo "Analyze CRWV" | uv run python main.py
-```
-
-Output: `reports/CRWV_initiation_report.md` (~68KB, CFA-standard equity research report)
+**Sub-Agent 3: Commodity Agent (Planned)**
+- **Focus:** Physical assets like Crude Oil, Gold, Copper, Agriculture.
+- **Data Sources:** EIA (Energy Information Administration) inventory reports, CFTC Commitments of Traders (COT), futures curve data (contango/backwardation).
+- **Output:** Supply/demand imbalances and price trend analysis.
