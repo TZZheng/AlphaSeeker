@@ -1,7 +1,7 @@
 # AlphaSeeker: Multi-Agent Quantitative Research System
 
 ## Core Vision
-AlphaSeeker is evolving from a single linear equity research pipeline into a **Multi-Agent Orchestration System**. The system will feature a top-level **Supervisor Agent** that acts as the intelligent routing and synthesis engine, managing a fleet of specialized **Sub-Agents**, where each sub-agent is a domain expert in a specific asset class or research methodology.
+AlphaSeeker is a **Multi-Agent Orchestration System**. The system features a top-level **Supervisor Agent** that acts as the intelligent routing and synthesis engine, managing a fleet of specialized **Sub-Agents**, where each sub-agent is a domain expert in a specific asset class or research methodology.
 
 This architecture ensures scalability, high cohesion (sub-agents do one thing perfectly), and loose coupling (new asset classes or data sources can be easily added as independent agents).
 
