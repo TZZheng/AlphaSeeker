@@ -1,30 +1,59 @@
 # Actionable Items for Multi-Agent AlphaSeeker
 
-This document tracks the steps required to transition AlphaSeeker into a Supervisor-led multi-agent system, as outlined in `SYSTEM_VISION.md`.
+This document tracks the steps required to transition AlphaSeeker into a Supervisor-led multi-agent system. See `README.md` for architecture overview.
 
 ## Phase 1: Supervisor Architecture Foundation
-- [ ] **Define Sub-Agent Interface:** Create a standard Pydantic schema (e.g., `SubAgentRequest`, `SubAgentResponse`) in `src/schemas.py` that all sub-agents will conform to. This ensures the Supervisor can uniformly communicate with any agent.
-- [ ] **Refactor Existing Pipeline:** Wrap the current AlphaSeeker equity structure (the existing LangGraph) into a discrete, callable `EquitySubAgent` node that accepts the new interface.
-- [ ] **Build Supervisor Graph:** Create `src/agent/supervisor_graph.py` using LangGraph. Implement an Intent Router node that classifies user queries into an `EntityType` (Equity, Macro, Commodity, etc.) and routes to the appropriate sub-agent node.
-- [ ] **Build Synthesizer Node:** Implement a node at the end of the Supervisor graph that takes outputs from the sub-agents and uses an LLM to weave them into a final answer.
+- [x] **Define Sub-Agent Interface:** `SubAgentRequest` and `SubAgentResponse` in `src/shared/schemas.py`.
+- [x] **Refactor Existing Pipeline:** Equity graph split into thin `graph.py` (wiring) + `nodes.py` (all node logic).
+- [x] **Build Supervisor Graph:** `src/supervisor/graph.py` with intent classification → parallel fan-out → synthesis.
+- [x] **Build Synthesizer Node:** `src/supervisor/synthesizer.py` with `run_synthesis()` dispatching single/multi-agent modes.
+- [x] **Build Intent Router:** `src/supervisor/router.py` with `classify_user_prompt()` → `ClassificationResult` schema.
+- [x] **Update Entry Point:** `main.py` now routes through supervisor instead of directly invoking equity agent.
+- [x] **Centralize Web Search:** Moved generic DDG + trafilatura code to `src/shared/web_search.py`; agents re-export.
 
 ## Phase 2: Enhancing the Equity Sub-Agent
-These steps improve the quality of a single ticker analysis (as discussed previously).
-- [ ] **Earnings Call Tool:** Integrate a tool to fetch and parse recent earnings call transcripts. LLMs are excellent at extracting management tone and sentiment shifts from Q&A sessions.
-- [ ] **Insider & Institutional Tracking Tool:** Add scraping or API calls for Form 4 (insider trades) and 13F (institutional holdings) to follow "smart money" movements.
-- [ ] **Supply Chain & Customer Discovery:** Add logic (perhaps analyzing 10-K revenue concentration disclosures) to identify key suppliers and customers, enriching the business moat analysis.
+- [ ] **Earnings Call Tool:** Integrate a tool to fetch and parse recent earnings call transcripts.
+- [ ] **Insider & Institutional Tracking Tool:** Add API calls for Form 4 (insider trades) and 13F (institutional holdings).
+- [ ] **Supply Chain & Customer Discovery:** Analyze 10-K revenue concentration disclosures.
 
 ## Phase 3: Developing New Domain Sub-Agents
-- [ ] **Build Macro Agent (`src/agent/macro_graph.py`):** 
-  - Sub-task: Identify and integrate a robust data source like the FRED API.
-  - Sub-task: Create tools to fetch interest rates, GDP, CPI, and employment data.
-  - Sub-task: Define a dynamic report schema (`MacroReportSchema`) for the LLM to fill.
-- [ ] **Build Commodity Agent (`src/agent/commodity_graph.py`):**
-  - Sub-task: Identify APIs for futures curves and inventory data (e.g., EIA for energy).
-  - Sub-task: Create tools for contango/backwardation math.
-  - Sub-task: Define a `CommodityReportSchema`.
 
-## Phase 4: Institutional Knowledge Base (Currently Paused)
-*Note: This phase is paused until the live-data agents are fully functional.*
-- [ ] **Offline Ingestion Pipeline:** Create a script (`ingest_reports.py`) to parse (LlamaParse/PyMuPDF), chunk, metadata-tag, and embed the 4,000+ pages of professional research reports into a local Vector DB (e.g., Chroma or FAISS).
-- [ ] **Document QA Sub-Agent:** Build the RAG Sub-Agent in LangGraph that can perform semantic search across these reports to answer queries, acting as another tool the Supervisor can call.
+### Macro & Nation Agent (`src/agents/macro/`)
+- [x] **Schemas:** `MacroPlan`, `MacroSection`, `MacroReport`, `MacroState` in `macro/schemas.py`.
+- [x] **Graph Wiring:** Pipeline in `macro/graph.py` (planner → fetch → research → synthesize → sections → verify → save).
+- [x] **Node Stubs:** All node function stubs with docstrings in `macro/nodes.py`.
+- [x] **FRED Tool Skeleton:** `macro/tools/fred.py` — series IDs, `fetch_fred_series()`, `fetch_macro_indicators()`.
+- [x] **World Bank Tool Skeleton:** `macro/tools/world_bank.py` — indicator codes, `fetch_world_bank_indicators()`.
+- [ ] **Implement FRED Tool:** Fill in `fetch_fred_series()` and `fetch_macro_indicators()` with actual API calls.
+- [ ] **Implement World Bank Tool:** Fill in `fetch_world_bank_indicators()` with actual API calls.
+- [ ] **Implement Macro Nodes:** Fill in all node functions in `macro/nodes.py`.
+
+### Commodity Agent (`src/agents/commodity/`)
+- [x] **Schemas:** `CommodityPlan`, `CommoditySection`, `CommodityReport`, `CommodityState` in `commodity/schemas.py`.
+- [x] **Graph Wiring:** Pipeline in `commodity/graph.py` (planner → EIA → COT → futures → research → sections → verify → save).
+- [x] **Node Stubs:** All node function stubs with docstrings in `commodity/nodes.py`.
+- [x] **EIA Tool Skeleton:** `commodity/tools/eia.py` — series IDs, `fetch_eia_series()`, `fetch_eia_inventory()`.
+- [x] **CFTC Tool Skeleton:** `commodity/tools/cftc.py` — market codes, `fetch_cot_report()`.
+- [x] **Futures Tool Skeleton:** `commodity/tools/futures.py` — ticker mappings, `fetch_futures_curve()`.
+- [ ] **Implement EIA Tool:** Fill in `fetch_eia_series()` and `fetch_eia_inventory()` with actual API calls.
+- [ ] **Implement CFTC Tool:** Fill in `fetch_cot_report()` — download/parse CFTC CSV data.
+- [ ] **Implement Futures Tool:** Fill in `fetch_futures_curve()` — yfinance continuous contracts.
+- [ ] **Implement Commodity Nodes:** Fill in all node functions in `commodity/nodes.py`.
+
+## Phase 4: Supervisor Implementation
+- [x] **Router skeleton:** `classify_user_prompt()`, `get_agent_nodes()`, `validate_classification()` stubs.
+- [x] **Synthesizer skeleton:** `format_single_result()`, `synthesize_multi_agent()`, `run_synthesis()` stubs.
+- [x] **Wire synthesizer:** `synthesize_results` node in graph.py calls `synthesizer.run_synthesis()`.
+- [ ] **Implement Router:** Fill in `classify_user_prompt()` with LLM structured output call.
+- [ ] **Implement Synthesizer:** Fill in `format_single_result()` and `synthesize_multi_agent()`.
+- [ ] **Implement Sub-Agent Runners:** Fill in `run_equity_agent()`, `run_macro_agent()`, `run_commodity_agent()`.
+
+## Phase 5: Institutional Knowledge Base (Paused)
+*Note: Paused until the live-data agents are fully functional.*
+- [ ] **Offline Ingestion Pipeline:** Ingest 4,000+ pages of professional research into vector DB.
+- [ ] **Document QA Sub-Agent:** RAG Agent for semantic search across institutional reports.
+
+## Phase 6: Testing & Documentation
+- [ ] **Tests directory:** Create `tests/` with test_supervisor.py, test_equity_agent.py, etc.
+- [ ] **Macro docs:** Write `docs/macro_agent.md`.
+- [ ] **Commodity docs:** Write `docs/commodity_agent.md`.

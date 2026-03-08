@@ -3,7 +3,7 @@ import pandas as pd
 import os
 from datetime import datetime
 from typing import Tuple, Dict, Any, List
-from src.agents.equity.tools.web_search import search_web, deep_search
+from src.shared.web_search import search_web, deep_search
 
 
 class FinancialsError(Exception):

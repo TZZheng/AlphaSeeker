@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import List, Tuple, Dict, Any, Optional
 from langchain_core.messages import HumanMessage
 
-from src.agents.equity.tools.web_search import search_web
+from src.shared.web_search import search_web
 from src.shared.llm_manager import get_llm
 
 # Use a cheap/fast model for extraction

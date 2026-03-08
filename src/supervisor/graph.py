@@ -28,6 +28,7 @@ from src.supervisor.router import (
     AGENT_NODE_MAP,
 )
 from src.shared.schemas import SubAgentRequest, SubAgentResponse
+from src.supervisor.synthesizer import SynthesisInput, run_synthesis
 
 
 # ---------------------------------------------------------------------------
@@ -173,15 +174,28 @@ def synthesize_results(state: SupervisorState) -> dict:
     Convergence node — merges outputs from all sub-agents that ran into a single
     coherent response directed at the user's original question.
 
-    Behavior:
-      - If only one agent ran: formats and returns its output directly.
-      - If multiple agents ran: calls MODEL_SYNTHESIZE to integrate all agent_results
-        values into a unified answer that directly addresses user_prompt.
+    Delegates to synthesizer.run_synthesis() which handles:
+      - Single-agent passthrough (no LLM call)
+      - Multi-agent LLM synthesis
 
     Returns:
         Updates: final_response
     """
-    ...
+    agent_results = state.get("agent_results", {})
+    if not agent_results:
+        return {"final_response": "No agent produced results.", "error": "Empty agent_results"}
+
+    synthesis_input = SynthesisInput(
+        user_prompt=state["user_prompt"],
+        agent_results=agent_results,
+        primary_intent=state.get("intent"),
+    )
+
+    try:
+        output = run_synthesis(synthesis_input)
+        return {"final_response": output.final_response}
+    except Exception as e:
+        return {"final_response": f"Synthesis failed: {e}", "error": str(e)}
 
 
 def handle_error(state: SupervisorState) -> dict:

@@ -10,9 +10,10 @@ from langchain_core.messages import HumanMessage
 # Ensure src is in python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from src.agents.equity.graph import app
+from src.supervisor.graph import app
 
-def main():
+def main() -> None:
+    """Entry point for AlphaSeeker — routes all queries through the Supervisor agent."""
     if not os.getenv("OPENAI_API_KEY"):
         print("Error: OPENAI_API_KEY is not set. Please create a .env file.")
         return
@@ -21,9 +22,9 @@ def main():
         print("Error: GOOGLE_API_KEY is not set. Please add it to your .env file.")
         return
 
-    print("AlphaSeeker MVP Agent")
-    print("---------------------")
-    query = input("Enter your request (e.g., 'Analyze AAPL for the last 1y'): ")
+    print("AlphaSeeker Multi-Agent System")
+    print("------------------------------")
+    query = input("Enter your request (e.g., 'Analyze AAPL', 'US macro outlook', 'Crude oil analysis'): ")
     
     if not query:
         print("No query provided. Exiting.")
@@ -31,23 +32,15 @@ def main():
         
     print(f"\nProcessing: {query}...\n")
     
+    # The Supervisor handles everything: classification → sub-agent dispatch → synthesis
     initial_state = {
-        "messages": [HumanMessage(content=query)],
-        "ticker": None,
-        "period": None,
-        "market_data_path": None,
-        "chart_path": None,
-        "financials_path": None,
-        "peer_data_path": None,
-        "company_profile_path": None,
-        "plan": None,
-        "source_metadata": {},
-        "sections": {},
-        "research_data": {},
-        "research_brief": {},
-        "report_content": None,
-        "report_path": None,
-        "error": None
+        "user_prompt": query,
+        "intent": None,
+        "sub_agents_needed": None,
+        "classified_entities": None,
+        "agent_results": None,
+        "final_response": None,
+        "error": None,
     }
     
     try:
@@ -57,21 +50,17 @@ def main():
             print(f"Error encountered: {final_state['error']}")
         else:
             print("Success!")
-            print(f"Report saved to: {final_state.get('report_path')}")
-            if final_state.get("chart_path"):
-                print(f"Chart saved to: {final_state.get('chart_path')}")
             
-            # Print executive summary
-            report = final_state.get("report_content")
-            if report and hasattr(report, "investment_summary"):
-                print("\n--- EXECUTIVE SUMMARY ---")
-                print(f"Ticker: {report.ticker}")
-                print(f"Recommendation: {report.recommendation}")
-                print(f"Target Price: {report.target_price}")
-                print("\nInvestment Thesis:")
-                print(report.mispricing_thesis)
-                print("\nKey Catalysts:")
-                print(report.key_catalysts)
+            # Print the synthesized response
+            final_response = final_state.get("final_response")
+            if final_response:
+                print("\n--- RESPONSE ---")
+                print(final_response)
+            
+            # List any sub-agent reports generated
+            agent_results = final_state.get("agent_results", {})
+            if agent_results:
+                print(f"\nSub-agents that ran: {', '.join(agent_results.keys())}")
             
     except Exception as e:
         print(f"Execution failed: {e}")

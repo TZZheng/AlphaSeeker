@@ -86,7 +86,6 @@ AlphaSeeker/
 │   │   │       ├── financials.py    # Income, balance sheet, cash flow, TTM, key ratios
 │   │   │       ├── peers.py         # Peer discovery and comparison table
 │   │   │       ├── sec_filings.py   # SEC EDGAR: 10-K, 10-Q, 8-K text extraction
-│   │   │       ├── web_search.py    # DDG text/news search + full-page reading (trafilatura)
 │   │   │       ├── visualization.py # Price + volume chart generator (matplotlib)
 │   │   │       └── analysis.py      # Financial ratio and analysis utilities
 │   │   │
@@ -98,8 +97,7 @@ AlphaSeeker/
 │   │   │   └── tools/
 │   │   │       ├── __init__.py
 │   │   │       ├── fred.py          # FRED API: interest rates, CPI, GDP, employment data
-│   │   │       ├── world_bank.py    # World Bank API: cross-country economic indicators
-│   │   │       └── web_search.py    # Macro-specific web search wrapper
+│   │   │       └── world_bank.py    # World Bank API: cross-country economic indicators
 │   │   │
 │   │   └── commodity/               # Sub-Agent 3: Commodity (planned)
 │   │       ├── __init__.py
@@ -110,14 +108,13 @@ AlphaSeeker/
 │   │           ├── __init__.py
 │   │           ├── eia.py           # EIA API: oil and gas inventory reports
 │   │           ├── cftc.py          # CFTC COT reports: speculative long/short positioning
-│   │           ├── futures.py       # Futures curve data (contango / backwardation)
-│   │           └── web_search.py    # Commodity-specific web search wrapper
+│   │           └── futures.py       # Futures curve data (contango / backwardation)
 │   │
 │   └── shared/                      # Infrastructure shared across all agents
 │       ├── __init__.py
 │       ├── llm_manager.py           # LLM registry, RateLimitWrapper, and model fallback chain
 │       ├── schemas.py               # Cross-agent Pydantic models: SubAgentRequest, SubAgentResponse
-│       └── web_search.py            # Base web search utils (DDG + trafilatura page reader)
+│       └── web_search.py            # DDG + trafilatura search — imported directly by all agents
 │
 ├── reports/                         # Generated Markdown research reports (output)
 ├── charts/                          # Generated price charts PNG (output)
