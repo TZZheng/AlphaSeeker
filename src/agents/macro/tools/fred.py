@@ -45,6 +45,10 @@ FRED_SERIES: Dict[str, List[str]] = {
 }
 
 
+import datetime
+import requests
+import pandas as pd
+
 def get_series_for_topic(topic: str) -> List[str]:
     """
     Maps a macro topic string to the relevant FRED series IDs.
@@ -56,7 +60,26 @@ def get_series_for_topic(topic: str) -> List[str]:
     Returns:
         List of FRED series ID strings to fetch.
     """
-    ...
+    topic_lower = topic.lower()
+    series_ids = []
+    
+    if any(kw in topic_lower for kw in ["interest", "rate", "fed funds", "yield"]):
+        series_ids.extend(FRED_SERIES["interest_rates"])
+    if any(kw in topic_lower for kw in ["inflation", "cpi", "pce", "price"]):
+        series_ids.extend(FRED_SERIES["inflation"])
+    if any(kw in topic_lower for kw in ["employment", "job", "unemployment", "payroll"]):
+        series_ids.extend(FRED_SERIES["employment"])
+    if any(kw in topic_lower for kw in ["gdp", "growth", "output", "production", "economy"]):
+        series_ids.extend(FRED_SERIES["gdp_output"])
+    if any(kw in topic_lower for kw in ["money", "supply", "balance sheet", "m2", "liquidity"]):
+        series_ids.extend(FRED_SERIES["money_supply"])
+        
+    # Default to interest rates and inflation if nothing matched
+    if not series_ids:
+        series_ids.extend(FRED_SERIES["interest_rates"])
+        series_ids.extend(FRED_SERIES["inflation"])
+        
+    return list(set(series_ids))
 
 
 def fetch_fred_series(
@@ -87,7 +110,93 @@ def fetch_fred_series(
         ValueError: If FRED_API_KEY is not set.
         requests.HTTPError: If the FRED API returns an error.
     """
-    ...
+    api_key = os.environ.get("FRED_API_KEY")
+    if not api_key:
+        raise ValueError("FRED_API_KEY environment variable is not set")
+        
+    if not observation_end:
+        observation_end = datetime.datetime.now().strftime("%Y-%m-%d")
+    if not observation_start:
+        observation_start = (datetime.datetime.now() - datetime.timedelta(days=5*365)).strftime("%Y-%m-%d")
+        
+    metadata_dict = {}
+    markdown_content = "# FRED Macroeconomic Data\n\n"
+    
+    for series_id in series_ids:
+        print(f"Fetching FRED series: {series_id}")
+        # Fetch metadata
+        meta_url = "https://api.stlouisfed.org/fred/series"
+        meta_params = {
+            "series_id": series_id,
+            "api_key": api_key,
+            "file_type": "json"
+        }
+        meta_resp = requests.get(meta_url, params=meta_params)
+        meta_resp.raise_for_status()
+        meta_json = meta_resp.json()
+        
+        if not meta_json.get("seriess"):
+            continue
+            
+        series_meta = meta_json["seriess"][0]
+        title = series_meta.get("title", series_id)
+        units = series_meta.get("units", "")
+        freq = series_meta.get("frequency", "")
+        last_updated = series_meta.get("last_updated", "")
+        
+        metadata_dict[series_id] = {
+            "title": title,
+            "units": units,
+            "frequency": freq,
+            "last_updated": last_updated
+        }
+        
+        markdown_content += f"## {title} ({series_id})\n"
+        markdown_content += f"- **Units**: {units}\n"
+        markdown_content += f"- **Frequency**: {freq}\n"
+        markdown_content += f"- **Last Updated**: {last_updated}\n\n"
+        
+        # Fetch observations
+        obs_url = "https://api.stlouisfed.org/fred/series/observations"
+        obs_params = {
+            "series_id": series_id,
+            "api_key": api_key,
+            "file_type": "json",
+            "observation_start": observation_start,
+            "observation_end": observation_end,
+            "sort_order": "desc",
+            "limit": limit
+        }
+        obs_resp = requests.get(obs_url, params=obs_params)
+        obs_resp.raise_for_status()
+        obs_json = obs_resp.json()
+        
+        observations = obs_json.get("observations", [])
+        if not observations:
+            markdown_content += "_No data available for this range._\n\n"
+            continue
+            
+        # Add to markdown as table
+        markdown_content += "| Date | Value |\n|---|---|\n"
+        for obs in observations:
+            date = obs.get("date", "")
+            value = obs.get("value", "")
+            if value != ".": # FRED uses "." for missing values
+                markdown_content += f"| {date} | {value} |\n"
+        
+        markdown_content += "\n---\n\n"
+
+    # Save to file
+    save_dir = os.path.join(os.getcwd(), "data")
+    os.makedirs(save_dir, exist_ok=True)
+    
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_path = os.path.join(save_dir, f"fred_data_{timestamp}.md")
+    
+    with open(file_path, "w") as f:
+        f.write(markdown_content)
+        
+    return file_path, metadata_dict
 
 
 def fetch_macro_indicators(
@@ -108,4 +217,11 @@ def fetch_macro_indicators(
     Returns:
         Tuple of (file_path, metadata_dict) — same as fetch_fred_series.
     """
-    ...
+    series_ids = get_series_for_topic(topic)
+    
+    try:
+        file_path, metadata = fetch_fred_series(series_ids=series_ids, limit=24)
+        return file_path, metadata
+    except Exception as e:
+        print(f"Error fetching FRED data: {e}")
+        return "", {}

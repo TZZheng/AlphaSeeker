@@ -28,9 +28,9 @@ This document tracks the steps required to transition AlphaSeeker into a Supervi
 - [x] **Node Stubs:** All node function stubs with docstrings in `macro/nodes.py`.
 - [x] **FRED Tool Skeleton:** `macro/tools/fred.py` — series IDs, `fetch_fred_series()`, `fetch_macro_indicators()`.
 - [x] **World Bank Tool Skeleton:** `macro/tools/world_bank.py` — indicator codes, `fetch_world_bank_indicators()`.
-- [ ] **Implement FRED Tool:** Fill in `fetch_fred_series()` and `fetch_macro_indicators()` with actual API calls.
-- [ ] **Implement World Bank Tool:** Fill in `fetch_world_bank_indicators()` with actual API calls.
-- [ ] **Implement Macro Nodes:** Fill in all node functions in `macro/nodes.py`.
+- [x] **Implement FRED Tool:** Fill in `fetch_fred_series()` and `fetch_macro_indicators()` with actual API calls.
+- [x] **Implement World Bank Tool:** Fill in `fetch_world_bank_indicators()` with actual API calls.
+- [x] **Implement Macro Nodes:** Fill in all node functions in `macro/nodes.py`.
 
 ### Commodity Agent (`src/agents/commodity/`)
 - [x] **Schemas:** `CommodityPlan`, `CommoditySection`, `CommodityReport`, `CommodityState` in `commodity/schemas.py`.

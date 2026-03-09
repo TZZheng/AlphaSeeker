@@ -40,6 +40,10 @@ COUNTRY_CODES: Dict[str, str] = {
 }
 
 
+import os
+import datetime
+import requests
+
 def resolve_country_codes(countries: List[str]) -> List[str]:
     """
     Maps natural language country names to World Bank ISO codes.
@@ -51,7 +55,21 @@ def resolve_country_codes(countries: List[str]) -> List[str]:
     Returns:
         List of ISO alpha-3 codes, e.g. ["USA", "CHN", "EUU"].
     """
-    ...
+    resolved = []
+    for c in countries:
+        # Simple lookup, case-insensitive
+        mapped = COUNTRY_CODES.get(c)
+        if not mapped:
+            # Try matching keys case-insensitively
+            for key, val in COUNTRY_CODES.items():
+                if key.lower() == c.lower():
+                    mapped = val
+                    break
+        if mapped:
+            resolved.append(mapped)
+        else:
+            resolved.append(c)  # fallback to raw string
+    return resolved
 
 
 def fetch_world_bank_indicators(
@@ -81,4 +99,101 @@ def fetch_world_bank_indicators(
     Raises:
         requests.HTTPError: If the World Bank API returns an error.
     """
-    ...
+    codes = resolve_country_codes(countries)
+    if not codes:
+        return "", {}
+        
+    country_str = ";".join(codes)
+    
+    if not indicator_codes:
+        indicator_codes = [
+            "NY.GDP.MKTP.KD.ZG",  # GDP growth
+            "FP.CPI.TOTL.ZG",     # Inflation
+            "SL.UEM.TOTL.ZS",     # Unemployment
+            "BN.CAB.XOKA.GD.ZS",  # Current account
+            "GC.DOD.TOTL.GD.ZS"   # Gov debt
+        ]
+        
+    metadata_dict = {c: {} for c in codes}
+    
+    # We will build a nested dict: data[country][indicator][year] = value
+    parsed_data = {c: {ind: {} for ind in indicator_codes} for c in codes}
+    
+    for indicator in indicator_codes:
+        print(f"Fetching World Bank indicator: {indicator} for {country_str}")
+        url = f"http://api.worldbank.org/v2/country/{country_str}/indicator/{indicator}"
+        params = {
+            "format": "json",
+            "date": date_range,
+            "per_page": 500
+        }
+        resp = requests.get(url, params=params)
+        resp.raise_for_status()
+        
+        json_data = resp.json()
+        if len(json_data) < 2:
+            continue
+            
+        records = json_data[1]
+        for rec in records:
+            country_id = rec.get("countryiso3code")
+            # If for some reason ISO3 is not available, try country ID
+            if not country_id:
+                country_id = rec.get("country", {}).get("id")
+                
+            if country_id not in parsed_data:
+                parsed_data[country_id] = {ind: {} for ind in indicator_codes}
+                metadata_dict[country_id] = {}
+                
+            year = rec.get("date")
+            val = rec.get("value")
+            
+            if val is not None:
+                parsed_data[country_id][indicator][year] = round(val, 2)
+                
+                # Update metadata with latest value
+                if indicator not in metadata_dict[country_id]:
+                    # Initialize with first valid value seen (which is the most recent because WB sorts desc by year)
+                    metadata_dict[country_id][indicator] = round(val, 2)
+
+    # Format into markdown
+    markdown_content = "# World Bank Economic Indicators\n\n"
+    
+    # Collect all years seen
+    all_years = set()
+    for c_data in parsed_data.values():
+        for i_data in c_data.values():
+            all_years.update(i_data.keys())
+    
+    sorted_years = sorted(list(all_years), reverse=True)
+    
+    for country, c_data in parsed_data.items():
+        markdown_content += f"## Country: {country}\n"
+        
+        years_header = " | ".join(sorted_years)
+        markdown_content += f"| Indicator | {years_header} |\n"
+        
+        sep = "|---|" + "|".join(["---" for _ in sorted_years]) + "|\n"
+        markdown_content += sep
+        
+        for indicator in indicator_codes:
+            ind_name = WB_INDICATORS.get(indicator, indicator)
+            row = f"| **{ind_name}** |"
+            for y in sorted_years:
+                val = c_data[indicator].get(y, "N/A")
+                row += f" {val} |"
+            markdown_content += row + "\n"
+            
+        markdown_content += "\n"
+        
+    # Save to file
+    save_dir = os.path.join(os.getcwd(), "data")
+    os.makedirs(save_dir, exist_ok=True)
+    
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_path = os.path.join(save_dir, f"wb_data_{timestamp}.md")
+    
+    with open(file_path, "w") as f:
+        f.write(markdown_content)
+        
+    return file_path, metadata_dict
