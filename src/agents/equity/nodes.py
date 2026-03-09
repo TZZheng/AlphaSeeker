@@ -1011,8 +1011,48 @@ def save_report(state: AgentState) -> dict:
         report.investment_risks
     ]
     
+    def _clean_section_content(title: str, content: str) -> str:
+        """Post-process LLM section content to fix common formatting bugs:
+        1. Strip duplicate title if the LLM started its content with the same title.
+        2. Demote all headings by one level (H1->H2, H2->H3, ...) so they nest
+           correctly under the H2 section header added by save_report.
+        3. Remove debug "Word Count:" paragraphs the LLM occasionally hallucinates.
+        """
+        import re
+
+        lines = content.splitlines()
+
+        # 1. Strip leading title duplicate (exact or close match, ignoring leading #s)
+        if lines:
+            first_heading = lines[0].lstrip("#").strip()
+            if first_heading.lower() == title.lower():
+                # Drop that line plus any immediately following blank line
+                lines = lines[1:]
+                if lines and lines[0].strip() == "":
+                    lines = lines[1:]
+            content = "\n".join(lines)
+
+        # 2. Demote headings by one level so sub-headings nest under the ## section header.
+        def _demote(m: re.Match) -> str:
+            hashes = m.group(1)
+            # Cap at H5 (##### -> ######) to avoid going too deep
+            return ("#" * min(len(hashes) + 1, 6)) + m.group(2)
+
+        content = re.sub(r"^(#{1,5})( .+)$", _demote, content, flags=re.MULTILINE)
+
+        # 3. Remove "Word Count: ..." debug lines/paragraphs
+        content = re.sub(
+            r"\*?\*?Word Count[:\*\s][^\n]*(\n[^\n]+)*",
+            "",
+            content,
+            flags=re.IGNORECASE,
+        ).strip()
+
+        return content
+
     for s in sections:
-        md += f"## {s.title}\n{s.content}\n\n"
+        cleaned = _clean_section_content(s.title, s.content)
+        md += f"## {s.title}\n{cleaned}\n\n"
         
     md += "## References\n"
     for r in report.references:
