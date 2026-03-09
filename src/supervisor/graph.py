@@ -14,7 +14,8 @@ Each Send dispatches an independent copy of the state to a sub-agent node;
 all active sub-agents run concurrently and converge at synthesize_results.
 """
 
-from typing import TypedDict, Optional, List, Literal, Dict, Any
+from typing import TypedDict, Optional, List, Literal, Dict, Any, Annotated
+import operator
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
 
@@ -42,13 +43,12 @@ class SupervisorState(TypedDict):
     # Intent Classification (populated by classify_intent node)
     intent: Optional[str]                                    # Dominant EntityType, e.g. "equity"
     sub_agents_needed: Optional[List[str]]                   # e.g. ["equity", "macro"]
-    classified_entities: Optional[Dict[str, SubAgentRequest]] # One SubAgentRequest per agent; keyed by agent type.
-                                                              # e.g. {"equity": SubAgentRequest(ticker="JPM", ...),
-                                                              #        "macro":  SubAgentRequest(topic="interest rates", ...)}
+    classified_entities: Optional[Dict[str, SubAgentRequest]] # One SubAgentRequest per agent
 
-    # Sub-Agent Outputs — keyed by agent name, each value is a Markdown string
-    # Markdown may embed chart paths as ![chart](path), tables, etc.
-    agent_results: Optional[Dict[str, str]]       # e.g. {"equity": "<full_report_md>", "macro": "<brief_md>"}
+    # Sub-Agent Outputs — keyed by agent name, each value is a Markdown string.
+    # Uses operator.ior (|=) as the merge reducer so parallel Send branches
+    # merge their dicts safely: {"equity": "..."} | {"macro": "..."} = both keys.
+    agent_results: Annotated[Dict[str, str], operator.ior]
 
     # Final Output
     final_response: Optional[str]                 # Synthesized, integrated response for the user
@@ -59,8 +59,10 @@ class SupervisorState(TypedDict):
 # Model Assignments
 # ---------------------------------------------------------------------------
 
-MODEL_CLASSIFY   = "sf/Qwen/Qwen3.5-4B"  # Intent classification (fast, cheap)
-MODEL_SYNTHESIZE = "kimi-k2.5"            # Final synthesis (high quality)
+from src.shared.model_config import get_model
+
+MODEL_CLASSIFY   = get_model("supervisor", "classify")
+MODEL_SYNTHESIZE = get_model("supervisor", "synthesize")
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +93,37 @@ def classify_intent(state: SupervisorState) -> dict:
     Returns:
         Updates: intent, sub_agents_needed, classified_entities (Dict[str, SubAgentRequest])
     """
-    ...
+    from src.supervisor.router import classify_user_prompt
+    from src.shared.schemas import SubAgentRequest
+    
+    prompt = state["user_prompt"]
+    try:
+        classification = classify_user_prompt(prompt)
+    except Exception as e:
+        return {"error": f"Classification failed: {e}"}
+        
+    sub_agents_needed = []
+    classified_entities = {}
+    
+    for task in classification.tasks:
+        sub_agents_needed.append(task.agent_type)
+        request = SubAgentRequest(
+            user_prompt=prompt,
+        )
+        if task.agent_type == "equity":
+            request.ticker = task.ticker
+        elif task.agent_type == "macro":
+            request.topic = task.topic
+        elif task.agent_type == "commodity":
+            request.asset = task.asset
+            
+        classified_entities[task.agent_type] = request
+        
+    return {
+        "intent": classification.primary_intent,
+        "sub_agents_needed": sub_agents_needed,
+        "classified_entities": classified_entities,
+    }
 
 
 def run_equity_agent(state: SupervisorState) -> dict:
@@ -116,7 +148,22 @@ def run_equity_agent(state: SupervisorState) -> dict:
     Returns:
         Updates: agent_results["equity"] (str — the Markdown from SubAgentResponse.report_md)
     """
-    ...
+    try:
+        from src.agents.equity.graph import app as equity_app
+        from langchain_core.messages import HumanMessage
+        request = state["classified_entities"]["equity"]
+
+        equity_input = {
+            "messages": [HumanMessage(content=f"{request.user_prompt}")],
+        }
+        result = equity_app.invoke(equity_input)
+
+        report_md = _extract_report(result, agent_type="equity")
+        return {"agent_results": {"equity": report_md}}
+
+    except Exception as e:
+        error_msg = f"**Equity Agent Error:** {e}"
+        return {"agent_results": {"equity": error_msg}}
 
 
 def run_macro_agent(state: SupervisorState) -> dict:
@@ -141,7 +188,22 @@ def run_macro_agent(state: SupervisorState) -> dict:
     Returns:
         Updates: agent_results["macro"] (str — the Markdown from SubAgentResponse.report_md)
     """
-    ...
+    try:
+        from src.agents.macro.graph import app as macro_app
+        from langchain_core.messages import HumanMessage
+        request = state["classified_entities"]["macro"]
+
+        macro_input = {
+            "messages": [HumanMessage(content=f"{request.user_prompt}")],
+        }
+        result = macro_app.invoke(macro_input)
+
+        report_md = _extract_report(result, agent_type="macro")
+        return {"agent_results": {"macro": report_md}}
+
+    except Exception as e:
+        error_msg = f"**Macro Agent Error:** {e}"
+        return {"agent_results": {"macro": error_msg}}
 
 
 def run_commodity_agent(state: SupervisorState) -> dict:
@@ -166,7 +228,74 @@ def run_commodity_agent(state: SupervisorState) -> dict:
     Returns:
         Updates: agent_results["commodity"] (str — the Markdown from SubAgentResponse.report_md)
     """
-    ...
+    try:
+        from src.agents.commodity.graph import app as commodity_app
+        from langchain_core.messages import HumanMessage
+        request = state["classified_entities"]["commodity"]
+
+        commodity_input = {
+            "messages": [HumanMessage(content=f"{request.user_prompt}")],
+        }
+        result = commodity_app.invoke(commodity_input)
+
+        report_md = _extract_report(result, agent_type="commodity")
+        return {"agent_results": {"commodity": report_md}}
+
+    except Exception as e:
+        error_msg = f"**Commodity Agent Error:** {e}"
+        return {"agent_results": {"commodity": error_msg}}
+
+def _extract_report(final_state: dict, agent_type: str) -> str:
+    """
+    Extracts the best available output from a sub-agent's final state.
+
+    Priority order:
+      1. Saved report file (report_path) — full pipeline completed
+      2. report_content (Pydantic model) — sections generated but not saved
+      3. Individual sections — partial pipeline completion
+      4. Error message — pipeline failed early
+    """
+    import os
+
+    # 1. Full report file exists
+    report_path = final_state.get("report_path")
+    if report_path and os.path.exists(report_path):
+        try:
+            with open(report_path, "r") as f:
+                return f.read()
+        except Exception:
+            pass
+
+    # 2. Report content model exists (sections generated but not saved)
+    report_content = final_state.get("report_content")
+    if report_content:
+        try:
+            parts = []
+            for field_name, field_value in report_content:
+                if hasattr(field_value, "title") and hasattr(field_value, "content"):
+                    parts.append(f"## {field_value.title}\n\n{field_value.content}")
+                elif isinstance(field_value, str) and field_value:
+                    parts.append(f"**{field_name}:** {field_value}")
+            if parts:
+                return f"# Partial {agent_type.title()} Report\n\n" + "\n\n".join(parts)
+        except Exception:
+            pass
+
+    # 3. Individual sections exist
+    sections = final_state.get("sections", {})
+    if sections:
+        parts = []
+        for key, section in sections.items():
+            if hasattr(section, "title") and hasattr(section, "content"):
+                parts.append(f"## {section.title}\n\n{section.content}")
+            elif isinstance(section, str):
+                parts.append(f"## {key}\n\n{section}")
+        if parts:
+            return f"# Partial {agent_type.title()} Report (incomplete)\n\n" + "\n\n".join(parts)
+
+    # 4. Error fallback
+    error = final_state.get("error", "Unknown error")
+    return f"**{agent_type.title()} Agent:** Pipeline failed — {error}"
 
 
 def synthesize_results(state: SupervisorState) -> dict:
@@ -207,14 +336,15 @@ def handle_error(state: SupervisorState) -> dict:
     Returns:
         Updates: final_response
     """
-    ...
+    error_msg = state.get("error", "Unknown Error")
+    return {"final_response": f"**Supervisor Error:** {error_msg}"}
 
 
 # ---------------------------------------------------------------------------
 # Edge routing functions
 # ---------------------------------------------------------------------------
 
-def route_to_agents(state: SupervisorState) -> List[Send]:
+def route_to_agents(state: SupervisorState):
     """
     Conditional edge using the LangGraph Send API for true parallel fan-out.
 
@@ -228,15 +358,17 @@ def route_to_agents(state: SupervisorState) -> List[Send]:
 
     Routes to handle_error if state["error"] is set.
     """
-    ...
+    if state.get("error"):
+        return "handle_error"
 
-
-def check_error(state: SupervisorState) -> Literal["continue", "error"]:
-    """
-    Guards the classify_intent → routing transition.
-    If classification failed and set state["error"], routes to handle_error.
-    """
-    ...
+    from src.supervisor.router import AGENT_NODE_MAP
+    from langgraph.types import Send
+    sends = []
+    for agent in state.get("sub_agents_needed", []):
+        node = AGENT_NODE_MAP.get(agent)
+        if node:
+            sends.append(Send(node, state))
+    return sends
 
 
 # ---------------------------------------------------------------------------
@@ -259,11 +391,8 @@ workflow.add_edge(START, "classify_intent")
 # After classification: guard for errors, then fan out via Send
 workflow.add_conditional_edges(
     "classify_intent",
-    check_error,
-    {
-        "continue": route_to_agents,   # Returns List[Send] → parallel dispatch
-        "error":    "handle_error",
-    }
+    route_to_agents,
+    ["run_equity_agent", "run_macro_agent", "run_commodity_agent", "handle_error"]
 )
 
 # Each sub-agent node converges to synthesize_results

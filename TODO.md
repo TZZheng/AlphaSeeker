@@ -9,7 +9,11 @@ This document tracks the steps required to transition AlphaSeeker into a Supervi
 - [x] **Build Synthesizer Node:** `src/supervisor/synthesizer.py` with `run_synthesis()` dispatching single/multi-agent modes.
 - [x] **Build Intent Router:** `src/supervisor/router.py` with `classify_user_prompt()` → `ClassificationResult` schema.
 - [x] **Update Entry Point:** `main.py` now routes through supervisor instead of directly invoking equity agent.
-- [x] **Centralize Web Search:** Moved generic DDG + trafilatura code to `src/shared/web_search.py`; agents re-export.
+- [x] **Centralize Web Search:** `src/shared/web_search.py` — all agents import directly, no per-agent wrappers.
+- [x] **Model Config System:** `config/models.yaml` + `src/shared/model_config.py` — 3-tier resolution (env → YAML → defaults).
+- [x] **Shared Text Utils:** `src/shared/text_utils.py` — `condense_context()` and `read_file_safe()` used by all agents.
+- [x] **Partial Results Design:** `_extract_report()` in supervisor/graph.py — 4-level fallback for mid-pipeline failures.
+- [x] **Agent Results Merge:** `Annotated[Dict, operator.ior]` on `SupervisorState.agent_results` for safe parallel merge.
 
 ## Phase 2: Enhancing the Equity Sub-Agent
 - [ ] **Earnings Call Tool:** Integrate a tool to fetch and parse recent earnings call transcripts.
@@ -57,3 +61,7 @@ This document tracks the steps required to transition AlphaSeeker into a Supervi
 - [ ] **Tests directory:** Create `tests/` with test_supervisor.py, test_equity_agent.py, etc.
 - [ ] **Macro docs:** Write `docs/macro_agent.md`.
 - [ ] **Commodity docs:** Write `docs/commodity_agent.md`.
+
+## Polish Items
+- [ ] **Polish SECTION_PROMPTS for macro/commodity** — refine domain-specific guidance after initial implementation.
+- [ ] **Model Config Documentation** — add `config/models.yaml` usage instructions to README.

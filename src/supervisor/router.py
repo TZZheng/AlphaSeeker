@@ -87,9 +87,51 @@ def classify_user_prompt(prompt: str) -> ClassificationResult:
         A ClassificationResult with primary_intent, tasks, and reasoning.
 
     Raises:
-        ValueError: If the LLM returns an unrecognized agent_type.
+        ValueError: If the LLM returns an unrecognized agent_type or fails.
     """
-    ...
+    from src.shared.llm_manager import get_llm
+    from src.shared.model_config import get_model
+    from langchain_core.messages import SystemMessage, HumanMessage
+
+    model_name = get_model("supervisor", "classify")
+    # Using json_mode since smaller models often struggle with native tool calling
+    llm = get_llm(model_name).with_structured_output(ClassificationResult, method="json_mode")
+
+    system_prompt = """
+Your ONLY job is to classify the user's financial research request into a structured JSON format.
+
+Available sub-agents:
+  - 'equity': For specific companies, stocks, tickers, financial performance, valuation, peers.
+  - 'macro': For broad economic indicators, interest rates, inflation, GDP, monetary policy.
+  - 'commodity': For physical commodities, energy (oil/gas), metals (gold/copper), agriculture.
+
+CRITICAL: Return ONLY valid JSON matching this exact structure:
+{
+  "primary_intent": "equity", // or "macro", or "commodity"
+  "tasks": [
+    {
+      "agent_type": "equity", // or "macro", or "commodity"
+      "ticker": "AAPL",       // ONLY if agent_type is equity (infer symbol if possible). Otherwise leave empty ""
+      "topic": "",            // ONLY if agent_type is macro. E.g. "US interest rates". Otherwise leave empty ""
+      "asset": ""             // ONLY if agent_type is commodity. E.g. "crude oil". Otherwise leave empty ""
+    }
+  ],
+  "reasoning": "Brief explanation of the choice."
+}
+
+Do not output conversational text or markdown blocks. Do not explain your answer outside the JSON.
+"""
+    try:
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=prompt)
+        ]
+        result = llm.invoke(messages)
+        # Quick validation of the output
+        validate_classification(result)
+        return result
+    except Exception as e:
+        raise ValueError(f"Failed to classify prompt: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +164,12 @@ def get_agent_nodes(tasks: List[AgentTask]) -> List[str]:
     Raises:
         ValueError: If a task contains an unrecognized agent_type.
     """
-    ...
+    nodes = []
+    for task in tasks:
+        if task.agent_type not in AGENT_NODE_MAP:
+            raise ValueError(f"Unrecognized agent_type: {task.agent_type}")
+        nodes.append(AGENT_NODE_MAP[task.agent_type])
+    return nodes
 
 
 # ---------------------------------------------------------------------------
@@ -137,4 +184,17 @@ def validate_classification(result: ClassificationResult) -> None:
     Raises:
         ValueError: With a descriptive message if any field is invalid.
     """
-    ...
+    valid_intents = [EntityType.EQUITY, EntityType.MACRO, EntityType.COMMODITY]
+    if result.primary_intent not in valid_intents:
+        raise ValueError(f"Invalid primary_intent '{result.primary_intent}'. Must be one of {valid_intents}.")
+    if not result.tasks:
+        raise ValueError("Classification must produce at least one task.")
+    for task in result.tasks:
+        if task.agent_type not in valid_intents:
+            raise ValueError(f"Invalid agent_type '{task.agent_type}' in task. Must be one of {valid_intents}.")
+        if task.agent_type == EntityType.EQUITY and not task.ticker:
+            raise ValueError("Equity task is missing a ticker.")
+        if task.agent_type == EntityType.MACRO and not task.topic:
+            raise ValueError("Macro task is missing a topic.")
+        if task.agent_type == EntityType.COMMODITY and not task.asset:
+            raise ValueError("Commodity task is missing an asset.")

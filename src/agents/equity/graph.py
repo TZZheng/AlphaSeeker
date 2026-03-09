@@ -28,7 +28,6 @@ from src.agents.equity.nodes import (
     verify_content,
     save_report,
     check_error,
-    check_loop,
 )
 
 # ---------------------------------------------------------------------------
@@ -65,15 +64,8 @@ workflow.add_edge("research_qualitative", "synthesize_research")
 workflow.add_edge("synthesize_research", "review_and_expand_peers")
 workflow.add_edge("review_and_expand_peers", "generate_section")
 
-# Section generation loop
-workflow.add_conditional_edges(
-    "generate_section",
-    check_loop,
-    {
-        "generate_section": "generate_section",
-        "generate_summary": "generate_summary"
-    }
-)
+# Sections generated in parallel internally
+workflow.add_edge("generate_section", "generate_summary")
 
 workflow.add_edge("generate_summary", "verify_content")
 workflow.add_edge("verify_content", "save_report")

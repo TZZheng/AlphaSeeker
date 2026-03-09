@@ -97,7 +97,7 @@ def format_single_result(
     Returns:
         A Markdown string ready for CLI output.
     """
-    ...
+    return f"# Response to: {user_prompt}\n\n{report_md}"
 
 
 def synthesize_multi_agent(synthesis_input: SynthesisInput) -> str:
@@ -123,7 +123,45 @@ def synthesize_multi_agent(synthesis_input: SynthesisInput) -> str:
     Raises:
         SynthesisError: If the LLM call fails.
     """
-    ...
+    from src.shared.llm_manager import get_llm
+    from src.shared.model_config import get_model
+    from langchain_core.messages import SystemMessage, HumanMessage
+
+    model_name = get_model("supervisor", "synthesize")
+    llm = get_llm(model_name)
+
+    primary_directive = ""
+    if synthesis_input.primary_intent:
+        primary_directive = f"The primary focus of this query is {synthesis_input.primary_intent.upper()}. Lead the report with insights from this domain."
+
+    system_prompt = f"""You are the AlphaSeeker Supervisor Compiler.
+The user asked: "{synthesis_input.user_prompt}"
+
+You have received research reports from multiple specialized sub-agents.
+Your job is to synthesize these into a single, cohesive, professional Markdown report that directly answers the user's question.
+
+{primary_directive}
+
+RULES:
+1. Synthesize and integrate the insights. Do NOT just append the reports back-to-back.
+2. Form a clear narrative that addresses the cross-domain nature of the prompt.
+3. Preserve all important data points, numbers, and references from the sub-agents.
+4. Keep the formatting clean with Headers, bullet points, and bold text for emphasis.
+"""
+
+    user_content = "Here are the sub-agent reports:\n\n"
+    for agent_type, report in synthesis_input.agent_results.items():
+        user_content += f"=== {agent_type.upper()} AGENT REPORT ===\n{report}\n\n"
+
+    try:
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_content)
+        ]
+        response = llm.invoke(messages)
+        return response.content
+    except Exception as e:
+        raise SynthesisError(f"Multi-agent synthesis failed: {e}")
 
 
 def run_synthesis(synthesis_input: SynthesisInput) -> SynthesisOutput:
@@ -138,7 +176,31 @@ def run_synthesis(synthesis_input: SynthesisInput) -> SynthesisOutput:
     Returns:
         A SynthesisOutput with the final_response, mode, and agents_used.
     """
-    ...
+    agents_used = list(synthesis_input.agent_results.keys())
+    
+    if not agents_used:
+        return SynthesisOutput(
+            final_response="No agents produced any results.",
+            mode="error",
+            agents_used=[]
+        )
+        
+    if len(agents_used) == 1:
+        agent_type = agents_used[0]
+        report_md = synthesis_input.agent_results[agent_type]
+        final_response = format_single_result(agent_type, report_md, synthesis_input.user_prompt)
+        return SynthesisOutput(
+            final_response=final_response,
+            mode="passthrough",
+            agents_used=agents_used
+        )
+    else:
+        final_response = synthesize_multi_agent(synthesis_input)
+        return SynthesisOutput(
+            final_response=final_response,
+            mode="synthesis",
+            agents_used=agents_used
+        )
 
 
 # ---------------------------------------------------------------------------

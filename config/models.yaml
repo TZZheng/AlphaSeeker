@@ -1,0 +1,59 @@
+# AlphaSeeker Model Configuration
+#
+# Each agent defines its own model roles. Users can override any model
+# by editing this file or setting environment variables.
+#
+# Format: AGENT.ROLE = "provider/model-name"
+#
+# Supported provider prefixes:
+#   - "sf/*"       → SiliconFlow (e.g. "sf/Qwen/Qwen3-14B")
+#   - "kimi-*"     → Moonshot Kimi (e.g. "kimi-k2.5")
+#   - "gemini-*"   → Google Gemini (e.g. "gemini-2.5-flash")
+#   - "gpt-*"      → OpenAI (e.g. "gpt-4o")
+#   - "claude-*"   → Anthropic (e.g. "claude-sonnet-4-20250514")
+#
+# Environment variable override: ALPHASEEKER_MODEL_<AGENT>_<ROLE>
+#   Example: ALPHASEEKER_MODEL_EQUITY_SECTION="gpt-4o"
+
+# ---------------------------------------------------------------------------
+# Supervisor Agent
+# ---------------------------------------------------------------------------
+supervisor:
+  classify: "sf/Qwen/Qwen3-8B"       # Intent classification (fast, cheap)
+  synthesize: "kimi-k2.5"               # Final multi-agent synthesis (high quality)
+
+# ---------------------------------------------------------------------------
+# Equity Research Sub-Agent
+# ---------------------------------------------------------------------------
+equity:
+  plan: "sf/Qwen/Qwen3-8B"             # Planner (structured output, fast)
+  condense: "sf/Qwen/Qwen3-8B"         # Context condensation (summarization)
+  followup: "sf/Qwen/Qwen3-8B"         # Follow-up query generation
+  map: "sf/Qwen/Qwen3-8B"              # Fact extraction from research chunks
+  reduce: "sf/Qwen/Qwen3-8B"           # Organize facts into section briefs
+  section: "kimi-k2.5"                  # Professional report writing
+  summary: "kimi-k2.5"                  # Investment summary synthesis
+
+# ---------------------------------------------------------------------------
+# Macro & Nation Sub-Agent
+# ---------------------------------------------------------------------------
+macro:
+  plan: "sf/Qwen/Qwen3-8B"
+  condense: "sf/Qwen/Qwen3-8B"
+  followup: "sf/Qwen/Qwen3-8B"
+  map: "sf/Qwen/Qwen3-8B"
+  reduce: "sf/Qwen/Qwen3-8B"
+  section: "kimi-k2.5"
+  summary: "kimi-k2.5"
+
+# ---------------------------------------------------------------------------
+# Commodity Sub-Agent
+# ---------------------------------------------------------------------------
+commodity:
+  plan: "sf/Qwen/Qwen3-8B"
+  condense: "sf/Qwen/Qwen3-8B"
+  followup: "sf/Qwen/Qwen3-8B"
+  map: "sf/Qwen/Qwen3-8B"
+  reduce: "sf/Qwen/Qwen3-8B"
+  section: "kimi-k2.5"
+  summary: "kimi-k2.5"

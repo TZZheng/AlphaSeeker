@@ -35,12 +35,6 @@ def main() -> None:
     # The Supervisor handles everything: classification → sub-agent dispatch → synthesis
     initial_state = {
         "user_prompt": query,
-        "intent": None,
-        "sub_agents_needed": None,
-        "classified_entities": None,
-        "agent_results": None,
-        "final_response": None,
-        "error": None,
     }
     
     try:

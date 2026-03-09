@@ -29,16 +29,18 @@ from src.shared.web_search import search_web, search_news, deep_search
 from src.agents.equity.tools.sec_filings import search_and_read_filings
 from src.agents.equity.tools.company_profile import fetch_company_profile
 from src.shared.llm_manager import get_llm
+from src.shared.model_config import get_model
+from src.shared.text_utils import condense_context, read_file_safe
 
 
-# --- Model Assignments ---
-MODEL_PLAN     = "sf/Qwen/Qwen3-14B"
-MODEL_CONDENSE = "sf/Qwen/Qwen3-14B"
-MODEL_FOLLOWUP = "sf/Qwen/Qwen3-14B"
-MODEL_MAP      = "sf/Qwen/Qwen3-14B"
-MODEL_REDUCE   = "sf/Qwen/Qwen3-14B"
-MODEL_SECTION  = "kimi-k2.5"
-MODEL_SUMMARY  = "kimi-k2.5"
+# --- Model Assignments (from config/models.yaml, overridable via env vars) ---
+MODEL_PLAN     = get_model("equity", "plan")
+MODEL_CONDENSE = get_model("equity", "condense")
+MODEL_FOLLOWUP = get_model("equity", "followup")
+MODEL_MAP      = get_model("equity", "map")
+MODEL_REDUCE   = get_model("equity", "reduce")
+MODEL_SECTION  = get_model("equity", "section")
+MODEL_SUMMARY  = get_model("equity", "summary")
 
 # --- Constants ---
 SECTION_ORDER = [
@@ -95,92 +97,7 @@ SECTION_PROMPTS = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Intelligent Context Condensation (replaces hard truncation)
-# ---------------------------------------------------------------------------
-
-def condense_context(
-    text: str,
-    max_chars: int,
-    purpose: str = "equity research analysis",
-    focus_areas: str = "",
-) -> str:
-    """
-    Intelligently handles long text: returns as-is if short enough,
-    or calls the LLM to extract core information if too long.
-
-    This replaces hard truncation (text[:N]) which loses information
-    near the end of the text.
-
-    Args:
-        text: The input text to potentially condense.
-        max_chars: Character budget. If text is shorter, return unchanged.
-        purpose: Why the text is being condensed (helps LLM focus).
-        focus_areas: Optional specific topics to prioritize.
-
-    Returns:
-        Original text (if short enough) or LLM-condensed version.
-    """
-    if not text or len(text) <= max_chars:
-        return text
-
-    target_chars = int(max_chars * 0.9)
-    focus_instruction = ""
-    if focus_areas:
-        focus_instruction = f"\nPay special attention to: {focus_areas}"
-
-    condense_prompt = f"""You are condensing a long document for {purpose}.
-The original is {len(text):,} characters but the budget is ~{target_chars:,} characters.
-
-RULES:
-- Preserve ALL specific numbers, financial figures, dates, percentages, and dollar amounts
-- Preserve ALL named entities (people, companies, products, locations)
-- Preserve ALL facts about ownership stakes, contracts, partnerships, lawsuits
-- Remove boilerplate, repeated information, and filler text
-- Keep the most important and unique information
-- Output in the same format (markdown/bullet points) as the input{focus_instruction}
-
-CONDENSE THIS:
-{text}
-"""
-
-    current_prompt = condense_prompt
-
-    for attempt in range(2):
-        try:
-            response = get_llm(MODEL_CONDENSE).invoke([HumanMessage(content=current_prompt)])
-            condensed = response.content
-
-            if len(condensed) <= max_chars:
-                print(f"  Condensed {len(text):,} → {len(condensed):,} chars ({purpose[:100]}...)")
-                return condensed
-
-            print(f"  Warning: Condensation (Attempt {attempt+1}) output {len(condensed):,} chars > limit {max_chars:,}")
-
-            timestamp = int(time.time())
-            debug_dir = "data/debug"
-            os.makedirs(debug_dir, exist_ok=True)
-            debug_file = f"{debug_dir}/condensation_fail_{timestamp}_{attempt}.txt"
-            with open(debug_file, "w", encoding="utf-8") as f:
-                f.write(f"--- ORIGINAL TEXT ({len(text)} chars) ---\n")
-                f.write(text)
-                f.write(f"\n\n--- FAILED CONDENSATION ({len(condensed)} chars) ---\n")
-                f.write(condensed)
-            print(f"  Saved debug context to {debug_file}")
-
-            current_prompt = f"""
-Your previous summary was {len(condensed):,} characters, which exceeds the limit of {max_chars:,} characters.
-Please shorten it significantly while keeping the key facts.
-
-Previous Output:
-{condensed}
-"""
-        except Exception as e:
-            print(f"  Condensation attempt {attempt+1} failed ({e})")
-            break
-
-    print(f"  Condensation failed after retries, falling back to strict truncation")
-    return text[:max_chars]
+# Note: condense_context and read_file_safe are imported from src.shared.text_utils
 
 
 # ---------------------------------------------------------------------------
@@ -365,29 +282,8 @@ Output ONLY the queries, one per line, no numbering or formatting.
 # Helper
 # ---------------------------------------------------------------------------
 
-def _read_file(
-    path: str | None,
-    max_chars: int = 5000,
-    condense_purpose: str = "equity research section generation",
-) -> str:
-    """
-    Safely reads a file. If content exceeds max_chars, uses LLM condensation
-    instead of hard truncation to preserve critical information.
-    """
-    if not path or not os.path.exists(path):
-        return "N/A"
-    try:
-        with open(path, "r") as f:
-            content = f.read()
-        if len(content) > max_chars:
-            return condense_context(
-                content, max_chars=max_chars,
-                purpose=condense_purpose,
-                focus_areas="financial figures, ratios, company metrics, key data points",
-            )
-        return content
-    except Exception:
-        return "N/A"
+# _read_file is now read_file_safe from src.shared.text_utils
+_read_file = read_file_safe
 
 
 # ---------------------------------------------------------------------------
@@ -402,8 +298,15 @@ def planner(state: AgentState) -> dict:
     Analyze the user's request and create a detailed execution plan.
     Identify the main ticker symbol.
     Leave the peers list EMPTY — peers will be discovered automatically using data-driven analysis.
+    
+    You must respond in valid JSON matching this exact schema:
+    {
+        "ticker": "AAPL",
+        "subtasks": ["technical", "fundamental", "peers"],
+        "peers": []
+    }
     """)
-    structured_llm = get_llm(MODEL_PLAN).with_structured_output(AnalysisPlan)
+    structured_llm = get_llm(MODEL_PLAN).with_structured_output(AnalysisPlan, method="json_mode")
     try:
         messages = [system_prompt] + recent_messages
         plan = structured_llm.invoke(messages)
@@ -423,6 +326,7 @@ def planner(state: AgentState) -> dict:
 
 def fetch_data(state: AgentState) -> dict:
     """Fetches historical market data (Technical)."""
+    print("\n--- [Equity] Phase: Fetching Market Data ---")
     if state.get("error"): return state
     ticker = state["ticker"]
     period = state.get("period", "1y")
@@ -435,6 +339,7 @@ def fetch_data(state: AgentState) -> dict:
 
 def generate_chart(state: AgentState) -> dict:
     """Generates a chart."""
+    print("\n--- [Equity] Phase: Generating Price Chart ---")
     if state.get("error"): return state
     data_path = state["market_data_path"]
     ticker = state["ticker"]
@@ -447,6 +352,7 @@ def generate_chart(state: AgentState) -> dict:
 
 def fetch_company_profile_node(state: AgentState) -> dict:
     """Fetches company identity, ownership structure, and institutional holders."""
+    print("\n--- [Equity] Phase: Fetching Company Profile ---")
     if state.get("error"): return state
     ticker = state["ticker"]
     metadata_store = state.get("source_metadata", {})
@@ -466,6 +372,7 @@ def fetch_company_profile_node(state: AgentState) -> dict:
 
 def fetch_financials(state: AgentState) -> dict:
     """Fetches fundamental data (annual + quarterly + TTM)."""
+    print("\n--- [Equity] Phase: Fetching Financials ---")
     if state.get("error"): return state
     ticker = state["ticker"]
     metadata_store = state.get("source_metadata", {})
@@ -487,6 +394,7 @@ def research_qualitative(state: AgentState) -> dict:
     Phase 2: Feed snippets + profile to LLM → generate 15-25 company-specific follow-up
              queries → deep-search those for domain-specific depth.
     """
+    print("\n--- [Equity] Phase: Deep Qualitative Research ---")
     if state.get("error"): return state
     ticker = state["ticker"]
 
@@ -647,6 +555,7 @@ def synthesize_research(state: AgentState) -> dict:
     Map step: For each batch of raw text, extract key facts relevant to the company.
     Reduce step: For each report section, merge extracted facts into a focused brief.
     """
+    print("\n--- [Equity] Phase: Synthesizing Research (Map/Reduce) ---")
     if state.get("error"): return state
 
     ticker = state["ticker"]
@@ -674,9 +583,10 @@ def synthesize_research(state: AgentState) -> dict:
 
     print(f"Synthesis MAP: Processing {len(chunks)} chunks of research text")
 
-    extracted_facts: List[str] = []
+    import concurrent.futures
 
-    for i, chunk in enumerate(chunks):
+    def _map_chunk(args):
+        i, chunk = args
         map_prompt = f"""
 You are a research analyst extracting facts about {ticker}.
 
@@ -700,20 +610,24 @@ RAW TEXT:
 """
         try:
             response = get_llm(MODEL_MAP).invoke([HumanMessage(content=map_prompt)])
-            extracted_facts.append(response.content)
             print(f"  MAP chunk {i+1}/{len(chunks)}: extracted {len(response.content)} chars of facts")
+            return response.content
         except Exception as e:
             print(f"  MAP chunk {i+1} failed: {e}")
+            return ""
 
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        extracted_facts = list(executor.map(_map_chunk, enumerate(chunks)))
+        
+    extracted_facts = [f for f in extracted_facts if f]
     all_facts = "\n\n".join(extracted_facts)
     print(f"Synthesis MAP complete: {len(all_facts):,} chars of extracted facts")
 
     # --- REDUCE STEP ---
     research_brief: Dict[str, str] = {}
 
-    for section_key in SECTION_ORDER:
+    def _reduce_section(section_key):
         section_label = section_key.replace("_", " ").title()
-
         reduce_prompt = f"""
 You are preparing a research brief for the **{section_label}** section of an equity research report on {ticker}.
 
@@ -737,11 +651,17 @@ EXTRACTED FACTS:
 """
         try:
             response = get_llm(MODEL_REDUCE).invoke([HumanMessage(content=reduce_prompt)])
-            research_brief[section_key] = response.content
             print(f"  REDUCE {section_key}: {len(response.content)} chars")
+            return section_key, response.content
         except Exception as e:
             print(f"  REDUCE {section_key} failed: {e}")
-            research_brief[section_key] = ""
+            return section_key, ""
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(SECTION_ORDER)) as executor:
+        futures = {executor.submit(_reduce_section, key): key for key in SECTION_ORDER}
+        for future in concurrent.futures.as_completed(futures):
+            key, content = future.result()
+            research_brief[key] = content
 
     print(f"Synthesis REDUCE complete: {sum(len(v) for v in research_brief.values()):,} chars total brief")
 
@@ -758,6 +678,7 @@ def review_and_expand_peers(state: AgentState) -> dict:
     4. Run a targeted deep search.
     5. Generate a 'competitor_analysis' brief for the final report.
     """
+    print("\n--- [Equity] Phase: Peer Analysis ---")
     if state.get("error"): return state
     
     ticker = state["ticker"]
@@ -886,19 +807,9 @@ def review_and_expand_peers(state: AgentState) -> dict:
 
 
 def generate_section(state: AgentState) -> dict:
-    """Generates the next missing section using synthesized research brief."""
+    """Generates all sections in parallel using synthesized research brief."""
+    print("\n--- [Equity] Phase: Generating Report Sections ---")
     if state.get("error"): return state
-
-    current_sections = state.get("sections", {})
-
-    next_section_key = None
-    for key in SECTION_ORDER:
-        if key not in current_sections:
-            next_section_key = key
-            break
-
-    if not next_section_key:
-        return {"error": "Loop Error: No next section found but loop continued."}
 
     ticker = state["ticker"]
     fin_path = state.get("financials_path")
@@ -910,59 +821,80 @@ def generate_section(state: AgentState) -> dict:
     profile_content = _read_file(profile_path, max_chars=5000)
 
     research_brief = state.get("research_brief", {})
-    section_brief = research_brief.get(next_section_key, "No research brief available.")
+    current_sections = state.get("sections", {}) or {}
+    new_sections = current_sections.copy()
 
-    prompt = f"""
-    You are a Senior Equity Research Analyst for AlphaSeeker.
-    
-    ## DATA SOURCES (Context)
-    
-    ### Company Profile (Ground Truth for Identity)
-    {profile_content}
-    
-    ### Financials (Quantitative)
-    {financials_content}
-    
-    ### Peer Comparison
-    {peer_content}
-    
-    ---
-    
-    ## YOUR TASK
-    Generate the **{next_section_key.replace('_', ' ').upper()}** section for {ticker}.
-    
-    ### Deep Research Brief (Specific to this section)
-    {section_brief}
-    
-    ### Section Guidance
-    {SECTION_PROMPTS[next_section_key]}
-    
-    ## CRITICAL INSTRUCTIONS
-    - Output must be a valid 'ResearchSection' object.
-    - Title should be professional.
-    - Content must be detailed, use Markdown, and cite data carefully with [n].
-    - ALWAYS use the Company Profile as the ground truth for what the company does.
-    - Use the MOST RECENT financial data available (quarterly/TTM preferred over annual).
-    - The Deep Research Brief contains facts extracted from real web articles — USE THEM.
-      Specific numbers, names, events, and quotes in the brief are verified from sources.
-    - Include specific technology products, partnerships, and events BY NAME.
-    - Be LONG and DETAILED. Target 1000+ words. This is a professional research report.
-    """
+    import concurrent.futures
 
-    structured_llm = get_llm(MODEL_SECTION).with_structured_output(ResearchSection)
+    def _generate_single_section(section_key):
+        if section_key in current_sections:
+            return section_key, current_sections[section_key]
 
-    try:
-        section = structured_llm.invoke([HumanMessage(content=prompt)])
-        new_sections = current_sections.copy()
-        new_sections[next_section_key] = section
-        print(f"Section '{next_section_key}' generated ({len(section.content)} chars)")
-        return {"sections": new_sections, "error": None}
-    except Exception as e:
-        return {"error": f"Failed to generate section {next_section_key}: {str(e)}"}
+        section_brief = research_brief.get(section_key, "No research brief available.")
+
+        prompt = f"""
+        You are a Senior Equity Research Analyst for AlphaSeeker.
+        
+        ## DATA SOURCES (Context)
+        
+        ### Company Profile (Ground Truth for Identity)
+        {profile_content}
+        
+        ### Financials (Quantitative)
+        {financials_content}
+        
+        ### Peer Comparison
+        {peer_content}
+        
+        ---
+        
+        ## YOUR TASK
+        Generate the **{section_key.replace('_', ' ').upper()}** section for {ticker}.
+        
+        ### Deep Research Brief (Specific to this section)
+        {section_brief}
+        
+        ### Section Guidance
+        {SECTION_PROMPTS[section_key]}
+        
+        ## CRITICAL INSTRUCTIONS
+        - Output must be a valid 'ResearchSection' object.
+        - Title should be professional.
+        - Content must be detailed, use Markdown, and cite data carefully with [n].
+        - ALWAYS use the Company Profile as the ground truth for what the company does.
+        - Use the MOST RECENT financial data available (quarterly/TTM preferred over annual).
+        - The Deep Research Brief contains facts extracted from real web articles — USE THEM.
+          Specific numbers, names, events, and quotes in the brief are verified from sources.
+        - Include specific technology products, partnerships, and events BY NAME.
+        - Be LONG and DETAILED. Target 1000+ words. This is a professional research report.
+        """
+        try:
+            structured_llm = get_llm(MODEL_SECTION).with_structured_output(ResearchSection)
+            section = structured_llm.invoke([HumanMessage(content=prompt)])
+            print(f"Section '{section_key}' generated ({len(section.content)} chars)")
+            return section_key, section
+        except Exception as e:
+            print(f"Failed to generate section {section_key}: {str(e)}")
+            return section_key, None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(SECTION_ORDER)) as executor:
+        futures = {executor.submit(_generate_single_section, key): key for key in SECTION_ORDER}
+        for future in concurrent.futures.as_completed(futures):
+            key, section = future.result()
+            if section:
+                new_sections[key] = section
+
+    # Check if we generated everything needed
+    missing = [k for k in SECTION_ORDER if k not in new_sections]
+    if missing:
+        return {"error": f"Failed to generate sections: {missing}"}
+
+    return {"sections": new_sections, "error": None}
 
 
 def generate_summary(state: AgentState) -> dict:
     """Generates the Investment Summary based on all completed sections."""
+    print("\n--- [Equity] Phase: Generating Final Summary ---")
     if state.get("error"): return state
 
     ticker = state["ticker"]
@@ -1043,6 +975,7 @@ def generate_summary(state: AgentState) -> dict:
 
 def verify_content(state: AgentState) -> dict:
     """Verifies the generated report."""
+    print("\n--- [Equity] Phase: Verifying Output ---")
     if state.get("error"): return state
     report = state.get("report_content")
     if not report: return {"error": "No report content found during verification"}
@@ -1051,6 +984,7 @@ def verify_content(state: AgentState) -> dict:
 
 def save_report(state: AgentState) -> dict:
     """Saves the report to Markdown."""
+    print("\n--- [Equity] Phase: Saving Final Report ---")
     if state.get("error"): return state
     
     report = state.get("report_content")
@@ -1097,14 +1031,6 @@ def save_report(state: AgentState) -> dict:
 # ---------------------------------------------------------------------------
 # Edge Functions
 # ---------------------------------------------------------------------------
-
-def check_loop(state: AgentState) -> Literal["generate_section", "generate_summary"]:
-    """Decides whether to continue the loop or finish."""
-    current = state.get("sections", {})
-    if len(current) < len(SECTION_ORDER):
-        return "generate_section"
-    return "generate_summary"
-
 
 def check_error(state: AgentState) -> Literal["continue", "end"]:
     """Guards every node transition."""

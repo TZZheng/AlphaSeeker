@@ -12,6 +12,56 @@ Pipeline order:
 
 from typing import Literal
 from src.agents.commodity.schemas import CommodityState
+from src.shared.llm_manager import get_llm
+from src.shared.model_config import get_model
+from src.shared.text_utils import condense_context, read_file_safe
+
+
+# --- Model Assignments (from config/models.yaml, overridable via env vars) ---
+MODEL_PLAN     = get_model("commodity", "plan")
+MODEL_CONDENSE = get_model("commodity", "condense")
+MODEL_FOLLOWUP = get_model("commodity", "followup")
+MODEL_MAP      = get_model("commodity", "map")
+MODEL_REDUCE   = get_model("commodity", "reduce")
+MODEL_SECTION  = get_model("commodity", "section")
+MODEL_SUMMARY  = get_model("commodity", "summary")
+
+# --- Constants ---
+# Must match the CommodityReport section field names exactly.
+SECTION_ORDER = [
+    "supply_demand",
+    "futures_curve",
+    "positioning",
+    "macro_linkages",
+]
+
+# TODO: Polish these prompts with domain-specific guidance after initial implementation.
+SECTION_PROMPTS = {
+    "supply_demand": (
+        "Analyze the current and projected supply/demand balance. Cover production levels, "
+        "inventory draws/builds (EIA data for energy), OPEC+ quotas and compliance, "
+        "seasonal patterns, and demand trends from major consumers (China, US, EU). "
+        "Include specific inventory figures and week-over-week changes."
+    ),
+    "futures_curve": (
+        "Analyze the shape of the futures curve. Determine whether the market is in contango "
+        "or backwardation, and what that implies for storage economics and producer hedging. "
+        "Calculate annualised roll yield. Compare current curve shape to historical norms. "
+        "Reference specific contract months and prices."
+    ),
+    "positioning": (
+        "Analyze CFTC Commitments of Traders (COT) positioning data. Cover speculative "
+        "net long/short levels, weekly changes, and historical context. Identify whether "
+        "positioning is crowded (extreme net longs/shorts) and what that implies for "
+        "potential squeezes or unwinds. Reference specific contract and positioning figures."
+    ),
+    "macro_linkages": (
+        "Analyze how macro factors drive this commodity. Cover USD correlation (DXY impact), "
+        "interest rate sensitivity, emerging market demand linkages, and geopolitical drivers "
+        "(sanctions, trade wars, regional conflicts). Include specific examples and quantify "
+        "correlations where possible."
+    ),
+}
 
 
 # ---------------------------------------------------------------------------

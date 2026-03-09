@@ -11,6 +11,53 @@ Pipeline order:
 
 from typing import Literal
 from src.agents.macro.schemas import MacroState
+from src.shared.llm_manager import get_llm
+from src.shared.model_config import get_model
+from src.shared.text_utils import condense_context, read_file_safe
+
+
+# --- Model Assignments (from config/models.yaml, overridable via env vars) ---
+MODEL_PLAN     = get_model("macro", "plan")
+MODEL_CONDENSE = get_model("macro", "condense")
+MODEL_FOLLOWUP = get_model("macro", "followup")
+MODEL_MAP      = get_model("macro", "map")
+MODEL_REDUCE   = get_model("macro", "reduce")
+MODEL_SECTION  = get_model("macro", "section")
+MODEL_SUMMARY  = get_model("macro", "summary")
+
+# --- Constants ---
+# Must match the MacroReport section field names exactly.
+SECTION_ORDER = [
+    "current_conditions",
+    "policy_analysis",
+    "global_linkages",
+    "scenario_analysis",
+]
+
+# TODO: Polish these prompts with domain-specific guidance after initial implementation.
+SECTION_PROMPTS = {
+    "current_conditions": (
+        "Analyze the current state of key economic indicators. Include recent data points "
+        "for GDP growth, inflation (CPI/PCE), unemployment, and any other relevant metrics. "
+        "Reference specific FRED series IDs or data sources. Compare current readings to "
+        "historical averages and recent trends."
+    ),
+    "policy_analysis": (
+        "Analyze central bank policy stance and forward guidance. Cover the current rate "
+        "environment, dot plot expectations, quantitative tightening/easing status, and "
+        "market-implied rate probabilities. Include specific Fed/ECB/BOJ statements and dates."
+    ),
+    "global_linkages": (
+        "Analyze cross-country economic spillovers. Cover trade flows, currency dynamics "
+        "(DXY, major pairs), capital flow patterns, and contagion risks. Identify which "
+        "economies are most exposed to the macro topic and through what transmission channels."
+    ),
+    "scenario_analysis": (
+        "Construct bull/base/bear macro scenarios with probability weights. Each scenario "
+        "should specify: key assumptions, GDP/inflation/rate trajectory, market implications, "
+        "and trigger events that would confirm or invalidate the scenario."
+    ),
+}
 
 
 # ---------------------------------------------------------------------------
