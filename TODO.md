@@ -39,10 +39,10 @@ This document tracks the steps required to transition AlphaSeeker into a Supervi
 - [x] **EIA Tool Skeleton:** `commodity/tools/eia.py` — series IDs, `fetch_eia_series()`, `fetch_eia_inventory()`.
 - [x] **CFTC Tool Skeleton:** `commodity/tools/cftc.py` — market codes, `fetch_cot_report()`.
 - [x] **Futures Tool Skeleton:** `commodity/tools/futures.py` — ticker mappings, `fetch_futures_curve()`.
-- [ ] **Implement EIA Tool:** Fill in `fetch_eia_series()` and `fetch_eia_inventory()` with actual API calls.
-- [ ] **Implement CFTC Tool:** Fill in `fetch_cot_report()` — download/parse CFTC CSV data.
-- [ ] **Implement Futures Tool:** Fill in `fetch_futures_curve()` — yfinance continuous contracts.
-- [ ] **Implement Commodity Nodes:** Fill in all node functions in `commodity/nodes.py`.
+- [x] **Implement EIA Tool:** Fill in `fetch_eia_series()` and `fetch_eia_inventory()` with actual API calls.
+- [x] **Implement CFTC Tool:** Fill in `fetch_cot_report()` — download/parse CFTC CSV data.
+- [x] **Implement Futures Tool:** Fill in `fetch_futures_curve()` — yfinance continuous contracts.
+- [x] **Implement Commodity Nodes:** Fill in all node functions in `commodity/nodes.py`.
 
 ## Phase 4: Supervisor Implementation
 - [x] **Router skeleton:** `classify_user_prompt()`, `get_agent_nodes()`, `validate_classification()` stubs.

@@ -194,16 +194,6 @@ class RateLimitWrapper:
 _registry: Dict[str, "BaseChatModel"] = {}
 
 
-def _build_gemini_base(model_name: str):
-    """Raw Gemini model builder."""
-    from langchain_google_genai import ChatGoogleGenerativeAI
-    return ChatGoogleGenerativeAI(
-        model=model_name,
-        temperature=0.3,
-        max_retries=1,  # Fail fast internally so wrapper catches it
-        google_api_key=os.getenv("GOOGLE_API_KEY"),
-    )
-
 def _build_model(model_name: str) -> "BaseChatModel":
     """Construct a ChatModel for a given model name.
 
@@ -211,38 +201,47 @@ def _build_model(model_name: str) -> "BaseChatModel":
         model_name: The model identifier string (e.g. ``"kimi-k2.5"``).
 
     Returns:
-        A configured ``BaseChatModel`` instance.
+        A configured ``BaseChatModel`` instance wrapped in a RateLimitWrapper.
 
     Raises:
         ValueError: If the model name is not recognized.
     """
-    if model_name.startswith("kimi-"):
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            model=model_name,
-            temperature=1,
-            base_url="https://api.moonshot.ai/v1",
-            api_key=os.getenv("OPENAI_API_KEY"),
-        )
-    elif model_name.startswith("sf/"):
-        from langchain_openai import ChatOpenAI
-        # Strip the "sf/" prefix to get the SiliconFlow model ID
-        # e.g. "sf/deepseek-ai/DeepSeek-V3" → "deepseek-ai/DeepSeek-V3"
-        sf_model = model_name[3:]
-        return ChatOpenAI(
-            model=sf_model,
-            temperature=0.3,
-            base_url="https://api.siliconflow.cn/v1",
-            api_key=os.getenv("SILICONFLOW_API_KEY"),
-        )
-    elif model_name.startswith("gemini-"):
-        # Returns the wrapper initialized with the base factory
-        return RateLimitWrapper(_build_gemini_base, model_name)
-    else:
-        raise ValueError(
-            f"Unknown model '{model_name}'. "
-            "Add a builder branch in src/shared/llm_manager.py."
-        )
+    def _factory(name: str):
+        if name.startswith("kimi-"):
+            from langchain_openai import ChatOpenAI
+            return ChatOpenAI(
+                model=name,
+                temperature=1,
+                base_url="https://api.moonshot.ai/v1",
+                api_key=os.getenv("OPENAI_API_KEY"),
+                max_retries=2,
+            )
+        elif name.startswith("sf/"):
+            from langchain_openai import ChatOpenAI
+            # Strip the "sf/" prefix to get the SiliconFlow model ID
+            sf_model = name[3:]
+            return ChatOpenAI(
+                model=sf_model,
+                temperature=0.3,
+                base_url="https://api.siliconflow.cn/v1",
+                api_key=os.getenv("SILICONFLOW_API_KEY"),
+                max_retries=2,
+            )
+        elif name.startswith("gemini-"):
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            return ChatGoogleGenerativeAI(
+                model=name,
+                temperature=0.3,
+                max_retries=1,  # Fail fast internally so wrapper catches it
+                google_api_key=os.getenv("GOOGLE_API_KEY"),
+            )
+        else:
+            raise ValueError(
+                f"Unknown model '{name}'. "
+                "Add a builder branch in src/shared/llm_manager.py."
+            )
+            
+    return RateLimitWrapper(_factory, model_name)
 
 
 def get_llm(model_name: str) -> "BaseChatModel":

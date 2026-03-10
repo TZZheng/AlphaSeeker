@@ -44,7 +44,7 @@ graph TD
 - **Data Sources:** FRED API (Federal Reserve Economic Data), World Bank API, OECD.
 - **Output:** Macro-outlook briefs and economic indicator summaries.
 
-**Sub-Agent 3: Commodity Agent (Planned)**
+**Sub-Agent 3: Commodity Agent (Active)**
 - **Focus:** Physical assets like Crude Oil, Gold, Copper, Agriculture.
 - **Data Sources:** EIA (Energy Information Administration) inventory reports, CFTC Commitments of Traders (COT), futures curve data (contango/backwardation).
 - **Output:** Supply/demand imbalances and price trend analysis.
@@ -99,7 +99,7 @@ AlphaSeeker/
 │   │   │       ├── fred.py          # FRED API: interest rates, CPI, GDP, employment data
 │   │   │       └── world_bank.py    # World Bank API: cross-country economic indicators
 │   │   │
-│   │   └── commodity/               # Sub-Agent 3: Commodity (planned)
+│   │   └── commodity/               # Sub-Agent 3: Commodity (active)
 │   │       ├── __init__.py
 │   │       ├── graph.py             # LangGraph graph for commodity research pipeline
 │   │       ├── nodes.py             # Node functions (fetch supply/demand, write report)
