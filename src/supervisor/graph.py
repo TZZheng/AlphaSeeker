@@ -119,6 +119,9 @@ def classify_intent(state: SupervisorState) -> dict:
             
         classified_entities[task.agent_type] = request
         
+    print(f"\n--- [Supervisor] Classified Intent: {classification.primary_intent} ---")
+    print(f"--- [Supervisor] Sub-agents needed: {sub_agents_needed} ---")
+    
     return {
         "intent": classification.primary_intent,
         "sub_agents_needed": sub_agents_needed,

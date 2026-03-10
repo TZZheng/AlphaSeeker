@@ -102,8 +102,10 @@ Your ONLY job is to classify the user's financial research request into a struct
 
 Available sub-agents:
   - 'equity': For specific companies, stocks, tickers, financial performance, valuation, peers.
-  - 'macro': For broad economic indicators, interest rates, inflation, GDP, monetary policy.
+  - 'macro': For broad economic indicators, interest rates, inflation, GDP, monetary policy, geopolitics, wars, country-level impacts.
   - 'commodity': For physical commodities, energy (oil/gas), metals (gold/copper), agriculture.
+
+CRITICAL INSTRUCTION: If a query touches multiple domains (e.g., a macro event's effect on a commodity, or a country's effect on a stock), you MUST generate multiple entries in the "tasks" array, one for each relevant agent!
 
 CRITICAL: Return ONLY valid JSON matching this exact structure:
 {
