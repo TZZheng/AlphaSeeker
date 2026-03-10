@@ -328,13 +328,18 @@ def generate_section(state: MacroState) -> dict:
         
         CRITICAL INSTRUCTIONS:
         - Output must be a valid 'MacroSection' object.
-        - You must respond in valid JSON matching the 'MacroSection' schema exactly.
+        - You must respond in valid JSON matching this exact schema:
+          {{
+              "title": "Section Title",
+              "content": "Full markdown content of the section, at least 800 words..."
+          }}
+        - Do NOT include 'subsections' or any other JSON fields. Put all your formatted text inside the 'content' string.
         - Use the Deep Research Brief facts natively.
         - Cite specific quantitative points from the indicators database.
         - Target 800+ words. Professional tone.
         """
         try:
-            structured_llm = get_llm(MODEL_SECTION).with_structured_output(MacroSection, method="json_mode")
+            structured_llm = get_llm(MODEL_SECTION).with_structured_output(MacroSection)
             section = structured_llm.invoke([SystemMessage(content=prompt)])
             return section_key, section
         except Exception as e:
@@ -357,6 +362,11 @@ def generate_report(state: MacroState) -> dict:
     topic = state["plan"].topic
     sections = state.get("sections", {})
     
+    # Check if we have missing sections and provide a fallback
+    for key in SECTION_ORDER:
+        if key not in sections:
+            sections[key] = MacroSection(title=key.replace("_", " ").title(), content="Section failed to generate.")
+            
     full_text = "\n\n".join([f"## {s.title}\n{s.content}" for s in sections.values()])
     
     prompt = f"""
@@ -449,10 +459,13 @@ def save_report(state: MacroState) -> dict:
     for r in report.references:
         md += f"- {r}\n"
         
+    # Create a safe filename from the topic
+    import re
+    safe_topic = re.sub(r'[^a-zA-Z0-9]+', '_', report.topic).strip('_')
+    
     report_dir = os.path.join(os.getcwd(), "reports")
     os.makedirs(report_dir, exist_ok=True)
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_path = os.path.join(report_dir, f"macro_{timestamp}.md")
+    report_path = os.path.join(report_dir, f"Macro_{safe_topic}.md")
     
     with open(report_path, "w") as f:
         f.write(md)
