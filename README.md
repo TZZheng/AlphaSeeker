@@ -58,8 +58,10 @@ At startup, AlphaSeeker validates required provider API keys based on active mod
 | Provider model prefix | Required env var |
 |---|---|
 | `sf/` | `SILICONFLOW_API_KEY` |
-| `kimi-` | `OPENAI_API_KEY` |
+| `kimi-` | `KIMI_API_KEY` |
+| `gpt-` / `o*` | `OPENAI_API_KEY` |
 | `gemini-` | `GOOGLE_API_KEY` |
+| `claude-` | `ANTHROPIC_API_KEY` |
 
 Data-source keys are route-dependent (not always needed):
 - `FRED_API_KEY` for macro indicator fetches

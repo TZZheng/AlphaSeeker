@@ -13,7 +13,7 @@ Example:
 """
 
 import os
-from typing import Dict, Set
+from typing import Dict, Set, Tuple
 from functools import lru_cache
 
 import yaml
@@ -126,26 +126,39 @@ def get_model(agent: str, role: str) -> str:
     )
 
 
-def _provider_env_var(model_name: str) -> str | None:
-    """Map a model naming convention to its provider API-key env var."""
+def _provider_label(model_name: str) -> str | None:
     if model_name.startswith("sf/"):
-        return "SILICONFLOW_API_KEY"
+        return "sf/*"
     if model_name.startswith("gemini-"):
-        return "GOOGLE_API_KEY"
+        return "gemini-*"
     if model_name.startswith("kimi-"):
-        return "OPENAI_API_KEY"
+        return "kimi-*"
+    if model_name.startswith("gpt-") or model_name.startswith("o1") or model_name.startswith("o3") or model_name.startswith("o4"):
+        return "openai"
+    if model_name.startswith("claude-"):
+        return "anthropic"
     return None
 
 
-def get_required_provider_env_vars() -> Set[str]:
-    """
-    Return env vars required by currently configured model providers.
+def _provider_env_candidates(model_name: str) -> Tuple[str, ...] | None:
+    """Map model naming convention to one-or-more acceptable env vars."""
+    if model_name.startswith("sf/"):
+        return ("SILICONFLOW_API_KEY",)
+    if model_name.startswith("gemini-"):
+        return ("GOOGLE_API_KEY",)
+    if model_name.startswith("kimi-"):
+        return ("KIMI_API_KEY",)
+    if model_name.startswith("gpt-") or model_name.startswith("o1") or model_name.startswith("o3") or model_name.startswith("o4"):
+        return ("OPENAI_API_KEY",)
+    if model_name.startswith("claude-"):
+        return ("ANTHROPIC_API_KEY",)
+    return None
 
-    This function evaluates model assignments with environment-variable overrides
-    applied (via get_model), then derives the provider key requirements.
-    """
+
+def _collect_required_provider_env_candidates() -> Dict[str, Tuple[str, ...]]:
+    """Collect required env-var candidates per active provider family."""
     config = _load_config()
-    required: Set[str] = set()
+    required: Dict[str, Tuple[str, ...]] = {}
     all_agents = set(_DEFAULTS) | set(config)
 
     for agent in all_agents:
@@ -155,7 +168,41 @@ def get_required_provider_env_vars() -> Set[str]:
                 model_name = get_model(agent, role)
             except ValueError:
                 continue
-            env_key = _provider_env_var(model_name)
-            if env_key:
-                required.add(env_key)
+            label = _provider_label(model_name)
+            candidates = _provider_env_candidates(model_name)
+            if label and candidates:
+                required[label] = candidates
     return required
+
+
+def get_required_provider_env_vars() -> Set[str]:
+    """
+    Return env vars required by currently configured model providers.
+
+    This function evaluates model assignments with environment-variable overrides
+    applied (via get_model), then derives the provider key requirements.
+    """
+    required_candidates = _collect_required_provider_env_candidates()
+    # Return canonical key (first entry) for each provider family.
+    return {candidates[0] for candidates in required_candidates.values()}
+
+
+def get_missing_provider_env_vars() -> Dict[str, str]:
+    """
+    Return missing provider env requirements for the active model configuration.
+
+    Output format:
+      {
+        "kimi-*": "KIMI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY"
+      }
+    """
+    missing: Dict[str, str] = {}
+    for label, candidates in sorted(_collect_required_provider_env_candidates().items()):
+        if any(os.getenv(candidate) for candidate in candidates):
+            continue
+        if len(candidates) == 1:
+            missing[label] = candidates[0]
+        else:
+            missing[label] = " or ".join(candidates)
+    return missing

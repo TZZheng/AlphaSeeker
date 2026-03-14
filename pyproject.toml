@@ -8,6 +8,7 @@ dependencies = [
     "ddgs>=1.0.0",
     "google-generativeai>=0.8.6",
     "langchain>=1.2.9",
+    "langchain-anthropic>=0.3.0",
     "langchain-google-genai>=2.1.0",
     "langchain-openai>=0.1.0",
     "langgraph>=1.0.8",

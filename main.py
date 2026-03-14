@@ -9,16 +9,15 @@ load_dotenv()
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from src.supervisor.graph import app
-from src.shared.model_config import get_required_provider_env_vars
+from src.shared.model_config import get_missing_provider_env_vars
 
 def main() -> None:
     """Entry point for AlphaSeeker — routes all queries through the Supervisor agent."""
-    required_env_vars = get_required_provider_env_vars()
-    missing_env_vars = [env for env in sorted(required_env_vars) if not os.getenv(env)]
-    if missing_env_vars:
+    missing_requirements = get_missing_provider_env_vars()
+    if missing_requirements:
         print("Error: Missing required API key env vars for configured model providers:")
-        for env in missing_env_vars:
-            print(f"  - {env}")
+        for provider_label, requirement in missing_requirements.items():
+            print(f"  - {provider_label}: {requirement}")
         print("Create a .env from .env.example and fill the required keys.")
         return
 

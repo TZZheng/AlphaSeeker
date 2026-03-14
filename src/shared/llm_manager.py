@@ -213,7 +213,23 @@ def _build_model(model_name: str) -> "BaseChatModel":
                 model=name,
                 temperature=1,
                 base_url="https://api.moonshot.ai/v1",
+                api_key=os.getenv("KIMI_API_KEY"),
+                max_retries=2,
+            )
+        elif name.startswith("gpt-") or name.startswith("o1") or name.startswith("o3") or name.startswith("o4"):
+            from langchain_openai import ChatOpenAI
+            return ChatOpenAI(
+                model=name,
+                temperature=0.3,
                 api_key=os.getenv("OPENAI_API_KEY"),
+                max_retries=2,
+            )
+        elif name.startswith("claude-"):
+            from langchain_anthropic import ChatAnthropic
+            return ChatAnthropic(
+                model=name,
+                temperature=0.3,
+                api_key=os.getenv("ANTHROPIC_API_KEY"),
                 max_retries=2,
             )
         elif name.startswith("sf/"):
