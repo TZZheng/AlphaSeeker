@@ -1,7 +1,7 @@
 [project]
 name = "alphaseeker"
 version = "0.1.0"
-description = "Add your description here"
+description = "Multi-agent quantitative research system for equity, macro, and commodity analysis."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

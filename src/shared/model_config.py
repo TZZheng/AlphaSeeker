@@ -13,7 +13,7 @@ Example:
 """
 
 import os
-from typing import Dict
+from typing import Dict, Set
 from functools import lru_cache
 
 import yaml
@@ -124,3 +124,38 @@ def get_model(agent: str, role: str) -> str:
         f"No model configured for agent='{agent}', role='{role}'. "
         f"Add it to config/models.yaml or set env var {env_key}."
     )
+
+
+def _provider_env_var(model_name: str) -> str | None:
+    """Map a model naming convention to its provider API-key env var."""
+    if model_name.startswith("sf/"):
+        return "SILICONFLOW_API_KEY"
+    if model_name.startswith("gemini-"):
+        return "GOOGLE_API_KEY"
+    if model_name.startswith("kimi-"):
+        return "OPENAI_API_KEY"
+    return None
+
+
+def get_required_provider_env_vars() -> Set[str]:
+    """
+    Return env vars required by currently configured model providers.
+
+    This function evaluates model assignments with environment-variable overrides
+    applied (via get_model), then derives the provider key requirements.
+    """
+    config = _load_config()
+    required: Set[str] = set()
+    all_agents = set(_DEFAULTS) | set(config)
+
+    for agent in all_agents:
+        roles = set(_DEFAULTS.get(agent, {})) | set(config.get(agent, {}))
+        for role in roles:
+            try:
+                model_name = get_model(agent, role)
+            except ValueError:
+                continue
+            env_key = _provider_env_var(model_name)
+            if env_key:
+                required.add(env_key)
+    return required

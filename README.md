@@ -1,133 +1,140 @@
-# AlphaSeeker: Multi-Agent Quantitative Research System
+# AlphaSeeker
 
-## Core Vision
-AlphaSeeker is a **Multi-Agent Orchestration System**. The system features a top-level **Supervisor Agent** that acts as the intelligent routing and synthesis engine, managing a fleet of specialized **Sub-Agents**, where each sub-agent is a domain expert in a specific asset class or research methodology.
+AlphaSeeker is a multi-agent quantitative research system.
+A supervisor agent routes user intent to specialized sub-agents, then synthesizes a single final response.
 
-This architecture ensures scalability, high cohesion (sub-agents do one thing perfectly), and loose coupling (new asset classes or data sources can be easily added as independent agents).
+Current domains:
+- Equity research
+- Macro research
+- Commodity research
 
-## Architecture: Supervisor & Sub-Agents Pattern
+## Why this architecture
+
+The project uses a supervisor + sub-agent pattern:
+- The **Supervisor** classifies intent and orchestrates execution.
+- Each **Sub-Agent** owns one domain and runs an independent pipeline.
+- A final synthesis step merges results into one output.
 
 ```mermaid
 graph TD
-    User([User Prompt]) --> Supervisor[Supervisor Agent]
-    Supervisor --"Classifies Intent"--> Router{Intent Router}
-    
-    Router --Equity--> Agent1[Equity Sub-Agent]
-    Router --Macro/Nation--> Agent2[Macro Sub-Agent]
-    Router --Commodity--> Agent3[Commodity Sub-Agent]
-    
-    Agent1 --> Synthesizer[Synthesizer Node]
-    Agent2 --> Synthesizer
-    Agent3 --> Synthesizer
-    
-    Synthesizer --> Final([Final Integrated Response])
+    U[User Prompt] --> S[Supervisor]
+    S --> R{Intent Router}
+    R --> E[Equity Agent]
+    R --> M[Macro Agent]
+    R --> C[Commodity Agent]
+    E --> Y[Synthesizer]
+    M --> Y
+    C --> Y
+    Y --> O[Final Response]
 ```
 
-### 1. Supervisor Agent
-**Role:** The system's brain and orchestrator. It does not pull data directly. Instead, it:
-1. Takes the natural language input.
-2. Understands the underlying intent and required data constraints.
-3. Delegates tasks to one or more appropriate sub-agents.
-4. Synthesizes their individual outputs into a coherent final response.
-- **Intent Router:** Determines whether the prompt is about equities, macroeconomic trends, commodities, or requires historical institutional research.
-- **Synthesizer:** Merges reports. For example, if a user asks about "The impact of rising interest rates on JPMorgan," the Supervisor can call the **Macro Agent** (for rate trends) and the **Equity Agent** (for JPM financials) and merge their findings.
+## Quickstart
 
-### 2. Specialized Sub-Agents
+### 1. Prerequisites
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/)
 
-**Sub-Agent 1: Equity Research Agent (Current AlphaSeeker)**
-- **Focus:** Single public companies (stocks). *(See [docs/equity_agent.md](docs/equity_agent.md) for full architecture and capabilities of this sub-agent)*
-- **Capabilities:** Fetches pricing, company profiles, financials, SEC filings; conducts web research; generates CFA-standard initiation reports.
-- **Upcoming Upgrades:** Earnings call analysis, insider trading tracking.
-
-**Sub-Agent 2: Macro & Nation Agent (Planned)**
-- **Focus:** Global economics, interest rates, inflation, employment, national policies.
-- **Data Sources:** FRED API (Federal Reserve Economic Data), World Bank API, OECD.
-- **Output:** Macro-outlook briefs and economic indicator summaries.
-
-**Sub-Agent 3: Commodity Agent (Active)**
-- **Focus:** Physical assets like Crude Oil, Gold, Copper, Agriculture.
-- **Data Sources:** EIA (Energy Information Administration) inventory reports, CFTC Commitments of Traders (COT), futures curve data (contango/backwardation).
-- **Output:** Supply/demand imbalances and price trend analysis.
-
-## Project Structure
-
-The folder layout mirrors the Supervisor + Sub-Agents architecture. Each sub-agent is a fully self-contained package. Shared infrastructure lives in `src/shared/`.
-
+### 2. Install dependencies
+```bash
+uv sync
 ```
+
+### 3. Configure environment variables
+```bash
+cp .env.example .env
+```
+Fill only the keys required by your configured model providers.
+
+### 4. Run
+```bash
+uv run python main.py
+```
+
+## API key requirements
+
+Model providers are configured in `config/models.yaml` (and can be overridden by env vars).
+At startup, AlphaSeeker validates required provider API keys based on active model assignments.
+
+| Provider model prefix | Required env var |
+|---|---|
+| `sf/` | `SILICONFLOW_API_KEY` |
+| `kimi-` | `OPENAI_API_KEY` |
+| `gemini-` | `GOOGLE_API_KEY` |
+
+Data-source keys are route-dependent (not always needed):
+- `FRED_API_KEY` for macro indicator fetches
+- `EIA_API_KEY` for commodity inventory fetches
+- `FMP_API_KEY` for insider-trading data
+
+## Example prompts
+
+- `Analyze AAPL from valuation and risk perspective`
+- `US macro outlook for the next 12 months`
+- `Crude oil supply-demand and futures curve outlook`
+- `How do higher rates affect JPM and bank margins?`
+
+## Project structure
+
+```text
 AlphaSeeker/
-│
-├── main.py                          # Entry point — CLI that routes user prompt to Supervisor
-├── pyproject.toml                   # Project dependencies (managed by uv)
-│
+├── main.py
+├── config/
+│   └── models.yaml
 ├── docs/
-│   ├── equity_agent.md              # Deep-dive documentation for the Equity Sub-Agent
-│   ├── macro_agent.md               # (Planned) Documentation for the Macro Sub-Agent
-│   └── commodity_agent.md           # (Planned) Documentation for the Commodity Sub-Agent
-│
+│   └── equity_agent.md
 ├── src/
-│   │
-│   ├── supervisor/                  # Top-level orchestrator — routes and synthesizes
-│   │   ├── __init__.py
-│   │   ├── graph.py                 # LangGraph graph: intent router → sub-agents → synthesizer
-│   │   ├── router.py                # Intent classification: maps prompt → EntityType enum
-│   │   └── synthesizer.py           # LLM synthesis node: merges multi-agent outputs
-│   │
-│   ├── agents/                      # One sub-package per specialized sub-agent
-│   │   │
-│   │   ├── equity/                  # Sub-Agent 1: Equity Research (active)
-│   │   │   ├── __init__.py
-│   │   │   ├── graph.py             # LangGraph graph: 12-node equity research pipeline
-│   │   │   ├── nodes.py             # All node functions (planner, fetch, research, generate, etc.)
-│   │   │   ├── schemas.py           # Equity-specific Pydantic models (AnalysisPlan, ResearchReport)
-│   │   │   └── tools/
-│   │   │       ├── __init__.py
-│   │   │       ├── market_data.py   # OHLCV price history via yfinance
-│   │   │       ├── company_profile.py # Company identity, ownership, institutional holders
-│   │   │       ├── financials.py    # Income, balance sheet, cash flow, TTM, key ratios
-│   │   │       ├── peers.py         # Peer discovery and comparison table
-│   │   │       ├── sec_filings.py   # SEC EDGAR: 10-K, 10-Q, 8-K text extraction
-│   │   │       ├── visualization.py # Price + volume chart generator (matplotlib)
-│   │   │       └── analysis.py      # Financial ratio and analysis utilities
-│   │   │
-│   │   ├── macro/                   # Sub-Agent 2: Macro & Nation (planned)
-│   │   │   ├── __init__.py
-│   │   │   ├── graph.py             # LangGraph graph for macro research pipeline
-│   │   │   ├── nodes.py             # Node functions (fetch indicators, write macro brief)
-│   │   │   ├── schemas.py           # Macro-specific Pydantic models (MacroPlan, MacroReport)
-│   │   │   └── tools/
-│   │   │       ├── __init__.py
-│   │   │       ├── fred.py          # FRED API: interest rates, CPI, GDP, employment data
-│   │   │       └── world_bank.py    # World Bank API: cross-country economic indicators
-│   │   │
-│   │   └── commodity/               # Sub-Agent 3: Commodity (active)
-│   │       ├── __init__.py
-│   │       ├── graph.py             # LangGraph graph for commodity research pipeline
-│   │       ├── nodes.py             # Node functions (fetch supply/demand, write report)
-│   │       ├── schemas.py           # Commodity-specific Pydantic models (CommodityReport)
-│   │       └── tools/
-│   │           ├── __init__.py
-│   │           ├── eia.py           # EIA API: oil and gas inventory reports
-│   │           ├── cftc.py          # CFTC COT reports: speculative long/short positioning
-│   │           └── futures.py       # Futures curve data (contango / backwardation)
-│   │
-│   └── shared/                      # Infrastructure shared across all agents
-│       ├── __init__.py
-│       ├── llm_manager.py           # LLM registry, RateLimitWrapper, and model fallback chain
-│       ├── schemas.py               # Cross-agent Pydantic models: SubAgentRequest, SubAgentResponse
-│       └── web_search.py            # DDG + trafilatura search — imported directly by all agents
-│
-├── reports/                         # Generated Markdown research reports (output)
-├── charts/                          # Generated price charts PNG (output)
-├── data/                            # Cached CSV and Markdown data files (runtime cache)
-│
-└── tests/                           # Test harness is planned (see TODO.md)
+│   ├── supervisor/
+│   ├── agents/
+│   │   ├── equity/
+│   │   ├── macro/
+│   │   └── commodity/
+│   └── shared/
+├── TODO.md
+├── pyproject.toml
+└── uv.lock
 ```
 
-### Key Design Principles
+Runtime outputs are written to local cache/output folders and are intentionally git-ignored:
+- `data/`
+- `reports/`
+- `charts/`
 
-| Principle | Implementation |
-|-----------|----------------|
-| **Isolation** | Each sub-agent in `agents/*/` owns its own graph, nodes, schemas, and tools. No cross-agent imports. |
-| **Shared Infrastructure** | `src/shared/` holds code used by all agents: LLM manager, base web search, and cross-agent schemas. |
-| **Uniform Interface** | All sub-agents accept `SubAgentRequest` and return `SubAgentResponse` (defined in `shared/schemas.py`), so the Supervisor can call any agent identically. |
-| **Independent Extensibility** | Adding a new sub-agent means creating a new folder `agents/<domain>/` without modifying any existing agent. |
+## Model configuration
+
+Model assignment resolution order:
+1. `ALPHASEEKER_MODEL_<AGENT>_<ROLE>` env override
+2. `config/models.yaml`
+3. hardcoded defaults in `src/shared/model_config.py`
+
+Example override:
+```bash
+export ALPHASEEKER_MODEL_EQUITY_SECTION="kimi-k2.5"
+```
+
+## Development status
+
+- Core multi-agent flow is implemented.
+- Testing harness is still in progress (see `TODO.md`).
+- Current local quality gate:
+```bash
+python -m compileall -q src main.py
+```
+
+## Security and publishing notes
+
+- Never commit `.env` or API keys.
+- Local/editor artifacts (`.DS_Store`, `.agent/`, `.venv/`) are git-ignored.
+- Review diffs before push, especially around config and credentials.
+- See `SECURITY.md` for responsible vulnerability disclosure.
+
+## Roadmap
+
+See `TODO.md` for planned work and next milestones.
+
+## Contributing
+
+See `CONTRIBUTING.md`.
+
+## License
+
+MIT. See `LICENSE`.

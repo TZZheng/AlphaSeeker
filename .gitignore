@@ -214,3 +214,9 @@ reports/
 
 # Charts
 charts/
+
+# OS / local editor artifacts
+.DS_Store
+
+# Local Codex workspace rules (do not publish)
+.agent/

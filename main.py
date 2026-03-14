@@ -5,21 +5,21 @@ from dotenv import load_dotenv
 # Load env vars first
 load_dotenv()
 
-from langchain_core.messages import HumanMessage
-
 # Ensure src is in python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from src.supervisor.graph import app
+from src.shared.model_config import get_required_provider_env_vars
 
 def main() -> None:
     """Entry point for AlphaSeeker — routes all queries through the Supervisor agent."""
-    if not os.getenv("OPENAI_API_KEY"):
-        print("Error: OPENAI_API_KEY is not set. Please create a .env file.")
-        return
-
-    if not os.getenv("GOOGLE_API_KEY"):
-        print("Error: GOOGLE_API_KEY is not set. Please add it to your .env file.")
+    required_env_vars = get_required_provider_env_vars()
+    missing_env_vars = [env for env in sorted(required_env_vars) if not os.getenv(env)]
+    if missing_env_vars:
+        print("Error: Missing required API key env vars for configured model providers:")
+        for env in missing_env_vars:
+            print(f"  - {env}")
+        print("Create a .env from .env.example and fill the required keys.")
         return
 
     print("AlphaSeeker Multi-Agent System")
