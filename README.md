@@ -120,15 +120,7 @@ AlphaSeeker/
 ├── charts/                          # Generated price charts PNG (output)
 ├── data/                            # Cached CSV and Markdown data files (runtime cache)
 │
-└── tests/
-    ├── test_supervisor.py           # Tests for intent routing and final synthesis
-    ├── agents/
-    │   ├── test_equity_agent.py     # Tests for the equity research pipeline
-    │   ├── test_macro_agent.py      # (Planned) Tests for the macro pipeline
-    │   └── test_commodity_agent.py  # (Planned) Tests for the commodity pipeline
-    └── shared/
-        ├── test_llm_manager.py      # Tests for LLM fallback and rate-limit handling
-        └── test_schemas.py          # Pydantic model validation tests
+└── tests/                           # Test harness is planned (see TODO.md)
 ```
 
 ### Key Design Principles

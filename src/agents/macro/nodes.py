@@ -253,7 +253,8 @@ def synthesize_research(state: MacroState) -> dict:
         try:
             resp = get_llm(MODEL_MAP).invoke([HumanMessage(content=map_prompt)])
             return resp.content
-        except:
+        except Exception as e:
+            print(f"Macro MAP chunk {i+1} failed: {e}")
             return ""
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
@@ -279,7 +280,8 @@ def synthesize_research(state: MacroState) -> dict:
         try:
             resp = get_llm(MODEL_REDUCE).invoke([HumanMessage(content=reduce_prompt)])
             return section_key, resp.content
-        except:
+        except Exception as e:
+            print(f"Macro REDUCE section '{section_key}' failed: {e}")
             return section_key, ""
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(SECTION_ORDER)) as executor:

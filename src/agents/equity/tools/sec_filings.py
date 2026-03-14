@@ -7,6 +7,7 @@ Fetches recent 10-K, 10-Q, 8-K filings and extracts text via trafilatura.
 IMPORTANT: SEC requires a User-Agent header with company name and email.
 """
 
+import datetime
 import requests
 import time
 from typing import List, Dict, Optional
@@ -18,8 +19,6 @@ from src.shared.model_config import get_model
 
 # SEC EDGAR EFTS base URL
 EFTS_BASE = "https://efts.sec.gov/LATEST/search-index"
-EDGAR_SEARCH = "https://efts.sec.gov/LATEST/search-index"
-EDGAR_FULL_TEXT = "https://efts.sec.gov/LATEST/search-index"
 
 # SEC-compliant headers
 SEC_HEADERS = {
@@ -51,27 +50,21 @@ def search_sec_filings(
     if form_types is None:
         form_types = ["10-K", "10-Q", "8-K"]
 
-    # Build search query
     query = ticker or company_name
-    forms_str = ",".join(f'"{ft}"' for ft in form_types)
 
-    # Use EDGAR full-text search API
-    search_url = "https://efts.sec.gov/LATEST/search-index"
-    params = {
-        "q": query,
-        "dateRange": "custom",
-        "startdt": "2024-01-01",
-        "enddt": "2026-12-31",
-        "forms": ",".join(form_types),
-    }
+    # Dynamic date window (default: last 3 years) to avoid stale hardcoded bounds.
+    today = datetime.date.today()
+    default_start = today - datetime.timedelta(days=365 * 3)
+    if date_range and ":" in date_range:
+        startdt, enddt = date_range.split(":", 1)
+    else:
+        startdt, enddt = default_start.isoformat(), today.isoformat()
 
     filings: List[Dict[str, str]] = []
+    seen_urls = set()
 
     try:
-        # Try the EDGAR full-text search system
-        search_api = f"https://efts.sec.gov/LATEST/search-index?q={query}&forms={','.join(form_types)}"
-
-        # Alternative: use the simpler EDGAR company search
+        # 1) SEC company Atom feed (stable fallback path)
         company_search_url = "https://www.sec.gov/cgi-bin/browse-edgar"
         company_params = {
             "action": "getcompany",
@@ -106,30 +99,34 @@ def search_sec_filings(
                     link_el = entry.find("atom:link", ns)
                     updated_el = entry.find("atom:updated", ns)
                     summary_el = entry.find("atom:summary", ns)
+                    filing_url = link_el.attrib.get("href", "") if link_el is not None else ""
+                    if not filing_url or filing_url in seen_urls:
+                        continue
+                    seen_urls.add(filing_url)
 
                     filings.append({
                         "form_type": title_el.text if title_el is not None else "",
                         "filing_date": updated_el.text[:10] if updated_el is not None else "",
                         "company": company_name,
-                        "url": link_el.attrib.get("href", "") if link_el is not None else "",
+                        "url": filing_url,
                         "description": summary_el.text[:500] if summary_el is not None and summary_el.text else "",
                     })
             except ET.ParseError:
                 print(f"SEC: Could not parse XML response for {company_name}")
 
-        # Also try the newer EDGAR full-text search API
-        efts_url = "https://efts.sec.gov/LATEST/search-index"
+        # 2) EFTS JSON endpoint (better for filtering + date windows)
+        efts_query = f'"{company_name}" OR "{ticker}"' if ticker else f'"{company_name}"'
         efts_params = {
-            "q": f'"{company_name}" OR "{ticker}"',
+            "q": efts_query,
             "forms": ",".join(form_types),
             "dateRange": "custom",
-            "startdt": "2024-01-01",
-            "enddt": "2026-12-31",
+            "startdt": startdt,
+            "enddt": enddt,
         }
 
         try:
             efts_resp = requests.get(
-                efts_url,
+                EFTS_BASE,
                 params=efts_params,
                 headers=SEC_HEADERS,
                 timeout=15,
@@ -142,6 +139,9 @@ def search_sec_filings(
                     file_url = source.get("file_url", "")
                     if file_url and not file_url.startswith("http"):
                         file_url = f"https://www.sec.gov{file_url}"
+                    if not file_url or file_url in seen_urls:
+                        continue
+                    seen_urls.add(file_url)
 
                     filings.append({
                         "form_type": source.get("form_type", ""),
@@ -150,8 +150,8 @@ def search_sec_filings(
                         "url": file_url,
                         "description": source.get("file_description", "")[:500],
                     })
-        except Exception:
-            pass  # EFTS may not be available; that's OK
+        except Exception as e:
+            print(f"SEC: EFTS JSON query failed for {company_name} ({e})")
 
     except Exception as e:
         print(f"SEC filing search failed for {company_name}: {e}")
@@ -187,7 +187,8 @@ def fetch_filing_text(url: str, max_chars: int = 15000) -> Optional[str]:
         if text and len(text) > max_chars:
             text = text[:max_chars] + f"\n... [truncated at {max_chars} chars]"
         return text
-    except Exception:
+    except Exception as e:
+        print(f"SEC: failed to read filing URL {url} ({e})")
         return None
 
 

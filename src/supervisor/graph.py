@@ -266,23 +266,32 @@ def _extract_report(final_state: dict, agent_type: str) -> str:
         try:
             with open(report_path, "r") as f:
                 return f.read()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Supervisor: failed to read report file at {report_path} ({e})")
 
     # 2. Report content model exists (sections generated but not saved)
     report_content = final_state.get("report_content")
     if report_content:
         try:
             parts = []
-            for field_name, field_value in report_content:
+            if hasattr(report_content, "model_dump"):
+                iterable = report_content.model_dump().items()
+            elif isinstance(report_content, dict):
+                iterable = report_content.items()
+            else:
+                iterable = []
+
+            for field_name, field_value in iterable:
                 if hasattr(field_value, "title") and hasattr(field_value, "content"):
                     parts.append(f"## {field_value.title}\n\n{field_value.content}")
+                elif isinstance(field_value, dict) and "title" in field_value and "content" in field_value:
+                    parts.append(f"## {field_value['title']}\n\n{field_value['content']}")
                 elif isinstance(field_value, str) and field_value:
                     parts.append(f"**{field_name}:** {field_value}")
             if parts:
                 return f"# Partial {agent_type.title()} Report\n\n" + "\n\n".join(parts)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Supervisor: failed to parse partial report_content for {agent_type} ({e})")
 
     # 3. Individual sections exist
     sections = final_state.get("sections", {})

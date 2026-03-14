@@ -159,8 +159,8 @@ def evaluate_candidates(
     try:
         t_info = yf.Ticker(target_ticker).info
         target_mcap = t_info.get("marketCap")
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Warning: failed to fetch market cap for {target_ticker}: {e}")
 
     if not target_mcap:
         # If we can't get target market cap, just return flat list as "Peers"
@@ -266,7 +266,8 @@ def _is_valid_ticker(ticker: str) -> bool:
     try:
         info = yf.Ticker(ticker).info
         return "marketCap" in info
-    except:
+    except Exception as e:
+        print(f"Warning: failed ticker validation for {ticker}: {e}")
         return False
 
 

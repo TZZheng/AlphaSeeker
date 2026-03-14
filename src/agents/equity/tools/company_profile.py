@@ -119,8 +119,8 @@ def fetch_company_profile(ticker: str) -> Tuple[str, Dict[str, Any]]:
                 if "Shares" in display_mf.columns:
                     display_mf["Shares"] = display_mf["Shares"].apply(_format_number)
                 md += display_mf.to_markdown(index=False) + "\n\n"
-        except Exception:
-            pass  # Not critical
+        except Exception as e:
+            print(f"Warning: Mutual fund holders data fetch failed for {ticker}: {e}")
 
         # --- Save ---
         data_dir = os.path.join(os.getcwd(), "data")

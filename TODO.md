@@ -55,6 +55,7 @@ This document tracks the steps required to transition AlphaSeeker into a Supervi
 
 ## Phase 6: Testing & Documentation
 - [ ] **Tests directory:** Create `tests/` with test_supervisor.py, test_equity_agent.py, etc.
+- [ ] **Next Step Test Strategy:** Add `pytest` and bootstrap offline unit tests for router classification validation, supervisor `_extract_report()` fallback, COT parsing, and futures-curve symbol construction.
 - [ ] **Macro docs:** Write `docs/macro_agent.md`.
 - [ ] **Commodity docs:** Write `docs/commodity_agent.md`.
 

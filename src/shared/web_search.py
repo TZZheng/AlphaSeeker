@@ -133,8 +133,8 @@ def read_urls_parallel(
                 url, text = future.result()
                 if text:
                     results[url] = text
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Read failed for URL {futures[future]}: {e}")
 
     return results
 

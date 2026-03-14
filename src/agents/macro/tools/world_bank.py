@@ -121,7 +121,7 @@ def fetch_world_bank_indicators(
     
     for indicator in indicator_codes:
         print(f"Fetching World Bank indicator: {indicator} for {country_str}")
-        url = f"http://api.worldbank.org/v2/country/{country_str}/indicator/{indicator}"
+        url = f"https://api.worldbank.org/v2/country/{country_str}/indicator/{indicator}"
         params = {
             "format": "json",
             "date": date_range,

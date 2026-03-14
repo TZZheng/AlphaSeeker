@@ -854,8 +854,8 @@ def review_and_expand_peers(state: AgentState) -> dict:
     try:
         peer_data_path, metadata = fetch_peer_metrics(categorized_peers, target_ticker=ticker)
         new_metadata["peers"] = metadata
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Peer metrics fetch failed: {e}")
 
     return {
         "categorized_peers": categorized_peers,
