@@ -1,0 +1,22 @@
+{
+  "scenarios": [
+    {
+      "name": "contango",
+      "spot": 70.0,
+      "forward": 75.0,
+      "expected_structure": "contango"
+    },
+    {
+      "name": "backwardation",
+      "spot": 75.0,
+      "forward": 70.0,
+      "expected_structure": "backwardation"
+    },
+    {
+      "name": "flat",
+      "spot": 100.0,
+      "forward": 100.2,
+      "expected_structure": "flat"
+    }
+  ]
+}

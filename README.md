@@ -116,10 +116,16 @@ export ALPHASEEKER_MODEL_EQUITY_SECTION="kimi-k2.5"
 ## Development status
 
 - Core multi-agent flow is implemented.
-- Testing harness is still in progress (see `TODO.md`).
-- Current local quality gate:
+- A multi-layer pytest harness is in place (unit + component + live markers).
+- Current local quality gate (required for PR CI):
 ```bash
-python -m compileall -q src main.py
+uv run python -m compileall -q src main.py
+uv run pytest -m "not live"
+```
+- Manual live lanes (Kimi/SiliconFlow):
+```bash
+uv run pytest -m "live and provider_kimi"
+uv run pytest -m "live and provider_sf"
 ```
 
 ## Security and publishing notes

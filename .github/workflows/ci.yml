@@ -5,9 +5,11 @@ on:
     branches: ["main"]
   pull_request:
     branches: ["main"]
+  workflow_dispatch:
 
 jobs:
-  compile-check:
+  offline-tests:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -26,3 +28,41 @@ jobs:
 
       - name: Compile check
         run: uv run python -m compileall -q src main.py
+
+      - name: Offline pytest suite
+        run: uv run pytest -m "not live" -q
+
+  live-tests:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Compile check
+        run: uv run python -m compileall -q src main.py
+
+      - name: Live Kimi lane
+        env:
+          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+          ALPHASEEKER_MODEL_SUPERVISOR_CLASSIFY: "kimi-k2.5"
+          ALPHASEEKER_MODEL_SUPERVISOR_SYNTHESIZE: "kimi-k2.5"
+        run: uv run pytest -m "live and provider_kimi" -q
+
+      - name: Live SiliconFlow lane
+        env:
+          SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
+          ALPHASEEKER_MODEL_SUPERVISOR_CLASSIFY: "sf/Qwen/Qwen3-8B"
+          ALPHASEEKER_MODEL_SUPERVISOR_SYNTHESIZE: "sf/Qwen/Qwen3-8B"
+        run: uv run pytest -m "live and provider_sf" -q

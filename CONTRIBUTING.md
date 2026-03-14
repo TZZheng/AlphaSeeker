@@ -17,6 +17,7 @@ cp .env.example .env
 3. Run compile gate:
 ```bash
 uv run python -m compileall -q src main.py
+uv run pytest -m "not live"
 ```
 
 ## Pull request expectations
