@@ -46,7 +46,7 @@ class ResearchReport(BaseModel):
     
     references: List[str] = Field(..., description="List of data sources used.")
 
-class AgentState(TypedDict):
+class AgentState(TypedDict, total=False):
     """
     The state of the agent as it proceeds through the workflow.
     """

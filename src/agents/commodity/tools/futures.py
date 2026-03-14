@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import datetime
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
 import yfinance as yf
 
@@ -22,7 +22,14 @@ import yfinance as yf
 # ---------------------------------------------------------------------------
 # yfinance uses specific ticker suffixes for commodity futures.
 
-FUTURES_TICKERS: Dict[str, Dict[str, str]] = {
+class FuturesTickerConfig(TypedDict):
+    base_ticker: str
+    exchange: str
+    contract_months: List[str]
+    name: str
+
+
+FUTURES_TICKERS: Dict[str, FuturesTickerConfig] = {
     "crude oil": {
         "base_ticker": "CL",
         "exchange": "NYMEX",
@@ -89,7 +96,7 @@ MONTH_CODE_BY_INT = {
 }
 
 
-def _match_asset(asset: str) -> Optional[Dict[str, str]]:
+def _match_asset(asset: str) -> Optional[FuturesTickerConfig]:
     asset_normalized = asset.lower().strip()
     if asset_normalized in FUTURES_TICKERS:
         return FUTURES_TICKERS[asset_normalized]
@@ -103,7 +110,7 @@ def _match_asset(asset: str) -> Optional[Dict[str, str]]:
 
 
 def _iter_candidate_contracts(
-    config: Dict[str, str],
+    config: FuturesTickerConfig,
     months_ahead: int = 48,
 ) -> List[Dict[str, Any]]:
     """Generate candidate Yahoo futures symbols based on month code schedules."""

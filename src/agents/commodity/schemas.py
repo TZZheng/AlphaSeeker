@@ -75,7 +75,7 @@ class CommodityReport(BaseModel):
     )
 
 
-class CommodityState(TypedDict):
+class CommodityState(TypedDict, total=False):
     """
     LangGraph state for the commodity research pipeline.
     Mirrors the structure of equity/schemas.AgentState.

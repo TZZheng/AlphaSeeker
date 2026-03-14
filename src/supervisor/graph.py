@@ -14,7 +14,7 @@ Each Send dispatches an independent copy of the state to a sub-agent node;
 all active sub-agents run concurrently and converge at synthesize_results.
 """
 
-from typing import TypedDict, Optional, List, Literal, Dict, Any, Annotated
+from typing import TypedDict, List, Dict, Annotated, Required
 import operator
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
@@ -36,14 +36,14 @@ from src.supervisor.synthesizer import SynthesisInput, run_synthesis
 # Supervisor State — carries data between all nodes in this graph
 # ---------------------------------------------------------------------------
 
-class SupervisorState(TypedDict):
+class SupervisorState(TypedDict, total=False):
     # Input
-    user_prompt: str                              # Raw natural language input from the user
+    user_prompt: Required[str]                              # Raw natural language input from the user
 
     # Intent Classification (populated by classify_intent node)
-    intent: Optional[str]                                    # Dominant EntityType, e.g. "equity"
-    sub_agents_needed: Optional[List[str]]                   # e.g. ["equity", "macro"]
-    classified_entities: Optional[Dict[str, SubAgentRequest]] # One SubAgentRequest per agent
+    intent: str                                    # Dominant EntityType, e.g. "equity"
+    sub_agents_needed: List[str]                   # e.g. ["equity", "macro"]
+    classified_entities: Dict[str, SubAgentRequest] # One SubAgentRequest per agent
 
     # Sub-Agent Outputs — keyed by agent name, each value is a Markdown string.
     # Uses operator.ior (|=) as the merge reducer so parallel Send branches
@@ -51,8 +51,38 @@ class SupervisorState(TypedDict):
     agent_results: Annotated[Dict[str, str], operator.ior]
 
     # Final Output
-    final_response: Optional[str]                 # Synthesized, integrated response for the user
-    error: Optional[str]
+    final_response: str                 # Synthesized, integrated response for the user
+    error: str
+
+
+class ClassifiedSupervisorState(TypedDict):
+    user_prompt: str
+    sub_agents_needed: List[str]
+    classified_entities: Dict[str, SubAgentRequest]
+    intent: str
+
+
+def _as_classified_state(state: SupervisorState) -> ClassifiedSupervisorState:
+    """Return a validated classified state used by sub-agent runners."""
+    entities = state.get("classified_entities")
+    sub_agents = state.get("sub_agents_needed")
+    intent = state.get("intent")
+    if not entities or not sub_agents or not intent:
+        raise ValueError("Supervisor routing state is incomplete")
+    return {
+        "user_prompt": state["user_prompt"],
+        "sub_agents_needed": sub_agents,
+        "classified_entities": entities,
+        "intent": intent,
+    }
+
+
+def _get_classified_request(state: ClassifiedSupervisorState, agent_type: str) -> SubAgentRequest:
+    """Return a routed sub-agent request or raise a clear error if routing data is missing."""
+    request = state["classified_entities"].get(agent_type)
+    if request is None:
+        raise ValueError(f"classified_entities missing request for agent '{agent_type}'")
+    return request
 
 
 # ---------------------------------------------------------------------------
@@ -153,10 +183,12 @@ def run_equity_agent(state: SupervisorState) -> dict:
     """
     try:
         from src.agents.equity.graph import app as equity_app
+        from src.agents.equity.schemas import AgentState
         from langchain_core.messages import HumanMessage
-        request = state["classified_entities"]["equity"]
+        classified_state = _as_classified_state(state)
+        request = _get_classified_request(classified_state, "equity")
 
-        equity_input = {
+        equity_input: AgentState = {
             "messages": [HumanMessage(content=f"{request.user_prompt}")],
         }
         result = equity_app.invoke(equity_input)
@@ -193,10 +225,12 @@ def run_macro_agent(state: SupervisorState) -> dict:
     """
     try:
         from src.agents.macro.graph import app as macro_app
+        from src.agents.macro.schemas import MacroState
         from langchain_core.messages import HumanMessage
-        request = state["classified_entities"]["macro"]
+        classified_state = _as_classified_state(state)
+        request = _get_classified_request(classified_state, "macro")
 
-        macro_input = {
+        macro_input: MacroState = {
             "messages": [HumanMessage(content=f"{request.user_prompt}")],
         }
         result = macro_app.invoke(macro_input)
@@ -233,10 +267,12 @@ def run_commodity_agent(state: SupervisorState) -> dict:
     """
     try:
         from src.agents.commodity.graph import app as commodity_app
+        from src.agents.commodity.schemas import CommodityState
         from langchain_core.messages import HumanMessage
-        request = state["classified_entities"]["commodity"]
+        classified_state = _as_classified_state(state)
+        request = _get_classified_request(classified_state, "commodity")
 
-        commodity_input = {
+        commodity_input: CommodityState = {
             "messages": [HumanMessage(content=f"{request.user_prompt}")],
         }
         result = commodity_app.invoke(commodity_input)
@@ -352,6 +388,28 @@ def handle_error(state: SupervisorState) -> dict:
     return {"final_response": f"**Supervisor Error:** {error_msg}"}
 
 
+def validate_routing_state(state: SupervisorState) -> dict:
+    """
+    Validates classify_intent outputs before parallel fan-out.
+    Enforces required routing invariants once, centrally.
+    """
+    if state.get("error"):
+        return {}
+
+    sub_agents = state.get("sub_agents_needed")
+    entities = state.get("classified_entities")
+    if not sub_agents:
+        return {"error": "No sub-agents selected by classifier"}
+    if not entities:
+        return {"error": "Classifier did not produce classified_entities"}
+
+    missing_requests = [agent for agent in sub_agents if agent not in entities]
+    if missing_requests:
+        return {"error": f"Missing SubAgentRequest for: {', '.join(missing_requests)}"}
+
+    return {}
+
+
 # ---------------------------------------------------------------------------
 # Edge routing functions
 # ---------------------------------------------------------------------------
@@ -380,6 +438,8 @@ def route_to_agents(state: SupervisorState):
         node = AGENT_NODE_MAP.get(agent)
         if node:
             sends.append(Send(node, state))
+    if not sends:
+        return "handle_error"
     return sends
 
 
@@ -391,6 +451,7 @@ workflow = StateGraph(SupervisorState)
 
 # Register nodes
 workflow.add_node("classify_intent",     classify_intent)
+workflow.add_node("validate_routing_state", validate_routing_state)
 workflow.add_node("run_equity_agent",    run_equity_agent)
 workflow.add_node("run_macro_agent",     run_macro_agent)
 workflow.add_node("run_commodity_agent", run_commodity_agent)
@@ -400,9 +461,12 @@ workflow.add_node("handle_error",        handle_error)
 # Entry: always classify intent first
 workflow.add_edge(START, "classify_intent")
 
-# After classification: guard for errors, then fan out via Send
+# After classification: validate routing invariants before fan-out
+workflow.add_edge("classify_intent", "validate_routing_state")
+
+# After validation: guard for errors, then fan out via Send
 workflow.add_conditional_edges(
-    "classify_intent",
+    "validate_routing_state",
     route_to_agents,
     ["run_equity_agent", "run_macro_agent", "run_commodity_agent", "handle_error"]
 )

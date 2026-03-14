@@ -76,7 +76,7 @@ class MacroReport(BaseModel):
     )
 
 
-class MacroState(TypedDict):
+class MacroState(TypedDict, total=False):
     """
     LangGraph state for the macro research pipeline.
     Mirrors the structure of equity/schemas.AgentState.
