@@ -53,16 +53,14 @@ jobs:
       - name: Compile check
         run: uv run python -m compileall -q src main.py
 
-      - name: Live Kimi lane
+      - name: Live full-pipeline suite (model-config driven)
         env:
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
-          ALPHASEEKER_MODEL_SUPERVISOR_CLASSIFY: "kimi-k2.5"
-          ALPHASEEKER_MODEL_SUPERVISOR_SYNTHESIZE: "kimi-k2.5"
-        run: uv run pytest -m "live and provider_kimi" -q
-
-      - name: Live SiliconFlow lane
-        env:
           SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
-          ALPHASEEKER_MODEL_SUPERVISOR_CLASSIFY: "sf/Qwen/Qwen3-8B"
-          ALPHASEEKER_MODEL_SUPERVISOR_SYNTHESIZE: "sf/Qwen/Qwen3-8B"
-        run: uv run pytest -m "live and provider_sf" -q
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          EIA_API_KEY: ${{ secrets.EIA_API_KEY }}
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+        run: uv run pytest -m "live" -q

@@ -122,10 +122,9 @@ export ALPHASEEKER_MODEL_EQUITY_SECTION="kimi-k2.5"
 uv run python -m compileall -q src main.py
 uv run pytest -m "not live"
 ```
-- Manual live lanes (Kimi/SiliconFlow):
+- Manual live end-to-end pipeline suite (uses current `config/models.yaml` / env overrides):
 ```bash
-uv run pytest -m "live and provider_kimi"
-uv run pytest -m "live and provider_sf"
+uv run pytest -m "live"
 ```
 
 ## Security and publishing notes

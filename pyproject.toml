@@ -34,7 +34,5 @@ markers = [
     "unit: deterministic unit tests with no live network calls",
     "component: multi-function/component tests with mocked dependencies",
     "live: live integration tests using real model/API providers",
-    "provider_kimi: live tests for Kimi provider lane",
-    "provider_sf: live tests for SiliconFlow provider lane",
     "network: tests that require external network",
 ]
