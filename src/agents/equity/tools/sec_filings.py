@@ -12,7 +12,9 @@ import time
 from typing import List, Dict, Optional
 
 import trafilatura
-
+from langchain_core.messages import SystemMessage, HumanMessage
+from src.shared.llm_manager import get_llm
+from src.shared.model_config import get_model
 
 # SEC EDGAR EFTS base URL
 EFTS_BASE = "https://efts.sec.gov/LATEST/search-index"
@@ -229,3 +231,48 @@ def search_and_read_filings(
         time.sleep(0.5)  # Be polite to SEC servers
 
     return results
+
+
+def extract_supply_chain_data(ticker: str, filings_text: str) -> str:
+    """
+    Uses an LLM to scan SEC filings text for Supply Chain, Major Customers,
+    and Concentration Risk disclosures (usually found in Item 1 or footnotes).
+
+    Args:
+        ticker: The stock ticker (e.g., 'AAPL').
+        filings_text: The concatenated text of the retrieved filings.
+
+    Returns:
+        A markdown-formatted summary of supply chain & customer disclosures.
+    """
+    if not filings_text or len(filings_text.strip()) < 100:
+        return f"No sufficient SEC filing text found for {ticker} supply chain extraction."
+
+    model_name = get_model("equity", "condense") # Using condense model for extraction
+    llm = get_llm(model_name)
+
+    sys_prompt = f"""You are a forensic forensic equity analyst reviewing SEC filings for {ticker}.
+Your task is to extract ANY explicit mentions of:
+1. Major Customers / Clients (named or described)
+2. Revenue Concentration Risk (e.g., "One customer accounted for 15% of revenue")
+3. Key Suppliers / Vendors / Manufacturing Partners
+4. Supply Chain Risks or Dependencies
+
+Do not guess. Only extract what is explicitly stated in the text.
+If the text does NOT mention specific names or concentration metrics, state that explicitly.
+Format your output as a concise Markdown brief.
+"""
+
+    # Truncate to avoid massive context blowups (take the first 40,000 chars roughly)
+    safe_text = filings_text[:40000]
+
+    try:
+        messages = [
+            SystemMessage(content=sys_prompt),
+            HumanMessage(content=f"SEC FILING TEXT:\n\n{safe_text}")
+        ]
+        response = llm.invoke(messages)
+        return response.content
+    except Exception as e:
+        print(f"Warning: Supply chain extraction failed: {e}")
+        return f"Failed to extract supply chain data from SEC filings: {e}"

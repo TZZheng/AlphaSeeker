@@ -26,7 +26,9 @@ from src.agents.equity.tools.visualization import plot_price_history
 from src.agents.equity.tools.financials import fetch_financial_metrics
 from src.agents.equity.tools.peers import fetch_peer_metrics, evaluate_candidates, extract_peers_from_text
 from src.shared.web_search import search_web, search_news, deep_search
-from src.agents.equity.tools.sec_filings import search_and_read_filings
+from src.agents.equity.tools.sec_filings import search_and_read_filings, extract_supply_chain_data
+from src.agents.equity.tools.insider_trading import fetch_insider_activity
+from src.agents.equity.tools.earnings_calls import research_earnings_call
 from src.agents.equity.tools.company_profile import fetch_company_profile
 from src.shared.llm_manager import get_llm
 from src.shared.model_config import get_model
@@ -58,7 +60,9 @@ SECTION_PROMPTS = {
         "Focus on Company Economics (inputs/outputs), Revenue Models, and Key Drivers. "
         "Describe the product mix. Use the Company Profile data for the official business description "
         "and ownership structure. IMPORTANT: mention key strategic investors/shareholders if present. "
-        "Include technology products, proprietary software, and hardware infrastructure details."
+        "Include technology products, proprietary software, and hardware infrastructure details. "
+        "Explicitly detail Supply Chain dependencies and Major Customer/Revenue Concentration Risks extracted from 10-K filings. "
+        "Include insights from the Latest Earnings Call regarding management tone and operational updates."
     ),
     "industry_analysis": (
         "Analyze Industry Dynamics. Use **Porter's 5 Forces** (Suppliers, Buyers, Substitutes, "
@@ -70,7 +74,8 @@ SECTION_PROMPTS = {
         "Analyze the underlying financial reality vs reported numbers. Assess **Quality of Earnings**. "
         "Use industry-specific ratios if applicable. USE THE MOST RECENT quarterly data and TTM figures, "
         "not just annual data. Always reference the specific fiscal periods (e.g., Q3 FY2025, TTM). "
-        "Include backlog/contract details if available from research. Analyze debt structure in detail."
+        "Include backlog/contract details if available from research. Analyze debt structure in detail. "
+        "You MUST include specific Forward Guidance numbers and Q&A sentiment extracted from the Latest Earnings Call."
     ),
     "valuation_analysis": (
         "Perform **Relative Valuation** (vs Peers) AND **Intrinsic/Absolute Valuation** (Conceptual DCF). "
@@ -86,7 +91,8 @@ SECTION_PROMPTS = {
     "esg_analysis": (
         "Analyze **Environmental** (Carbon/Waste/Energy consumption), **Social** (Labor/Safety), and "
         "**Governance** (Board/Alignment/Insider activity) factors. "
-        "Include data center power consumption, cooling infrastructure, and sustainability initiatives."
+        "Include data center power consumption, cooling infrastructure, and sustainability initiatives. "
+        "You MUST include a summary of Recent Insider Trading Activity (Form 4), quantifying aggregate buying/selling volume and highlighting any major insider moves."
     ),
     "competitor_analysis": (
         "Provide a detailed **Competitor Analysis**. "
@@ -456,17 +462,40 @@ def research_qualitative(state: AgentState) -> dict:
             print(f"SEC filing search failed: {e}")
             return []
 
+    def run_insider_trading() -> tuple:
+        try:
+            print(f"Fetching insider trading for {ticker}...")
+            return fetch_insider_activity(ticker)
+        except Exception as e:
+            print(f"Insider trading fetch failed: {e}")
+            return "", {}
+
+    def run_earnings_call() -> tuple:
+        try:
+            print(f"Fetching earnings call insights for {ticker}...")
+            return research_earnings_call(ticker, company_name)
+        except Exception as e:
+            print(f"Earnings call fetch failed: {e}")
+            return "", {}
+
     text_results: list = []
     news_results: list = []
     sec_results: list = []
+    insider_results: tuple = ("", {})
+    earnings_results: tuple = ("", {})
 
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         future_text = executor.submit(run_text_search)
         future_news = executor.submit(run_news_search)
         future_sec = executor.submit(run_sec_search)
+        future_insider = executor.submit(run_insider_trading)
+        future_earnings = executor.submit(run_earnings_call)
+        
         text_results = future_text.result()
         news_results = future_news.result()
         sec_results = future_sec.result()
+        insider_results = future_insider.result()
+        earnings_results = future_earnings.result()
 
     phase1_snippets = "\n".join([
         f"- [{r['title']}]({r['url']}): {r.get('snippet', '') or (r.get('full_text', '') or '')[:300]}"
@@ -535,12 +564,32 @@ def research_qualitative(state: AgentState) -> dict:
         key = f"SEC Filing: {f['form_type']} ({f['filing_date']})"
         research_data[key] = f"### SEC {f['form_type']} — {f['filing_date']}\nURL: {f['url']}\n\n{f['text']}\n"
 
+    # Extract 10-K Supply Chain data via LLM
+    if sec_results:
+        print("Extracting Supply Chain & Customer concentration from SEC filings...")
+        combined_sec_text = "\n\n".join([f["text"] for f in sec_results])
+        sc_insights = extract_supply_chain_data(ticker, combined_sec_text)
+        research_data["Supply Chain & Customer Concentration"] = f"### Supply Chain & Major Customers (10-K/Q)\n\n{sc_insights}"
+
+    # Inject Earnings Call insights
+    er_text, er_meta = earnings_results
+    if er_text:
+        research_data["Latest Earnings Call Transcript Highlights"] = f"### Earnings Call Insights\n\n{er_text}"
+
+    # We read the insider trading markdown into research_data and state source_metadata
+    new_metadata = state.get("source_metadata", {}).copy()
+    insider_md_path, insider_meta = insider_results
+    if insider_md_path and os.path.exists(insider_md_path):
+        with open(insider_md_path, "r") as f:
+            insider_text = f.read()
+        research_data["Recent Insider Trading Activity"] = insider_text
+        new_metadata["insider_trading"] = insider_meta
+
     total_chars = sum(len(v) for v in research_data.values())
     print(f"Research complete: {articles_read} articles ({articles_with_full_text} full-text), "
-          f"{len(sec_results)} SEC filings, {len(followup_queries)} follow-up queries")
+          f"{len(sec_results)} SEC filings, {len(followup_queries)} follow-up queries, Phase 2 data sources loaded.")
     print(f"Total raw research text: {total_chars:,} characters (~{total_chars // 4:,} tokens)")
 
-    new_metadata = state.get("source_metadata", {}).copy()
     return {
         "research_data": research_data,
         "error": None,
@@ -622,6 +671,16 @@ RAW TEXT:
     extracted_facts = [f for f in extracted_facts if f]
     all_facts = "\n\n".join(extracted_facts)
     print(f"Synthesis MAP complete: {len(all_facts):,} chars of extracted facts")
+
+    # Safeguard against blowing past the LLM context window limits in the Reduce phase
+    if len(all_facts) > 150000:
+        print(f"Facts exceed 150k chars. Condensing down to a safe limit...")
+        all_facts = condense_context(
+            all_facts, 
+            max_chars=120000, 
+            purpose=f"consolidated and aggregated research facts for {ticker}"
+        )
+        print(f"Facts successfully condensed to {len(all_facts):,} chars")
 
     # --- REDUCE STEP ---
     research_brief: Dict[str, str] = {}

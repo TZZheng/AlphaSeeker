@@ -52,10 +52,6 @@ This document tracks the steps required to transition AlphaSeeker into a Supervi
 - [ ] **Implement Synthesizer:** Fill in `format_single_result()` and `synthesize_multi_agent()`.
 - [ ] **Implement Sub-Agent Runners:** Fill in `run_equity_agent()`, `run_macro_agent()`, `run_commodity_agent()`.
 
-## Phase 5: Institutional Knowledge Base (Paused)
-*Note: Paused until the live-data agents are fully functional.*
-- [ ] **Offline Ingestion Pipeline:** Ingest 4,000+ pages of professional research into vector DB.
-- [ ] **Document QA Sub-Agent:** RAG Agent for semantic search across institutional reports.
 
 ## Phase 6: Testing & Documentation
 - [ ] **Tests directory:** Create `tests/` with test_supervisor.py, test_equity_agent.py, etc.
