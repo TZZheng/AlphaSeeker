@@ -33,6 +33,7 @@ from src.agents.equity.tools.company_profile import fetch_company_profile
 from src.shared.llm_manager import get_llm
 from src.shared.model_config import get_model
 from src.shared.text_utils import condense_context, read_file_safe
+from src.shared.report_filename import build_prompt_report_filename, extract_prompt_text
 
 
 # --- Model Assignments (from config/models.yaml, overridable via env vars) ---
@@ -1119,7 +1120,13 @@ def save_report(state: AgentState) -> dict:
         
     report_dir = os.path.join(os.getcwd(), "reports")
     os.makedirs(report_dir, exist_ok=True)
-    report_path = os.path.join(report_dir, f"{ticker}_initiation_report.md")
+    prompt_text = extract_prompt_text(state.get("messages"))
+    filename = build_prompt_report_filename(
+        prompt_text=prompt_text,
+        fallback_stem=f"{ticker}_initiation_report",
+        suffix="equity",
+    )
+    report_path = os.path.join(report_dir, filename)
     
     with open(report_path, "w") as f:
         f.write(md)

@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from src.agents.macro.schemas import MacroState, MacroPlan, MacroSection, MacroReport
 from src.shared.llm_manager import get_llm
 from src.shared.model_config import get_model
+from src.shared.report_filename import build_prompt_report_filename, extract_prompt_text
 from src.shared.text_utils import condense_context, read_file_safe
 from src.shared.web_search import deep_search
 
@@ -461,13 +462,15 @@ def save_report(state: MacroState) -> dict:
     for r in report.references:
         md += f"- {r}\n"
         
-    # Create a safe filename from the topic
-    import re
-    safe_topic = re.sub(r'[^a-zA-Z0-9]+', '_', report.topic).strip('_')
-    
     report_dir = os.path.join(os.getcwd(), "reports")
     os.makedirs(report_dir, exist_ok=True)
-    report_path = os.path.join(report_dir, f"Macro_{safe_topic}.md")
+    prompt_text = extract_prompt_text(state.get("messages"))
+    filename = build_prompt_report_filename(
+        prompt_text=prompt_text,
+        fallback_stem=f"Macro_{report.topic}",
+        suffix="macro",
+    )
+    report_path = os.path.join(report_dir, filename)
     
     with open(report_path, "w") as f:
         f.write(md)
