@@ -11,13 +11,13 @@ Pipeline order:
     → verify_content → save_report → END
 """
 
-from typing import Literal, Dict, List
+from typing import Any, Dict, List, Literal, TypeVar, cast
 import os
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from src.agents.equity.schemas import AgentState, AnalysisPlan, ResearchReport, ResearchSection
@@ -105,6 +105,49 @@ SECTION_PROMPTS = {
 
 
 # Note: condense_context and read_file_safe are imported from src.shared.text_utils
+
+StatePatch = AgentState
+TModel = TypeVar("TModel", bound=BaseModel)
+
+
+def _message_content_to_text(content: str | list[str | dict[Any, Any]]) -> str:
+    """Normalize LangChain message content into plain text."""
+    if isinstance(content, str):
+        return content
+    parts: List[str] = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict):
+            text_value = item.get("text")
+            if isinstance(text_value, str):
+                parts.append(text_value)
+    return "\n".join(part for part in parts if part)
+
+
+def _coerce_model(value: object, model_type: type[TModel]) -> TModel:
+    """Validate/convert structured LLM output into a concrete Pydantic model."""
+    if isinstance(value, model_type):
+        return value
+    if isinstance(value, BaseModel):
+        return model_type.model_validate(value.model_dump())
+    if isinstance(value, dict):
+        return model_type.model_validate(value)
+    raise TypeError(f"Expected {model_type.__name__} output, got {type(value).__name__}")
+
+
+def _require_messages(state: AgentState, node_name: str) -> List[BaseMessage]:
+    messages = state.get("messages")
+    if isinstance(messages, list):
+        return cast(List[BaseMessage], messages)
+    raise ValueError(f"{node_name}: missing required 'messages' in state")
+
+
+def _require_str(state: AgentState, key: str, node_name: str) -> str:
+    value = state.get(key)
+    if isinstance(value, str) and value.strip():
+        return value
+    raise ValueError(f"{node_name}: missing required '{key}' in state")
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +246,7 @@ def generate_followup_queries(
     industry: str,
     profile_text: str,
     initial_snippets: str,
-    categorized_peers: Dict[str, List[str]] = {},
+    categorized_peers: Dict[str, List[str]] | None = None,
 ) -> List[str]:
     """
     Phase 2: Uses the LLM to generate company-specific deep-dive queries
@@ -234,6 +277,8 @@ def generate_followup_queries(
         focus_areas="specific facts, names, numbers, events, risks not yet covered",
     )
 
+    peers = categorized_peers or {}
+
     prompt = f"""You are a senior equity research analyst preparing a deep-dive on {name} ({ticker}).
 Sector: {sector} | Industry: {industry}
 
@@ -246,9 +291,9 @@ You have already gathered the following information:
 {condensed_snippets}
 
 ## Identified Peers
-Giants: {', '.join(categorized_peers.get('Giants', []))}
-Direct Peers: {', '.join(categorized_peers.get('Peers', []))}
-Disruptors/Private: {', '.join(categorized_peers.get('Disruptors', []))}
+Giants: {', '.join(peers.get('Giants', []))}
+Direct Peers: {', '.join(peers.get('Peers', []))}
+Disruptors/Private: {', '.join(peers.get('Disruptors', []))}
 
 ---
 
@@ -261,7 +306,7 @@ information that a professional equity research report would need. Focus on:
 4. **Known risks and controversies** — name actual lawsuits, regulatory actions, analyst downgrades
 5. **Industry-specific metrics** — use actual industry terminology and KPIs
 6. **Recent M&A and partnerships** — name actual acquisition targets, deal values
-7. **Competitive Benchmarking** — Compare {ticker} vs SPECIFIC peers (e.g. "vs {categorized_peers.get('Giants', ['Giant'])[0]} margins", "vs {categorized_peers.get('Disruptors', ['Startup'])[0]} technology")
+7. **Competitive Benchmarking** — Compare {ticker} vs SPECIFIC peers (e.g. "vs {peers.get('Giants', ['Giant'])[0]} margins", "vs {peers.get('Disruptors', ['Startup'])[0]} technology")
 
 IMPORTANT RULES:
 - Every query should contain the company name or ticker
@@ -276,7 +321,8 @@ Output ONLY the queries, one per line, no numbering or formatting.
 
     try:
         response = get_llm(MODEL_FOLLOWUP).invoke([HumanMessage(content=prompt)])
-        lines = [q.strip() for q in response.content.strip().split("\n") if q.strip()]
+        response_text = _message_content_to_text(cast(str | list[str | dict[Any, Any]], response.content))
+        lines = [q.strip() for q in response_text.strip().split("\n") if q.strip()]
         queries = [q for q in lines if len(q) > 15 and not q.startswith("#") and not q.startswith("*")]
         print(f"LLM generated {len(queries)} follow-up queries")
         return queries[:25]
@@ -297,9 +343,9 @@ _read_file = read_file_safe
 # Nodes
 # ---------------------------------------------------------------------------
 
-def planner(state: AgentState) -> dict:
+def planner(state: AgentState) -> StatePatch:
     """Decomposes the request. Initializes empty sections."""
-    recent_messages = state["messages"][-10:]
+    recent_messages = _require_messages(state, "planner")[-10:]
     system_prompt = SystemMessage(content="""
     You are a financial research planner. 
     Analyze the user's request and create a detailed execution plan.
@@ -316,7 +362,8 @@ def planner(state: AgentState) -> dict:
     structured_llm = get_llm(MODEL_PLAN).with_structured_output(AnalysisPlan, method="json_mode")
     try:
         messages = [system_prompt] + recent_messages
-        plan = structured_llm.invoke(messages)
+        raw_plan = structured_llm.invoke(messages)
+        plan = _coerce_model(raw_plan, AnalysisPlan)
         return {
             "plan": plan,
             "ticker": plan.ticker,
@@ -331,11 +378,11 @@ def planner(state: AgentState) -> dict:
         return {"error": f"Failed to generate plan: {str(e)}"}
 
 
-def fetch_data(state: AgentState) -> dict:
+def fetch_data(state: AgentState) -> StatePatch:
     """Fetches historical market data (Technical)."""
     print("\n--- [Equity] Phase: Fetching Market Data ---")
     if state.get("error"): return state
-    ticker = state["ticker"]
+    ticker = _require_str(state, "ticker", "fetch_data")
     period = state.get("period", "1y")
     try:
         file_path = fetch_historical_data(ticker, period)
@@ -344,12 +391,12 @@ def fetch_data(state: AgentState) -> dict:
         return {"error": f"Failed to fetch market data: {str(e)}"}
 
 
-def generate_chart(state: AgentState) -> dict:
+def generate_chart(state: AgentState) -> StatePatch:
     """Generates a chart."""
     print("\n--- [Equity] Phase: Generating Price Chart ---")
     if state.get("error"): return state
-    data_path = state["market_data_path"]
-    ticker = state["ticker"]
+    data_path = _require_str(state, "market_data_path", "generate_chart")
+    ticker = _require_str(state, "ticker", "generate_chart")
     try:
         chart_path = plot_price_history(data_path, ticker)
         return {"chart_path": chart_path, "error": None}
@@ -357,11 +404,11 @@ def generate_chart(state: AgentState) -> dict:
         return {"error": f"Failed to generate chart: {str(e)}"}
 
 
-def fetch_company_profile_node(state: AgentState) -> dict:
+def fetch_company_profile_node(state: AgentState) -> StatePatch:
     """Fetches company identity, ownership structure, and institutional holders."""
     print("\n--- [Equity] Phase: Fetching Company Profile ---")
     if state.get("error"): return state
-    ticker = state["ticker"]
+    ticker = _require_str(state, "ticker", "fetch_company_profile_node")
     metadata_store = state.get("source_metadata", {})
     try:
         file_path, metadata = fetch_company_profile(ticker)
@@ -377,11 +424,11 @@ def fetch_company_profile_node(state: AgentState) -> dict:
         return {"company_profile_path": None, "error": None}
 
 
-def fetch_financials(state: AgentState) -> dict:
+def fetch_financials(state: AgentState) -> StatePatch:
     """Fetches fundamental data (annual + quarterly + TTM)."""
     print("\n--- [Equity] Phase: Fetching Financials ---")
     if state.get("error"): return state
-    ticker = state["ticker"]
+    ticker = _require_str(state, "ticker", "fetch_financials")
     metadata_store = state.get("source_metadata", {})
     try:
         file_path, metadata = fetch_financial_metrics(ticker)
@@ -393,7 +440,7 @@ def fetch_financials(state: AgentState) -> dict:
         return {"financials_path": None, "error": None}
 
 
-def research_qualitative(state: AgentState) -> dict:
+def research_qualitative(state: AgentState) -> StatePatch:
     """
     Two-phase deep research node.
 
@@ -403,7 +450,7 @@ def research_qualitative(state: AgentState) -> dict:
     """
     print("\n--- [Equity] Phase: Deep Qualitative Research ---")
     if state.get("error"): return state
-    ticker = state["ticker"]
+    ticker = _require_str(state, "ticker", "research_qualitative")
 
     profile_path = state.get("company_profile_path")
     company_name = ""
@@ -598,7 +645,7 @@ def research_qualitative(state: AgentState) -> dict:
     }
 
 
-def synthesize_research(state: AgentState) -> dict:
+def synthesize_research(state: AgentState) -> StatePatch:
     """
     Map-Reduce LLM synthesis: converts massive raw research into focused section briefs.
 
@@ -608,7 +655,7 @@ def synthesize_research(state: AgentState) -> dict:
     print("\n--- [Equity] Phase: Synthesizing Research (Map/Reduce) ---")
     if state.get("error"): return state
 
-    ticker = state["ticker"]
+    ticker = _require_str(state, "ticker", "synthesize_research")
     research_data = state.get("research_data", {})
 
     if not research_data:
@@ -635,7 +682,7 @@ def synthesize_research(state: AgentState) -> dict:
 
     import concurrent.futures
 
-    def _map_chunk(args):
+    def _map_chunk(args: tuple[int, str]) -> str:
         i, chunk = args
         map_prompt = f"""
 You are a research analyst extracting facts about {ticker}.
@@ -660,8 +707,9 @@ RAW TEXT:
 """
         try:
             response = get_llm(MODEL_MAP).invoke([HumanMessage(content=map_prompt)])
-            print(f"  MAP chunk {i+1}/{len(chunks)}: extracted {len(response.content)} chars of facts")
-            return response.content
+            response_text = _message_content_to_text(cast(str | list[str | dict[Any, Any]], response.content))
+            print(f"  MAP chunk {i+1}/{len(chunks)}: extracted {len(response_text)} chars of facts")
+            return response_text
         except Exception as e:
             print(f"  MAP chunk {i+1} failed: {e}")
             return ""
@@ -686,7 +734,7 @@ RAW TEXT:
     # --- REDUCE STEP ---
     research_brief: Dict[str, str] = {}
 
-    def _reduce_section(section_key):
+    def _reduce_section(section_key: str) -> tuple[str, str]:
         section_label = section_key.replace("_", " ").title()
         reduce_prompt = f"""
 You are preparing a research brief for the **{section_label}** section of an equity research report on {ticker}.
@@ -711,8 +759,9 @@ EXTRACTED FACTS:
 """
         try:
             response = get_llm(MODEL_REDUCE).invoke([HumanMessage(content=reduce_prompt)])
-            print(f"  REDUCE {section_key}: {len(response.content)} chars")
-            return section_key, response.content
+            response_text = _message_content_to_text(cast(str | list[str | dict[Any, Any]], response.content))
+            print(f"  REDUCE {section_key}: {len(response_text)} chars")
+            return section_key, response_text
         except Exception as e:
             print(f"  REDUCE {section_key} failed: {e}")
             return section_key, ""
@@ -728,7 +777,7 @@ EXTRACTED FACTS:
     return {"research_brief": research_brief, "extracted_facts": all_facts, "error": None}
 
 
-def review_and_expand_peers(state: AgentState) -> dict:
+def review_and_expand_peers(state: AgentState) -> StatePatch:
     """
     Iterative Peer Analysis Node.
     
@@ -741,7 +790,7 @@ def review_and_expand_peers(state: AgentState) -> dict:
     print("\n--- [Equity] Phase: Peer Analysis ---")
     if state.get("error"): return state
     
-    ticker = state["ticker"]
+    ticker = _require_str(state, "ticker", "review_and_expand_peers")
     extracted_facts = state.get("extracted_facts", "")
     
     if not extracted_facts:
@@ -807,7 +856,9 @@ def review_and_expand_peers(state: AgentState) -> dict:
                 """
                 try:
                     extract_response = get_llm(MODEL_MAP).invoke([HumanMessage(content=extraction_prompt)])
-                    peer_research_facts = extract_response.content
+                    peer_research_facts = _message_content_to_text(
+                        cast(str | list[str | dict[Any, Any]], extract_response.content)
+                    )
                     print(f"Extracted {len(peer_research_facts)} chars of peer facts.")
                 except Exception as e:
                     print(f"Peer fact extraction failed: {e}")
@@ -844,7 +895,9 @@ def review_and_expand_peers(state: AgentState) -> dict:
     new_briefs = state.get("research_brief", {}).copy()
     try:
         response = get_llm(MODEL_REDUCE).invoke([HumanMessage(content=competitor_brief_prompt)])
-        new_briefs["competitor_analysis"] = response.content
+        new_briefs["competitor_analysis"] = _message_content_to_text(
+            cast(str | list[str | dict[Any, Any]], response.content)
+        )
     except Exception as e:
         print(f"Competitor brief generation failed: {e}")
         new_briefs["competitor_analysis"] = "Analysis failed."
@@ -866,12 +919,12 @@ def review_and_expand_peers(state: AgentState) -> dict:
     }
 
 
-def generate_section(state: AgentState) -> dict:
+def generate_section(state: AgentState) -> StatePatch:
     """Generates all sections in parallel using synthesized research brief."""
     print("\n--- [Equity] Phase: Generating Report Sections ---")
     if state.get("error"): return state
 
-    ticker = state["ticker"]
+    ticker = _require_str(state, "ticker", "generate_section")
     fin_path = state.get("financials_path")
     peer_path = state.get("peer_data_path")
     profile_path = state.get("company_profile_path")
@@ -881,12 +934,12 @@ def generate_section(state: AgentState) -> dict:
     profile_content = _read_file(profile_path, max_chars=5000)
 
     research_brief = state.get("research_brief", {})
-    current_sections = state.get("sections", {}) or {}
+    current_sections = state.get("sections", {})
     new_sections = current_sections.copy()
 
     import concurrent.futures
 
-    def _generate_single_section(section_key):
+    def _generate_single_section(section_key: str) -> tuple[str, ResearchSection | None]:
         if section_key in current_sections:
             return section_key, current_sections[section_key]
 
@@ -930,7 +983,8 @@ def generate_section(state: AgentState) -> dict:
         """
         try:
             structured_llm = get_llm(MODEL_SECTION).with_structured_output(ResearchSection)
-            section = structured_llm.invoke([HumanMessage(content=prompt)])
+            raw_section = structured_llm.invoke([HumanMessage(content=prompt)])
+            section = _coerce_model(raw_section, ResearchSection)
             print(f"Section '{section_key}' generated ({len(section.content)} chars)")
             return section_key, section
         except Exception as e:
@@ -952,12 +1006,12 @@ def generate_section(state: AgentState) -> dict:
     return {"sections": new_sections, "error": None}
 
 
-def generate_summary(state: AgentState) -> dict:
+def generate_summary(state: AgentState) -> StatePatch:
     """Generates the Investment Summary based on all completed sections."""
     print("\n--- [Equity] Phase: Generating Final Summary ---")
     if state.get("error"): return state
 
-    ticker = state["ticker"]
+    ticker = _require_str(state, "ticker", "generate_summary")
     sections = state.get("sections", {})
 
     full_text = "\n\n".join([f"## {s.title}\n{s.content}" for s in sections.values()])
@@ -1008,7 +1062,21 @@ def generate_summary(state: AgentState) -> dict:
     structured_llm = get_llm(MODEL_SUMMARY).with_structured_output(ExecutiveSummary)
     
     try:
-        summary = structured_llm.invoke([HumanMessage(content=prompt)])
+        raw_summary = structured_llm.invoke([HumanMessage(content=prompt)])
+        summary = _coerce_model(raw_summary, ExecutiveSummary)
+
+        required_sections = [
+            "business_description",
+            "industry_analysis",
+            "financial_analysis",
+            "valuation_analysis",
+            "investment_risks",
+            "esg_analysis",
+            "competitor_analysis",
+        ]
+        missing_sections = [key for key in required_sections if key not in sections]
+        if missing_sections:
+            return {"error": f"Missing sections for summary generation: {missing_sections}"}
         
         final_report = ResearchReport(
             ticker=ticker,
@@ -1033,7 +1101,7 @@ def generate_summary(state: AgentState) -> dict:
         return {"error": f"Failed to generate summary: {str(e)}"}
 
 
-def verify_content(state: AgentState) -> dict:
+def verify_content(state: AgentState) -> StatePatch:
     """Verifies the generated report."""
     print("\n--- [Equity] Phase: Verifying Output ---")
     if state.get("error"): return state
@@ -1042,12 +1110,14 @@ def verify_content(state: AgentState) -> dict:
     return state
 
 
-def save_report(state: AgentState) -> dict:
+def save_report(state: AgentState) -> StatePatch:
     """Saves the report to Markdown."""
     print("\n--- [Equity] Phase: Saving Final Report ---")
     if state.get("error"): return state
     
     report = state.get("report_content")
+    if not report:
+        return {"error": "No report content found during save"}
     ticker = report.ticker
     chart_path = state.get("chart_path", "")
     

@@ -5,7 +5,7 @@ Mirrors the structure of equity/schemas.py for the macro research domain.
 Defines the state, plan, and output models for the macro pipeline.
 """
 
-from typing import List, Optional, TypedDict, Any, Dict
+from typing import List, TypedDict, Any, Dict
 from pydantic import BaseModel, Field
 from langchain_core.messages import BaseMessage
 
@@ -82,24 +82,24 @@ class MacroState(TypedDict, total=False):
     Mirrors the structure of equity/schemas.AgentState.
     """
     messages: List[BaseMessage]
-    topic: Optional[str]
+    topic: str
 
     # Plan
-    plan: Optional[MacroPlan]
+    plan: MacroPlan
 
     # Data file paths
-    indicators_path: Optional[str]          # Fetched FRED / World Bank data as Markdown
+    indicators_path: str                    # Fetched FRED / World Bank data as Markdown
 
     # Research
-    research_data: Optional[Dict[str, str]] # Raw web research keyed by query
-    extracted_facts: Optional[str]          # Map-reduced facts for section writing
-    research_brief: Optional[Dict[str, str]]# Per-section briefs
+    research_data: Dict[str, str]           # Raw web research keyed by query
+    extracted_facts: str                    # Map-reduced facts for section writing
+    research_brief: Dict[str, str]          # Per-section briefs
 
     # Working memory
-    sections: Optional[Dict[str, MacroSection]]
+    sections: Dict[str, MacroSection]
 
     # Output
-    source_metadata: Optional[dict]
-    report_content: Optional[MacroReport]
-    report_path: Optional[str]
-    error: Optional[str]
+    source_metadata: Dict[str, Any]
+    report_content: MacroReport
+    report_path: str
+    error: str | None

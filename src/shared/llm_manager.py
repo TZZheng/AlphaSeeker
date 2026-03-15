@@ -16,25 +16,18 @@ Usage::
 """
 
 import os
-from typing import TYPE_CHECKING, Dict, Callable
-
-if TYPE_CHECKING:
-    from langchain_core.language_models.chat_models import BaseChatModel
+from typing import Any, Callable, Dict, Protocol, cast
+from pydantic import SecretStr
 
 # ---------------------------------------------------------------------------
 # Rate Limit Handling (Wait & Alert)
 # ---------------------------------------------------------------------------
 from tenacity import (
-    retry,
     stop_after_attempt,
     wait_exponential,
-    retry_if_exception_type,
-    retry_if_exception,
-    before_sleep_log,
 )
 import logging
 import google.api_core.exceptions
-from langchain_google_genai.chat_models import ChatGoogleGenerativeAIError
 
 # Configure logger for rate limit alerts
 logger = logging.getLogger(__name__)
@@ -80,16 +73,43 @@ def _log_rate_limit(retry_state):
     """Alert user when rate limit is hit."""
     print(f"⚠️ RATE LIMIT HIT: Waiting {retry_state.next_action.sleep}s before retry...", flush=True)
 
+
+def _secret_from_env(var_name: str) -> SecretStr | None:
+    value = os.getenv(var_name)
+    return SecretStr(value) if value else None
+
+
+class SupportsModelOps(Protocol):
+    """Minimal interface used by RateLimitWrapper to execute or bind models."""
+
+    def invoke(self, *args: Any, **kwargs: Any) -> Any:
+        ...
+
+    def stream(self, *args: Any, **kwargs: Any) -> Any:
+        ...
+
+
+def _bind_model_method(
+    model: SupportsModelOps,
+    method_name: str,
+    *args: Any,
+    **kwargs: Any,
+) -> SupportsModelOps:
+    method = getattr(model, method_name, None)
+    if not callable(method):
+        raise TypeError(f"Model does not support '{method_name}' binding")
+    return cast(SupportsModelOps, method(*args, **kwargs))
+
 class RateLimitWrapper:
     """
     Wrapper for LLM to handle 429 errors with wait-and-alert logic and model fallback.
     Uses a Factory Pattern to allow reconstructing the model chain (including 
     structured output bindings) when switching underlying models.
     """
-    def __init__(self, model_factory: Callable[[str], "BaseChatModel"], current_model_name: str):
+    def __init__(self, model_factory: Callable[[str], SupportsModelOps], current_model_name: str):
         self.model_factory = model_factory
         self.current_model_name = current_model_name
-        self._instance = None
+        self._instance: SupportsModelOps | None = None
 
     @property
     def model(self):
@@ -133,35 +153,37 @@ class RateLimitWrapper:
         
         return True
 
-    def invoke(self, *args, **kwargs):
+    def invoke(self, *args: Any, **kwargs: Any) -> Any:
         return self._retry_invoke(*args, **kwargs)
     
-    def stream(self, *args, **kwargs):
+    def stream(self, *args: Any, **kwargs: Any) -> Any:
         return self._retry_stream(*args, **kwargs)
 
-    def _retry_invoke(self, *args, **kwargs):
-         from tenacity import Retrying
-         for attempt in Retrying(
+    def _retry_invoke(self, *args: Any, **kwargs: Any) -> Any:
+        from tenacity import Retrying
+        for attempt in Retrying(
             retry=self._check_retry,
             wait=wait_exponential(multiplier=1, min=4, max=60),
             stop=stop_after_attempt(10),
             before_sleep=_log_rate_limit,
             reraise=True
-         ):
+        ):
             with attempt:
                 return self.model.invoke(*args, **kwargs)
+        raise RuntimeError("Retry loop exited without invoking model")
 
-    def _retry_stream(self, *args, **kwargs):
-         from tenacity import Retrying
-         for attempt in Retrying(
+    def _retry_stream(self, *args: Any, **kwargs: Any) -> Any:
+        from tenacity import Retrying
+        for attempt in Retrying(
             retry=self._check_retry,
             wait=wait_exponential(multiplier=1, min=4, max=60),
             stop=stop_after_attempt(10),
             before_sleep=_log_rate_limit,
             reraise=True
-         ):
+        ):
             with attempt:
                 return self.model.stream(*args, **kwargs)
+        raise RuntimeError("Retry loop exited without invoking model")
 
     def with_structured_output(self, *args, **kwargs):
         """
@@ -169,17 +191,17 @@ class RateLimitWrapper:
         This ensures the binding is re-applied if we switch models.
         """
         # print(f"DEBUG: RateLimitWrapper.with_structured_output factory creation", flush=True)
-        def new_factory(name):
+        def new_factory(name: str) -> SupportsModelOps:
             base = self.model_factory(name)
-            return base.with_structured_output(*args, **kwargs)
+            return _bind_model_method(base, "with_structured_output", *args, **kwargs)
         return RateLimitWrapper(new_factory, self.current_model_name)
 
     def bind_tools(self, *args, **kwargs):
         """Bind tools to a NEW factory."""
         # print(f"DEBUG: RateLimitWrapper.bind_tools factory creation", flush=True)
-        def new_factory(name):
+        def new_factory(name: str) -> SupportsModelOps:
             base = self.model_factory(name)
-            return base.bind_tools(*args, **kwargs)
+            return _bind_model_method(base, "bind_tools", *args, **kwargs)
         return RateLimitWrapper(new_factory, self.current_model_name)
 
     def __getattr__(self, name):
@@ -191,29 +213,29 @@ class RateLimitWrapper:
 # ---------------------------------------------------------------------------
 # Registry: model name → configured ChatModel instance (lazy-initialized)
 # ---------------------------------------------------------------------------
-_registry: Dict[str, "BaseChatModel"] = {}
+_registry: Dict[str, RateLimitWrapper] = {}
 
 
-def _build_model(model_name: str) -> "BaseChatModel":
+def _build_model(model_name: str) -> RateLimitWrapper:
     """Construct a ChatModel for a given model name.
 
     Args:
         model_name: The model identifier string (e.g. ``"kimi-k2.5"``).
 
     Returns:
-        A configured ``BaseChatModel`` instance wrapped in a RateLimitWrapper.
+        A configured model wrapped in ``RateLimitWrapper``.
 
     Raises:
         ValueError: If the model name is not recognized.
     """
-    def _factory(name: str):
+    def _factory(name: str) -> SupportsModelOps:
         if name.startswith("kimi-"):
             from langchain_openai import ChatOpenAI
             return ChatOpenAI(
                 model=name,
                 temperature=1,
                 base_url="https://api.moonshot.ai/v1",
-                api_key=os.getenv("KIMI_API_KEY"),
+                api_key=_secret_from_env("KIMI_API_KEY"),
                 max_retries=2,
             )
         elif name.startswith("gpt-") or name.startswith("o1") or name.startswith("o3") or name.startswith("o4"):
@@ -221,15 +243,17 @@ def _build_model(model_name: str) -> "BaseChatModel":
             return ChatOpenAI(
                 model=name,
                 temperature=0.3,
-                api_key=os.getenv("OPENAI_API_KEY"),
+                api_key=_secret_from_env("OPENAI_API_KEY"),
                 max_retries=2,
             )
         elif name.startswith("claude-"):
             from langchain_anthropic import ChatAnthropic
             return ChatAnthropic(
-                model=name,
+                model_name=name,
+                timeout=None,
+                stop=None,
                 temperature=0.3,
-                api_key=os.getenv("ANTHROPIC_API_KEY"),
+                api_key=_secret_from_env("ANTHROPIC_API_KEY") or SecretStr(""),
                 max_retries=2,
             )
         elif name.startswith("sf/"):
@@ -240,7 +264,7 @@ def _build_model(model_name: str) -> "BaseChatModel":
                 model=sf_model,
                 temperature=0.3,
                 base_url="https://api.siliconflow.cn/v1",
-                api_key=os.getenv("SILICONFLOW_API_KEY"),
+                api_key=_secret_from_env("SILICONFLOW_API_KEY"),
                 max_retries=2,
             )
         elif name.startswith("gemini-"):
@@ -260,14 +284,14 @@ def _build_model(model_name: str) -> "BaseChatModel":
     return RateLimitWrapper(_factory, model_name)
 
 
-def get_llm(model_name: str) -> "BaseChatModel":
+def get_llm(model_name: str) -> RateLimitWrapper:
     """Get a configured LLM instance by model name. Cached after first use.
 
     Args:
         model_name: The model identifier string.
 
     Returns:
-        A configured ``BaseChatModel`` instance.
+        A configured rate-limit-safe model wrapper.
     """
     if model_name not in _registry:
         _registry[model_name] = _build_model(model_name)

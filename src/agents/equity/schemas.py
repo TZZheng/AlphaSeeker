@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, TypedDict, Any, Dict
+from typing import List, TypedDict, Any, Dict
 from langchain_core.messages import BaseMessage
 
 class AnalysisPlan(BaseModel):
@@ -51,29 +51,29 @@ class AgentState(TypedDict, total=False):
     The state of the agent as it proceeds through the workflow.
     """
     messages: List[BaseMessage]
-    ticker: Optional[str]
-    period: Optional[str]
+    ticker: str
+    period: str
     
     # File Paths
-    market_data_path: Optional[str]
-    chart_path: Optional[str]
-    financials_path: Optional[str]
-    peer_data_path: Optional[str]
-    categorized_peers: Optional[Dict[str, List[str]]] # {"Giants": [...], "Peers": [...], "Disruptors": [...]}
-    company_profile_path: Optional[str]
+    market_data_path: str
+    chart_path: str
+    financials_path: str | None
+    peer_data_path: str | None
+    categorized_peers: Dict[str, List[str]] # {"Giants": [...], "Peers": [...], "Disruptors": [...]}
+    company_profile_path: str | None
     
     # Qualitative Data
-    research_data: Optional[Dict[str, str]] # {"annual_report_risks": "...", "industry_trends": "..."}
-    extracted_facts: Optional[str] # Combined facts from map-reduce synthesis for inference
-    research_brief: Optional[Dict[str, str]] # LLM-synthesized brief per section topic
+    research_data: Dict[str, str] # {"annual_report_risks": "...", "industry_trends": "..."}
+    extracted_facts: str # Combined facts from map-reduce synthesis for inference
+    research_brief: Dict[str, str] # LLM-synthesized brief per section topic
     
-    plan: Optional[AnalysisPlan]
+    plan: AnalysisPlan
     
     # Working Memory for Sections
-    sections: Optional[Dict[str, ResearchSection]] # {"Business": SectionObj, "Industry": SectionObj...}
+    sections: Dict[str, ResearchSection] # {"Business": SectionObj, "Industry": SectionObj...}
     
-    source_metadata: Optional[dict]
+    source_metadata: Dict[str, Any]
     
-    report_content: Optional[ResearchReport]
-    report_path: Optional[str]
-    error: Optional[str]
+    report_content: ResearchReport
+    report_path: str
+    error: str | None

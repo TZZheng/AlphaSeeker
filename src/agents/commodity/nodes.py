@@ -10,12 +10,16 @@ Pipeline order:
     → generate_section (loop) → generate_report → save_report → END
 """
 
-from typing import Literal
-from src.agents.commodity.schemas import CommodityState
+from typing import Any, Dict, List, Literal, TypeVar, cast
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from pydantic import BaseModel
+
+from src.agents.commodity.schemas import CommodityState, CommodityPlan, CommoditySection, CommodityReport
 from src.shared.llm_manager import get_llm
 from src.shared.model_config import get_model
 from src.shared.report_filename import build_prompt_report_filename, extract_prompt_text
 from src.shared.text_utils import condense_context, read_file_safe
+from src.shared.web_search import deep_search
 
 
 # --- Model Assignments (from config/models.yaml, overridable via env vars) ---
@@ -64,12 +68,55 @@ SECTION_PROMPTS = {
     ),
 }
 
+StatePatch = CommodityState
+TModel = TypeVar("TModel", bound=BaseModel)
+
+
+def _message_content_to_text(content: str | list[str | dict[Any, Any]]) -> str:
+    """Normalize LangChain message content into plain text."""
+    if isinstance(content, str):
+        return content
+    parts: List[str] = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict):
+            text_value = item.get("text")
+            if isinstance(text_value, str):
+                parts.append(text_value)
+    return "\n".join(part for part in parts if part)
+
+
+def _coerce_model(value: object, model_type: type[TModel]) -> TModel:
+    """Validate/convert structured LLM output into a concrete Pydantic model."""
+    if isinstance(value, model_type):
+        return value
+    if isinstance(value, BaseModel):
+        return model_type.model_validate(value.model_dump())
+    if isinstance(value, dict):
+        return model_type.model_validate(value)
+    raise TypeError(f"Expected {model_type.__name__} output, got {type(value).__name__}")
+
+
+def _require_messages(state: CommodityState, node_name: str) -> List[BaseMessage]:
+    messages = state.get("messages")
+    if isinstance(messages, list):
+        return cast(List[BaseMessage], messages)
+    raise ValueError(f"{node_name}: missing required 'messages' in state")
+
+
+def _require_plan(state: CommodityState, node_name: str) -> CommodityPlan:
+    plan = state.get("plan")
+    if plan is None:
+        raise ValueError(f"{node_name}: missing required 'plan' in state")
+    return _coerce_model(plan, CommodityPlan)
+
 
 # ---------------------------------------------------------------------------
 # Data Nodes
 # ---------------------------------------------------------------------------
 
-def planner(state: CommodityState) -> dict:
+def planner(state: CommodityState) -> StatePatch:
     """
     Decomposes the user's commodity request into a CommodityPlan via structured LLM output.
     Identifies the asset name, asset_class, primary_exchange, and time_horizon.
@@ -80,10 +127,7 @@ def planner(state: CommodityState) -> dict:
                  sections, error
     """
     print("\n--- [Commodity] Phase: Planner ---")
-    recent_messages = state["messages"][-10:]
-    
-    from langchain_core.messages import SystemMessage
-    from src.agents.commodity.schemas import CommodityPlan
+    recent_messages = _require_messages(state, "planner")[-10:]
     
     system_prompt = SystemMessage(content="""
     You are a commodity market research planner.
@@ -100,7 +144,8 @@ def planner(state: CommodityState) -> dict:
     """)
     try:
         structured_llm = get_llm(MODEL_PLAN).with_structured_output(CommodityPlan, method="json_mode")
-        plan = structured_llm.invoke([system_prompt] + recent_messages)
+        raw_plan = structured_llm.invoke([system_prompt] + recent_messages)
+        plan = _coerce_model(raw_plan, CommodityPlan)
         return {
             "plan": plan,
             "asset": plan.asset,
@@ -114,7 +159,7 @@ def planner(state: CommodityState) -> dict:
         return {"error": f"Failed to generate plan: {str(e)}"}
 
 
-def fetch_eia_data(state: CommodityState) -> dict:
+def fetch_eia_data(state: CommodityState) -> StatePatch:
     """
     Fetches EIA inventory and production data for energy commodities.
     Saves a Markdown summary to eia_data_path.
@@ -125,19 +170,19 @@ def fetch_eia_data(state: CommodityState) -> dict:
     """
     print("\n--- [Commodity] Phase: Fetching EIA Data ---")
     if state.get("error"): return state
-    asset = state["plan"].asset
+    asset = _require_plan(state, "fetch_eia_data").asset
     
     from src.agents.commodity.tools.eia import fetch_eia_inventory
     path, meta = fetch_eia_inventory(asset)
     
-    metadata = state.get("source_metadata", {})
+    metadata = state.get("source_metadata", {}).copy()
     if meta:
         metadata["eia"] = meta
         
     return {"eia_data_path": path, "source_metadata": metadata, "error": None}
 
 
-def fetch_cot_data(state: CommodityState) -> dict:
+def fetch_cot_data(state: CommodityState) -> StatePatch:
     """
     Fetches CFTC Commitments of Traders (COT) report for the commodity's
     primary futures market. Shows speculative long/short positioning.
@@ -148,19 +193,19 @@ def fetch_cot_data(state: CommodityState) -> dict:
     """
     print("\n--- [Commodity] Phase: Fetching CFTC COT Data ---")
     if state.get("error"): return state
-    asset = state["plan"].asset
+    asset = _require_plan(state, "fetch_cot_data").asset
     
     from src.agents.commodity.tools.cftc import fetch_cot_report
     path, meta = fetch_cot_report(asset)
     
-    metadata = state.get("source_metadata", {})
+    metadata = state.get("source_metadata", {}).copy()
     if meta:
         metadata["cot"] = meta
         
     return {"cot_data_path": path, "source_metadata": metadata, "error": None}
 
 
-def fetch_futures_curve(state: CommodityState) -> dict:
+def fetch_futures_curve(state: CommodityState) -> StatePatch:
     """
     Fetches the current futures curve (spot through 12-month contracts).
     Identifies contango or backwardation structure and annualised roll yield.
@@ -171,12 +216,12 @@ def fetch_futures_curve(state: CommodityState) -> dict:
     """
     print("\n--- [Commodity] Phase: Fetching Futures Curve ---")
     if state.get("error"): return state
-    asset = state["plan"].asset
+    asset = _require_plan(state, "fetch_futures_curve").asset
     
     from src.agents.commodity.tools.futures import fetch_futures_curve as fetch_curve
     path, meta = fetch_curve(asset)
     
-    metadata = state.get("source_metadata", {})
+    metadata = state.get("source_metadata", {}).copy()
     if meta:
         metadata["futures"] = meta
         
@@ -187,17 +232,14 @@ def fetch_futures_curve(state: CommodityState) -> dict:
 # Research Nodes
 # ---------------------------------------------------------------------------
 
-def research_qualitative(state: CommodityState) -> dict:
+def research_qualitative(state: CommodityState) -> StatePatch:
     """
     Runs multi-phase web research on the commodity.
     """
     print("\n--- [Commodity] Phase: Deep Qualitative Research ---")
     if state.get("error"): return state
-    plan = state["plan"]
+    plan = _require_plan(state, "research_qualitative")
     asset = plan.asset
-    
-    from src.shared.web_search import deep_search
-    from langchain_core.messages import HumanMessage
     
     # 1. Base queries
     base_queries = [
@@ -226,7 +268,8 @@ def research_qualitative(state: CommodityState) -> dict:
     """
     try:
         response = get_llm(MODEL_FOLLOWUP).invoke([HumanMessage(content=prompt)])
-        lines = [q.strip() for q in response.content.strip().split("\n") if q.strip()]
+        response_text = _message_content_to_text(cast(str | list[str | dict[Any, Any]], response.content))
+        lines = [q.strip() for q in response_text.strip().split("\n") if q.strip()]
         followup_queries = [q for q in lines if not q.startswith("#") and not q.startswith("*")][:10]
     except Exception as e:
         print(f"Follow-up generation failed: {e}")
@@ -237,7 +280,7 @@ def research_qualitative(state: CommodityState) -> dict:
         print(f"Phase 2: Running {len(followup_queries)} targeted queries...")
         followup_results = deep_search(followup_queries, urls_per_query=2, max_workers=5, use_news=False)
 
-    research_data = {}
+    research_data: Dict[str, str] = {}
     for r in text_results + news_results + followup_results:
         query = r["query"]
         content = f"### {r['title']}\nSource: {r['url']}\n\n"
@@ -251,24 +294,22 @@ def research_qualitative(state: CommodityState) -> dict:
     return {"research_data": research_data, "error": None}
 
 
-def synthesize_research(state: CommodityState) -> dict:
+def synthesize_research(state: CommodityState) -> StatePatch:
     """
     Map-Reduce LLM synthesis of raw research_data into per-section briefs.
     """
     print("\n--- [Commodity] Phase: Synthesizing Research (Map/Reduce) ---")
     if state.get("error"): return state
-    asset = state["plan"].asset
+    asset = _require_plan(state, "synthesize_research").asset
     research_data = state.get("research_data", {})
-    
     import concurrent.futures
-    from langchain_core.messages import HumanMessage
     
     if not research_data:
         return {"research_brief": {}, "error": None}
 
     # MAP
     all_text_items = list(research_data.values())
-    chunks = []
+    chunks: List[str] = []
     current_chunk = ""
     for text in all_text_items:
         if len(current_chunk) + len(text) > 50000:
@@ -278,7 +319,7 @@ def synthesize_research(state: CommodityState) -> dict:
             current_chunk += "\n\n" + text
     if current_chunk: chunks.append(current_chunk)
 
-    def _map_chunk(args):
+    def _map_chunk(args: tuple[int, str]) -> str:
         i, chunk = args
         map_prompt = f"""
         Extract EVERY important fact, number, and quote about {asset} supply, demand, positioning, and macro factors.
@@ -287,7 +328,7 @@ def synthesize_research(state: CommodityState) -> dict:
         """
         try:
             resp = get_llm(MODEL_MAP).invoke([HumanMessage(content=map_prompt)])
-            return resp.content
+            return _message_content_to_text(cast(str | list[str | dict[Any, Any]], resp.content))
         except Exception as e:
             print(f"Commodity MAP chunk {i+1} failed: {e}")
             return ""
@@ -298,9 +339,9 @@ def synthesize_research(state: CommodityState) -> dict:
     all_facts = "\n\n".join([f for f in extracted if f])
 
     # REDUCE
-    research_brief = {}
+    research_brief: Dict[str, str] = {}
     
-    def _reduce_section(section_key):
+    def _reduce_section(section_key: str) -> tuple[str, str]:
         reduce_prompt = f"""
         Prepare a research brief for the **{section_key}** section analyzing {asset}.
         SECTION GUIDANCE:
@@ -310,7 +351,7 @@ def synthesize_research(state: CommodityState) -> dict:
         """
         try:
             resp = get_llm(MODEL_REDUCE).invoke([HumanMessage(content=reduce_prompt)])
-            return section_key, resp.content
+            return section_key, _message_content_to_text(cast(str | list[str | dict[Any, Any]], resp.content))
         except Exception as e:
             print(f"Commodity REDUCE section '{section_key}' failed: {e}")
             return section_key, ""
@@ -328,21 +369,19 @@ def synthesize_research(state: CommodityState) -> dict:
 # Report Generation Nodes
 # ---------------------------------------------------------------------------
 
-def generate_section(state: CommodityState) -> dict:
+def generate_section(state: CommodityState) -> StatePatch:
     """
     Generates one CommodityReport section per call using the per-section research brief.
     The check_loop edge drives repeated calls until all sections are generated.
     """
     print("\n--- [Commodity] Phase: Generating Report Sections ---")
     if state.get("error"): return state
-    asset = state["plan"].asset
+    asset = _require_plan(state, "generate_section").asset
     
     research_brief = state.get("research_brief", {})
     new_sections = state.get("sections", {}).copy()
     
     import concurrent.futures
-    from langchain_core.messages import SystemMessage
-    from src.agents.commodity.schemas import CommoditySection
 
     # Build quantitative context
     quant_content = ""
@@ -351,7 +390,7 @@ def generate_section(state: CommodityState) -> dict:
     if p2: quant_content += read_file_safe(p2) + "\n\n"
     if p3: quant_content += read_file_safe(p3) + "\n\n"
 
-    def _generate_single_section(section_key):
+    def _generate_single_section(section_key: str) -> tuple[str, CommoditySection | None]:
         if section_key in new_sections:
             return section_key, new_sections[section_key]
 
@@ -367,7 +406,8 @@ def generate_section(state: CommodityState) -> dict:
         """
         try:
             structured_llm = get_llm(MODEL_SECTION).with_structured_output(CommoditySection, method="json_mode")
-            section = structured_llm.invoke([SystemMessage(content=prompt)])
+            raw_section = structured_llm.invoke([SystemMessage(content=prompt)])
+            section = _coerce_model(raw_section, CommoditySection)
             return section_key, section
         except Exception as e:
             print(f"Failed to generate {section_key}: {e}")
@@ -383,19 +423,14 @@ def generate_section(state: CommodityState) -> dict:
     return {"sections": new_sections, "error": None}
 
 
-def generate_report(state: CommodityState) -> dict:
+def generate_report(state: CommodityState) -> StatePatch:
     """
     Synthesizes all sections into the final CommodityReport.
     """
     print("\n--- [Commodity] Phase: Generating Final Summary ---")
     if state.get("error"): return state
-    asset = state["plan"].asset
-    sections = state.get("sections", {})
-    
-    from src.agents.commodity.schemas import CommodityReport, CommoditySection
-    from langchain_core.messages import SystemMessage
-    from pydantic import BaseModel
-    from typing import List
+    asset = _require_plan(state, "generate_report").asset
+    sections = state.get("sections", {}).copy()
 
     for key in SECTION_ORDER:
         if key not in sections:
@@ -421,7 +456,8 @@ def generate_report(state: CommodityState) -> dict:
     structured_llm = get_llm(MODEL_SUMMARY).with_structured_output(SummaryOutput, method="json_mode")
     
     try:
-        summary = structured_llm.invoke([SystemMessage(content=prompt)])
+        raw_summary = structured_llm.invoke([SystemMessage(content=prompt)])
+        summary = _coerce_model(raw_summary, SummaryOutput)
         
         final_report = CommodityReport(
             asset=asset,
@@ -438,7 +474,7 @@ def generate_report(state: CommodityState) -> dict:
         return {"error": f"Failed to generate report: {e}"}
 
 
-def verify_content(state: CommodityState) -> dict:
+def verify_content(state: CommodityState) -> StatePatch:
     """
     Quality-control pass.
     """
@@ -449,7 +485,7 @@ def verify_content(state: CommodityState) -> dict:
     return state
 
 
-def save_report(state: CommodityState) -> dict:
+def save_report(state: CommodityState) -> StatePatch:
     """
     Serializes the CommodityReport to a Markdown file under reports/.
     """
@@ -496,7 +532,10 @@ def save_report(state: CommodityState) -> dict:
 
         return content
         
-    report = state.get("report_content")
+    report_obj = state.get("report_content")
+    if not report_obj:
+        return {"error": "No report generated."}
+    report = _coerce_model(report_obj, CommodityReport)
     
     md = f"# Commodity Research: {report.asset}\n\n"
     md += f"## Price Outlook\n{report.price_outlook}\n\n"

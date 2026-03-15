@@ -8,7 +8,7 @@ import os
 import requests
 import pandas as pd
 from datetime import datetime
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, cast
 
 class InsiderTradingError(Exception):
     """Custom exception for insider trading fetch errors."""
@@ -64,14 +64,16 @@ def fetch_insider_activity(ticker: str) -> Tuple[str, Dict[str, Any]]:
             return file_path, {"source": "FMP (No relevant trades)"}
 
         # Ensure numeric columns
-        df["securitiesTransacted"] = pd.to_numeric(df["securitiesTransacted"], errors="coerce").fillna(0)
-        df["price"] = pd.to_numeric(df["price"], errors="coerce").fillna(0)
+        securities_series = cast(pd.Series, pd.to_numeric(df["securitiesTransacted"], errors="coerce"))
+        price_series = cast(pd.Series, pd.to_numeric(df["price"], errors="coerce"))
+        df["securitiesTransacted"] = securities_series.fillna(0)
+        df["price"] = price_series.fillna(0)
         df["transactionValue"] = df["securitiesTransacted"] * df["price"]
 
         # Aggregate by reporting person
         summary_rows = []
         for name, group in df.groupby("reportingName"):
-            role = group["typeOfOwner"].iloc[0]
+            role = cast(pd.Series, group["typeOfOwner"]).iloc[0]
             
             buys = group[group["transactionType"] == "P-Purchase"]
             sells = group[group["transactionType"] == "S-Sale"]

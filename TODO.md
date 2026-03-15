@@ -62,3 +62,12 @@ This document tracks the steps required to transition AlphaSeeker into a Supervi
 ## Polish Items
 - [ ] **Polish SECTION_PROMPTS for macro/commodity** — refine domain-specific guidance after initial implementation.
 - [ ] **Model Config Documentation** — add `config/models.yaml` usage instructions to README.
+
+## Phase 7: Production Readiness
+- [ ] **Service Layer + Async Jobs:** Wrap supervisor pipeline with an API service (e.g., FastAPI), return `run_id`, and execute long runs via background job queue.
+- [ ] **Persistent Run Store:** Add a database (Postgres) for `runs`, `steps`, `artifacts`, `errors`, and model/cost metadata for auditability.
+- [ ] **Strict Node Contracts:** Standardize each node output with explicit status (`ok` / `partial` / `failed`) and remove silent-success patterns in production path.
+- [ ] **Observability Stack:** Add structured JSON logging + metrics/tracing (latency, success rate, timeout rate, per-node cost/token usage).
+- [ ] **Reliability Controls:** Add timeout budgets per node, dependency-specific retry policy, circuit breaker, and TTL cache for external data fetches.
+- [ ] **Evaluation Harness:** Build a benchmark prompt set with routing and report-quality rubrics; gate releases on eval score, not only pytest pass.
+- [ ] **Security & Ops Hardening:** Use managed secrets, stage/prod environment separation, release tagging/rollback workflow, and spend guardrails.

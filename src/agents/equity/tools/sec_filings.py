@@ -99,14 +99,16 @@ def search_sec_filings(
                     link_el = entry.find("atom:link", ns)
                     updated_el = entry.find("atom:updated", ns)
                     summary_el = entry.find("atom:summary", ns)
+                    form_type = title_el.text if title_el is not None and title_el.text else ""
+                    filing_date = updated_el.text[:10] if updated_el is not None and updated_el.text else ""
                     filing_url = link_el.attrib.get("href", "") if link_el is not None else ""
                     if not filing_url or filing_url in seen_urls:
                         continue
                     seen_urls.add(filing_url)
 
                     filings.append({
-                        "form_type": title_el.text if title_el is not None else "",
-                        "filing_date": updated_el.text[:10] if updated_el is not None else "",
+                        "form_type": form_type,
+                        "filing_date": filing_date,
                         "company": company_name,
                         "url": filing_url,
                         "description": summary_el.text[:500] if summary_el is not None and summary_el.text else "",

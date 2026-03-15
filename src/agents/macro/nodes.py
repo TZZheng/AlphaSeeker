@@ -12,8 +12,8 @@ Pipeline order:
 import os
 import datetime
 import concurrent.futures
-from typing import Literal, Dict, List
-from langchain_core.messages import HumanMessage, SystemMessage
+from typing import Any, Dict, List, Literal, TypeVar, cast
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
 
 from src.agents.macro.schemas import MacroState, MacroPlan, MacroSection, MacroReport
@@ -67,13 +67,56 @@ SECTION_PROMPTS = {
     ),
 }
 
+StatePatch = MacroState
+TModel = TypeVar("TModel", bound=BaseModel)
+
+
+def _message_content_to_text(content: str | list[str | dict[Any, Any]]) -> str:
+    """Normalize LangChain message content into plain text."""
+    if isinstance(content, str):
+        return content
+    parts: List[str] = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict):
+            text_value = item.get("text")
+            if isinstance(text_value, str):
+                parts.append(text_value)
+    return "\n".join(part for part in parts if part)
+
+
+def _coerce_model(value: object, model_type: type[TModel]) -> TModel:
+    """Validate/convert structured LLM output into a concrete Pydantic model."""
+    if isinstance(value, model_type):
+        return value
+    if isinstance(value, BaseModel):
+        return model_type.model_validate(value.model_dump())
+    if isinstance(value, dict):
+        return model_type.model_validate(value)
+    raise TypeError(f"Expected {model_type.__name__} output, got {type(value).__name__}")
+
+
+def _require_messages(state: MacroState, node_name: str) -> List[BaseMessage]:
+    messages = state.get("messages")
+    if isinstance(messages, list):
+        return cast(List[BaseMessage], messages)
+    raise ValueError(f"{node_name}: missing required 'messages' in state")
+
+
+def _require_plan(state: MacroState, node_name: str) -> MacroPlan:
+    plan = state.get("plan")
+    if plan is None:
+        raise ValueError(f"{node_name}: missing required 'plan' in state")
+    return _coerce_model(plan, MacroPlan)
+
 # ---------------------------------------------------------------------------
 # Data Nodes
 # ---------------------------------------------------------------------------
 
-def planner(state: MacroState) -> dict:
+def planner(state: MacroState) -> StatePatch:
     print("\n--- [Macro] Phase: Planner ---")
-    recent_messages = state["messages"][-10:]
+    recent_messages = _require_messages(state, "planner")[-10:]
     system_prompt = SystemMessage(content="""
     You are a macroeconomic research planner.
     Analyze the user's request and create a detailed execution plan.
@@ -89,7 +132,8 @@ def planner(state: MacroState) -> dict:
     """)
     structured_llm = get_llm(MODEL_PLAN).with_structured_output(MacroPlan, method="json_mode")
     try:
-        plan = structured_llm.invoke([system_prompt] + recent_messages)
+        raw_plan = structured_llm.invoke([system_prompt] + recent_messages)
+        plan = _coerce_model(raw_plan, MacroPlan)
         return {
             "plan": plan,
             "topic": plan.topic,
@@ -103,14 +147,14 @@ def planner(state: MacroState) -> dict:
         return {"error": f"Failed to generate plan: {str(e)}"}
 
 
-def fetch_indicators(state: MacroState) -> dict:
+def fetch_indicators(state: MacroState) -> StatePatch:
     print("\n--- [Macro] Phase: Fetching Indicators (FRED & World Bank) ---")
     if state.get("error"): return state
-    plan = state["plan"]
+    plan = _require_plan(state, "fetch_indicators")
     topic = plan.topic
     countries = plan.countries
     
-    metadata_store = state.get("source_metadata", {})
+    metadata_store = state.get("source_metadata", {}).copy()
     indicators_content = "# Macroeconomic Indicators\n\n"
     
     # FRED is best for US data and general topical curves
@@ -151,10 +195,10 @@ def fetch_indicators(state: MacroState) -> dict:
 # Research Nodes
 # ---------------------------------------------------------------------------
 
-def research_qualitative(state: MacroState) -> dict:
+def research_qualitative(state: MacroState) -> StatePatch:
     print("\n--- [Macro] Phase: Deep Qualitative Research ---")
     if state.get("error"): return state
-    plan = state["plan"]
+    plan = _require_plan(state, "research_qualitative")
     
     # 1. Base queries
     base_queries = [
@@ -188,7 +232,8 @@ def research_qualitative(state: MacroState) -> dict:
     """
     try:
         response = get_llm(MODEL_FOLLOWUP).invoke([HumanMessage(content=prompt)])
-        lines = [q.strip() for q in response.content.strip().split("\n") if q.strip()]
+        response_text = _message_content_to_text(cast(str | list[str | dict[Any, Any]], response.content))
+        lines = [q.strip() for q in response_text.strip().split("\n") if q.strip()]
         followup_queries = [q for q in lines if not q.startswith("#") and not q.startswith("*")][:15]
     except Exception as e:
         print(f"Follow-up generation failed: {e}")
@@ -219,10 +264,10 @@ def research_qualitative(state: MacroState) -> dict:
     return {"research_data": research_data, "error": None}
 
 
-def synthesize_research(state: MacroState) -> dict:
+def synthesize_research(state: MacroState) -> StatePatch:
     print("\n--- [Macro] Phase: Synthesizing Research (Map/Reduce) ---")
     if state.get("error"): return state
-    topic = state["plan"].topic
+    topic = _require_plan(state, "synthesize_research").topic
     research_data = state.get("research_data", {})
     
     if not research_data:
@@ -241,7 +286,7 @@ def synthesize_research(state: MacroState) -> dict:
             current_chunk += "\n\n" + text
     if current_chunk: chunks.append(current_chunk)
 
-    def _map_chunk(args):
+    def _map_chunk(args: tuple[int, str]) -> str:
         i, chunk = args
         map_prompt = f"""
         You are a macro analyst extracting facts about: {topic}.
@@ -253,7 +298,7 @@ def synthesize_research(state: MacroState) -> dict:
         """
         try:
             resp = get_llm(MODEL_MAP).invoke([HumanMessage(content=map_prompt)])
-            return resp.content
+            return _message_content_to_text(cast(str | list[str | dict[Any, Any]], resp.content))
         except Exception as e:
             print(f"Macro MAP chunk {i+1} failed: {e}")
             return ""
@@ -266,7 +311,7 @@ def synthesize_research(state: MacroState) -> dict:
     # REDUCE STEP
     research_brief: Dict[str, str] = {}
     
-    def _reduce_section(section_key):
+    def _reduce_section(section_key: str) -> tuple[str, str]:
         section_label = section_key.replace("_", " ").title()
         reduce_prompt = f"""
         You are preparing a research brief for the **{section_label}** section analyzing {topic}.
@@ -280,7 +325,7 @@ def synthesize_research(state: MacroState) -> dict:
         """
         try:
             resp = get_llm(MODEL_REDUCE).invoke([HumanMessage(content=reduce_prompt)])
-            return section_key, resp.content
+            return section_key, _message_content_to_text(cast(str | list[str | dict[Any, Any]], resp.content))
         except Exception as e:
             print(f"Macro REDUCE section '{section_key}' failed: {e}")
             return section_key, ""
@@ -298,10 +343,10 @@ def synthesize_research(state: MacroState) -> dict:
 # Report Generation Nodes
 # ---------------------------------------------------------------------------
 
-def generate_section(state: MacroState) -> dict:
+def generate_section(state: MacroState) -> StatePatch:
     print("\n--- [Macro] Phase: Generating Report Sections ---")
     if state.get("error"): return state
-    plan = state["plan"]
+    plan = _require_plan(state, "generate_section")
     topic = plan.topic
     
     indicators_path = state.get("indicators_path")
@@ -310,7 +355,7 @@ def generate_section(state: MacroState) -> dict:
     
     new_sections = state.get("sections", {}).copy()
 
-    def _generate_single_section(section_key):
+    def _generate_single_section(section_key: str) -> tuple[str, MacroSection | None]:
         if section_key in new_sections:
             return section_key, new_sections[section_key]
 
@@ -343,7 +388,8 @@ def generate_section(state: MacroState) -> dict:
         """
         try:
             structured_llm = get_llm(MODEL_SECTION).with_structured_output(MacroSection)
-            section = structured_llm.invoke([SystemMessage(content=prompt)])
+            raw_section = structured_llm.invoke([SystemMessage(content=prompt)])
+            section = _coerce_model(raw_section, MacroSection)
             return section_key, section
         except Exception as e:
             print(f"Failed to generate section {section_key}: {e}")
@@ -359,11 +405,11 @@ def generate_section(state: MacroState) -> dict:
     return {"sections": new_sections, "error": None}
 
 
-def generate_report(state: MacroState) -> dict:
+def generate_report(state: MacroState) -> StatePatch:
     print("\n--- [Macro] Phase: Generating Final Summary ---")
     if state.get("error"): return state
-    topic = state["plan"].topic
-    sections = state.get("sections", {})
+    topic = _require_plan(state, "generate_report").topic
+    sections = state.get("sections", {}).copy()
     
     # Check if we have missing sections and provide a fallback
     for key in SECTION_ORDER:
@@ -393,7 +439,8 @@ def generate_report(state: MacroState) -> dict:
     structured_llm = get_llm(MODEL_SUMMARY).with_structured_output(SummaryOutput, method="json_mode")
     
     try:
-        summary = structured_llm.invoke([SystemMessage(content=prompt)])
+        raw_summary = structured_llm.invoke([SystemMessage(content=prompt)])
+        summary = _coerce_model(raw_summary, SummaryOutput)
         
         final_report = MacroReport(
             topic=topic,
@@ -410,7 +457,7 @@ def generate_report(state: MacroState) -> dict:
         return {"error": f"Failed to generate report: {e}"}
 
 
-def verify_content(state: MacroState) -> dict:
+def verify_content(state: MacroState) -> StatePatch:
     print("\n--- [Macro] Phase: Verifying Output ---")
     if state.get("error"): return state
     if not state.get("report_content"):
@@ -418,11 +465,14 @@ def verify_content(state: MacroState) -> dict:
     return state
 
 
-def save_report(state: MacroState) -> dict:
+def save_report(state: MacroState) -> StatePatch:
     print("\n--- [Macro] Phase: Saving Final Report ---")
     if state.get("error"): return state
     
-    report = state.get("report_content")
+    report_obj = state.get("report_content")
+    if not report_obj:
+        return {"error": "No report generated."}
+    report = _coerce_model(report_obj, MacroReport)
     
     md = f"# Macroeconomic Research: {report.topic}\n\n"
     md += f"## Executive Outlook\n{report.outlook}\n\n"

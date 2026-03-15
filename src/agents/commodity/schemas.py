@@ -5,7 +5,7 @@ Mirrors the structure of equity/schemas.py for the commodity research domain.
 Defines the state, plan, and output models for the commodity pipeline.
 """
 
-from typing import List, Optional, TypedDict, Any, Dict
+from typing import List, TypedDict, Any, Dict
 from pydantic import BaseModel, Field
 from langchain_core.messages import BaseMessage
 
@@ -81,26 +81,26 @@ class CommodityState(TypedDict, total=False):
     Mirrors the structure of equity/schemas.AgentState.
     """
     messages: List[BaseMessage]
-    asset: Optional[str]
+    asset: str
 
     # Plan
-    plan: Optional[CommodityPlan]
+    plan: CommodityPlan
 
     # Data file paths
-    eia_data_path: Optional[str]             # EIA inventory data as Markdown
-    cot_data_path: Optional[str]             # CFTC COT positioning data as Markdown
-    futures_data_path: Optional[str]         # Futures curve data as Markdown
+    eia_data_path: str | None                # EIA inventory data as Markdown
+    cot_data_path: str | None                # CFTC COT positioning data as Markdown
+    futures_data_path: str | None            # Futures curve data as Markdown
 
     # Research
-    research_data: Optional[Dict[str, str]]  # Raw web research keyed by query
-    extracted_facts: Optional[str]           # Map-reduced facts for section writing
-    research_brief: Optional[Dict[str, str]] # Per-section briefs
+    research_data: Dict[str, str]            # Raw web research keyed by query
+    extracted_facts: str                     # Map-reduced facts for section writing
+    research_brief: Dict[str, str]           # Per-section briefs
 
     # Working memory
-    sections: Optional[Dict[str, CommoditySection]]
+    sections: Dict[str, CommoditySection]
 
     # Output
-    source_metadata: Optional[dict]
-    report_content: Optional[CommodityReport]
-    report_path: Optional[str]
-    error: Optional[str]
+    source_metadata: Dict[str, Any]
+    report_content: CommodityReport
+    report_path: str
+    error: str | None

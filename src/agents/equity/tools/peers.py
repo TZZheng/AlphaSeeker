@@ -162,7 +162,7 @@ def evaluate_candidates(
     except Exception as e:
         print(f"Warning: failed to fetch market cap for {target_ticker}: {e}")
 
-    if not target_mcap:
+    if not target_mcap or not t_info:
         # If we can't get target market cap, just return flat list as "Peers"
         print(f"Warning: Could not fetch market cap for {target_ticker}")
         valid_peers = []

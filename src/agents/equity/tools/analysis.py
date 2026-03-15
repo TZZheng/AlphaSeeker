@@ -1,9 +1,10 @@
 import pandas as pd
 import numpy as np
+from typing import cast
 
 def calculate_sma(data: pd.Series, window: int) -> pd.Series:
     """Calculates Simple Moving Average."""
-    return data.rolling(window=window).mean()
+    return cast(pd.Series, data.rolling(window=window).mean())
 
 def calculate_rsi(data: pd.Series, window: int = 14) -> pd.Series:
     """Calculates Relative Strength Index."""
@@ -12,7 +13,7 @@ def calculate_rsi(data: pd.Series, window: int = 14) -> pd.Series:
     loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
     
     rs = gain / loss
-    return 100 - (100 / (1 + rs))
+    return cast(pd.Series, 100 - (100 / (1 + rs)))
 
 def calculate_macd(data: pd.Series, slow: int = 26, fast: int = 12, signal: int = 9):
     """Calculates MACD, Signal line, and Histogram."""
