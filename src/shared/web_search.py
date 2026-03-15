@@ -17,13 +17,12 @@ from configparser import ConfigParser
 from ddgs import DDGS
 import trafilatura
 from trafilatura.settings import DEFAULT_CONFIG
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from src.shared.reliability import cached_retry_call
 
 # ---------------------------------------------------------------------------
 # Layer 1: Search (returns URLs + snippets)
 # ---------------------------------------------------------------------------
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
 def search_web(query: str, max_results: int = 5) -> List[Dict[str, str]]:
     """
     Performs a web search using DuckDuckGo text search.
@@ -36,14 +35,20 @@ def search_web(query: str, max_results: int = 5) -> List[Dict[str, str]]:
         List of dicts with 'title', 'href', and 'body' (snippet).
     """
     try:
-        results = list(DDGS().text(query, max_results=max_results))
-        return results
+        return cached_retry_call(
+            "ddgs_text",
+            {"query": query, "max_results": max_results},
+            lambda: list(DDGS().text(query, max_results=max_results)),
+            ttl_seconds=1800,
+            attempts=3,
+            min_wait_seconds=2,
+            max_wait_seconds=10,
+        )
     except Exception as e:
         print(f"Search failed for '{query[:60]}...': {e}")
         return []
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
 def search_news(query: str, max_results: int = 5) -> List[Dict[str, str]]:
     """
     Performs a news search using DuckDuckGo news endpoint.
@@ -55,7 +60,7 @@ def search_news(query: str, max_results: int = 5) -> List[Dict[str, str]]:
     Returns:
         List of dicts with 'title', 'url', 'body', 'date', 'source'.
     """
-    try:
+    def _load() -> List[Dict[str, str]]:
         results = list(DDGS().news(query, max_results=max_results))
         normalized = []
         for r in results:
@@ -67,6 +72,17 @@ def search_news(query: str, max_results: int = 5) -> List[Dict[str, str]]:
                 "source": r.get("source", ""),
             })
         return normalized
+
+    try:
+        return cached_retry_call(
+            "ddgs_news",
+            {"query": query, "max_results": max_results},
+            _load,
+            ttl_seconds=1800,
+            attempts=3,
+            min_wait_seconds=2,
+            max_wait_seconds=10,
+        )
     except Exception as e:
         print(f"News search failed for '{query[:60]}...': {e}")
         return []
@@ -76,7 +92,6 @@ def search_news(query: str, max_results: int = 5) -> List[Dict[str, str]]:
 # Layer 2: Read (extracts full article text from URLs)
 # ---------------------------------------------------------------------------
 
-@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=5))
 def read_url(
     url: str,
     max_chars: int = 8000,
@@ -93,7 +108,7 @@ def read_url(
     Returns:
         Extracted text or None if extraction failed.
     """
-    try:
+    def _load() -> Optional[str]:
         config = ConfigParser()
         config.read_dict({"DEFAULT": dict(DEFAULT_CONFIG.defaults())})
         config["DEFAULT"]["download_timeout"] = str(download_timeout_seconds)
@@ -113,6 +128,21 @@ def read_url(
         if text and len(text) > max_chars:
             text = text[:max_chars] + f"\n... [truncated at {max_chars} chars]"
         return text
+    try:
+        return cached_retry_call(
+            "trafilatura_read",
+            {
+                "url": url,
+                "max_chars": max_chars,
+                "download_timeout_seconds": download_timeout_seconds,
+                "extraction_timeout_seconds": extraction_timeout_seconds,
+            },
+            _load,
+            ttl_seconds=21600,
+            attempts=2,
+            min_wait_seconds=1,
+            max_wait_seconds=5,
+        )
     except Exception as e:
         return None
 

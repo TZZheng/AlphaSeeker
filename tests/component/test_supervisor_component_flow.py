@@ -88,7 +88,8 @@ def test_supervisor_component_happy_path_with_stubbed_agents(
 
     assert "equity" in agent_results
     assert "macro" in agent_results
-    assert final == {"final_response": "Unified supervisor output"}
+    assert final["final_response"] == "Unified supervisor output"
+    assert final["last_node_result"].status == "ok"
 
 
 def test_supervisor_component_partial_failure_still_synthesizes(
@@ -150,6 +151,6 @@ def test_classification_validation_and_routing_component(
     valid = supervisor_graph.validate_routing_state({"user_prompt": "x", **classified})
     sends = supervisor_graph.route_to_agents({"user_prompt": "x", **classified})
 
-    assert valid == {}
+    assert valid["last_node_result"].status == "ok"
     assert isinstance(sends, list)
     assert [send.node for send in sends] == ["run_equity_agent", "run_macro_agent"]

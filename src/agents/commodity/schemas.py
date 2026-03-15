@@ -9,6 +9,8 @@ from typing import List, TypedDict, Any, Dict
 from pydantic import BaseModel, Field
 from langchain_core.messages import BaseMessage
 
+from src.shared.node_contracts import NodeResult
+
 
 class CommodityPlan(BaseModel):
     """
@@ -101,6 +103,8 @@ class CommodityState(TypedDict, total=False):
 
     # Output
     source_metadata: Dict[str, Any]
+    last_node_result: NodeResult
+    node_results: Dict[str, NodeResult]
     report_content: CommodityReport
     report_path: str
     error: str | None

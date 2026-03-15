@@ -10,6 +10,8 @@ import pandas as pd
 from datetime import datetime
 from typing import Tuple, Dict, Any, cast
 
+from src.shared.reliability import request_json
+
 class InsiderTradingError(Exception):
     """Custom exception for insider trading fetch errors."""
     pass
@@ -36,9 +38,7 @@ def fetch_insider_activity(ticker: str) -> Tuple[str, Dict[str, Any]]:
     url = f"https://financialmodelingprep.com/api/v4/insider-trading?symbol={ticker}&page=0&apikey={api_key}"
 
     try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
+        data = request_json(url, timeout=10, ttl_seconds=1800, attempts=3)
 
         if not data or not isinstance(data, list):
             md = f"# Insider Trading Activity: {ticker}\n\nNo recent insider trading data found for {ticker}."

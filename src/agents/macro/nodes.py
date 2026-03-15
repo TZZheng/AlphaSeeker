@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from src.agents.macro.schemas import MacroState, MacroPlan, MacroSection, MacroReport
 from src.shared.llm_manager import get_llm
 from src.shared.model_config import get_model
+from src.shared.node_contracts import contract_node, partial_patch
 from src.shared.report_filename import build_prompt_report_filename, extract_prompt_text
 from src.shared.text_utils import condense_context, read_file_safe
 from src.shared.web_search import deep_search
@@ -271,7 +272,10 @@ def synthesize_research(state: MacroState) -> StatePatch:
     research_data = state.get("research_data", {})
     
     if not research_data:
-        return {"research_brief": {}, "error": None}
+        return partial_patch(
+            {"research_brief": {}, "error": None},
+            error="No qualitative research data collected for synthesis",
+        )
 
     # MAP STEP
     all_text_items = list(research_data.values())
@@ -538,3 +542,13 @@ def check_error(state: MacroState) -> Literal["continue", "end"]:
 def check_loop(state: MacroState) -> Literal["generate_section", "generate_report"]:
     # Loop removed since we parallelized section generation. Just pass through to report.
     return "generate_report"
+
+
+planner = contract_node("planner")(planner)
+fetch_indicators = contract_node("fetch_indicators")(fetch_indicators)
+research_qualitative = contract_node("research_qualitative")(research_qualitative)
+synthesize_research = contract_node("synthesize_research")(synthesize_research)
+generate_section = contract_node("generate_section")(generate_section)
+generate_report = contract_node("generate_report")(generate_report)
+verify_content = contract_node("verify_content")(verify_content)
+save_report = contract_node("save_report")(save_report)

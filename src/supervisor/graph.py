@@ -28,6 +28,7 @@ from src.supervisor.router import (
     validate_classification,
     AGENT_NODE_MAP,
 )
+from src.shared.node_contracts import NodeResult, contract_node
 from src.shared.schemas import SubAgentRequest, SubAgentResponse
 from src.supervisor.synthesizer import SynthesisInput, run_synthesis
 
@@ -49,6 +50,8 @@ class SupervisorState(TypedDict, total=False):
     # Uses operator.ior (|=) as the merge reducer so parallel Send branches
     # merge their dicts safely: {"equity": "..."} | {"macro": "..."} = both keys.
     agent_results: Annotated[Dict[str, str], operator.ior]
+    node_results: Annotated[Dict[str, NodeResult], operator.ior]
+    last_node_result: NodeResult
 
     # Final Output
     final_response: str                 # Synthesized, integrated response for the user
@@ -441,6 +444,16 @@ def route_to_agents(state: SupervisorState):
     if not sends:
         return "handle_error"
     return sends
+
+
+# Wrap all supervisor nodes with the shared strict result contract.
+classify_intent = contract_node("classify_intent")(classify_intent)
+validate_routing_state = contract_node("validate_routing_state")(validate_routing_state)
+run_equity_agent = contract_node("run_equity_agent")(run_equity_agent)
+run_macro_agent = contract_node("run_macro_agent")(run_macro_agent)
+run_commodity_agent = contract_node("run_commodity_agent")(run_commodity_agent)
+synthesize_results = contract_node("synthesize_results")(synthesize_results)
+handle_error = contract_node("handle_error")(handle_error)
 
 
 # ---------------------------------------------------------------------------

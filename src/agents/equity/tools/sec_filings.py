@@ -16,6 +16,7 @@ import trafilatura
 from langchain_core.messages import SystemMessage, HumanMessage
 from src.shared.llm_manager import get_llm
 from src.shared.model_config import get_model
+from src.shared.reliability import cached_retry_call, request_json, request_text
 
 # SEC EDGAR EFTS base URL
 EFTS_BASE = "https://efts.sec.gov/LATEST/search-index"
@@ -78,20 +79,22 @@ def search_sec_filings(
             "output": "atom",
         }
 
-        resp = requests.get(
+        atom_text = request_text(
             company_search_url,
             params=company_params,
             headers=SEC_HEADERS,
             timeout=15,
+            ttl_seconds=1800,
+            attempts=3,
         )
 
-        if resp.status_code == 200:
+        if atom_text:
             # Parse the Atom feed for filing links
             from xml.etree import ElementTree as ET
 
             # SEC returns Atom XML
             try:
-                root = ET.fromstring(resp.text)
+                root = ET.fromstring(atom_text)
                 ns = {"atom": "http://www.w3.org/2005/Atom"}
 
                 for entry in root.findall("atom:entry", ns)[:max_results]:
@@ -127,31 +130,31 @@ def search_sec_filings(
         }
 
         try:
-            efts_resp = requests.get(
+            data = request_json(
                 EFTS_BASE,
                 params=efts_params,
                 headers=SEC_HEADERS,
                 timeout=15,
+                ttl_seconds=1800,
+                attempts=3,
             )
-            if efts_resp.status_code == 200:
-                data = efts_resp.json()
-                hits = data.get("hits", {}).get("hits", [])
-                for hit in hits[:max_results]:
-                    source = hit.get("_source", {})
-                    file_url = source.get("file_url", "")
-                    if file_url and not file_url.startswith("http"):
-                        file_url = f"https://www.sec.gov{file_url}"
-                    if not file_url or file_url in seen_urls:
-                        continue
-                    seen_urls.add(file_url)
+            hits = data.get("hits", {}).get("hits", [])
+            for hit in hits[:max_results]:
+                source = hit.get("_source", {})
+                file_url = source.get("file_url", "")
+                if file_url and not file_url.startswith("http"):
+                    file_url = f"https://www.sec.gov{file_url}"
+                if not file_url or file_url in seen_urls:
+                    continue
+                seen_urls.add(file_url)
 
-                    filings.append({
-                        "form_type": source.get("form_type", ""),
-                        "filing_date": source.get("file_date", ""),
-                        "company": source.get("entity_name", company_name),
-                        "url": file_url,
-                        "description": source.get("file_description", "")[:500],
-                    })
+                filings.append({
+                    "form_type": source.get("form_type", ""),
+                    "filing_date": source.get("file_date", ""),
+                    "company": source.get("entity_name", company_name),
+                    "url": file_url,
+                    "description": source.get("file_description", "")[:500],
+                })
         except Exception as e:
             print(f"SEC: EFTS JSON query failed for {company_name} ({e})")
 
@@ -175,7 +178,7 @@ def fetch_filing_text(url: str, max_chars: int = 15000) -> Optional[str]:
     if not url:
         return None
 
-    try:
+    def _load() -> Optional[str]:
         downloaded = trafilatura.fetch_url(url)
         if not downloaded:
             return None
@@ -189,6 +192,16 @@ def fetch_filing_text(url: str, max_chars: int = 15000) -> Optional[str]:
         if text and len(text) > max_chars:
             text = text[:max_chars] + f"\n... [truncated at {max_chars} chars]"
         return text
+    try:
+        return cached_retry_call(
+            "sec_filing_text",
+            {"url": url, "max_chars": max_chars},
+            _load,
+            ttl_seconds=21600,
+            attempts=2,
+            min_wait_seconds=1,
+            max_wait_seconds=5,
+        )
     except Exception as e:
         print(f"SEC: failed to read filing URL {url} ({e})")
         return None

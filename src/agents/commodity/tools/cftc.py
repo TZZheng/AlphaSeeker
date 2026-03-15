@@ -19,6 +19,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from src.shared.reliability import request_bytes
+
 
 # ---------------------------------------------------------------------------
 # Commodity → CFTC Market Code mapping
@@ -97,14 +99,18 @@ def _to_int(value: Any) -> int:
 def _download_year_rows(year: int) -> List[Dict[str, str]]:
     url = COT_YEARLY_URL.format(year=year)
     try:
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
+        payload = request_bytes(
+            url,
+            timeout=30,
+            ttl_seconds=21600,
+            attempts=3,
+        )
     except Exception as exc:
         print(f"CFTC: failed to download {url} ({exc})")
         return []
 
     try:
-        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        with zipfile.ZipFile(io.BytesIO(payload)) as zf:
             member_name = next((n for n in zf.namelist() if n.lower().endswith(".txt")), None)
             if not member_name:
                 print(f"CFTC: no TXT member in yearly archive {year}")

@@ -44,6 +44,8 @@ import os
 import datetime
 import requests
 
+from src.shared.reliability import request_json
+
 def resolve_country_codes(countries: List[str]) -> List[str]:
     """
     Maps natural language country names to World Bank ISO codes.
@@ -127,10 +129,13 @@ def fetch_world_bank_indicators(
             "date": date_range,
             "per_page": 500
         }
-        resp = requests.get(url, params=params)
-        resp.raise_for_status()
-        
-        json_data = resp.json()
+        json_data = request_json(
+            url,
+            params=params,
+            timeout=15,
+            ttl_seconds=21600,
+            attempts=3,
+        )
         if len(json_data) < 2:
             continue
             

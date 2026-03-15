@@ -64,10 +64,20 @@ This document tracks the steps required to transition AlphaSeeker into a Supervi
 - [ ] **Model Config Documentation** — add `config/models.yaml` usage instructions to README.
 
 ## Phase 7: Production Readiness
-- [ ] **Service Layer + Async Jobs:** Wrap supervisor pipeline with an API service (e.g., FastAPI), return `run_id`, and execute long runs via background job queue.
-- [ ] **Persistent Run Store:** Add a database (Postgres) for `runs`, `steps`, `artifacts`, `errors`, and model/cost metadata for auditability.
-- [ ] **Strict Node Contracts:** Standardize each node output with explicit status (`ok` / `partial` / `failed`) and remove silent-success patterns in production path.
-- [ ] **Observability Stack:** Add structured JSON logging + metrics/tracing (latency, success rate, timeout rate, per-node cost/token usage).
-- [ ] **Reliability Controls:** Add timeout budgets per node, dependency-specific retry policy, circuit breaker, and TTL cache for external data fetches.
-- [ ] **Evaluation Harness:** Build a benchmark prompt set with routing and report-quality rubrics; gate releases on eval score, not only pytest pass.
-- [ ] **Security & Ops Hardening:** Use managed secrets, stage/prod environment separation, release tagging/rollback workflow, and spend guardrails.
+Priority order for this phase: **Foundation -> Measurement -> Serving -> Operations**.
+
+### Foundation
+- [ ] **Strict Node Contracts:** Add a shared Pydantic `NodeResult` model for every supervisor/sub-agent node (for example: `status: Literal["ok", "partial", "failed"]`, `data`, `error`) so production paths stop relying on ad hoc dicts and silent-success patterns.
+- [ ] **Reliability Controls:** Wrap all external network/data-source calls (for example `yfinance`, FRED, EIA, web fetches) with `tenacity` retry/backoff, timeout budgets, and a cache layer (`diskcache` locally or Redis in deployment) so retries do not re-fetch the same payload repeatedly.
+
+### Measurement
+- [ ] **LangSmith Tracing:** Prefer LangSmith over a custom JSON observability dashboard for graph runs. Enable node-by-node tracing, latency/error inspection, prompt/response I/O capture, and token/cost tracking per run.
+- [ ] **LangSmith Evaluation Harness:** Build routing/report-quality datasets and rubrics in LangSmith, then gate prompt/graph changes on eval score in addition to `pytest`.
+
+### Serving
+- [ ] **Graph State Persistence:** Use `langgraph-checkpoint-postgres` for native checkpointing (persisting graph state between steps) and pause/resume support before designing custom run-state tables.
+- [ ] **Service Layer + Background Runs:** Prefer LangGraph API (or LangServe) as the first service wrapper so streaming, background runs, and resumable executions come from the framework instead of a custom FastAPI + Celery stack.
+- [ ] **Business Metadata Store (If Needed):** Add custom Postgres tables for `runs`, `artifacts`, audit fields, or report indexing only if LangGraph checkpoints and LangSmith metadata are not sufficient for the product requirements.
+
+### Operations
+- [ ] **Security & Ops Hardening:** Use managed secrets, stage/prod environment separation, release tagging/rollback workflow, spend guardrails, and retention policies for checkpoints/artifacts.

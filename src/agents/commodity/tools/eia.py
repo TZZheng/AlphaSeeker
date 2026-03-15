@@ -10,6 +10,8 @@ Requires: EIA_API_KEY environment variable (free from https://www.eia.gov/openda
 import os
 from typing import List, Tuple, Dict, Optional
 
+from src.shared.reliability import request_json
+
 
 # ---------------------------------------------------------------------------
 # Common EIA Series IDs
@@ -85,9 +87,12 @@ def fetch_eia_series(
         url = f"https://api.eia.gov/series/?api_key={api_key}&series_id={series_id}"
         
         try:
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-            data = response.json()
+            data = request_json(
+                url,
+                timeout=10,
+                ttl_seconds=21600,
+                attempts=3,
+            )
 
             if "series" not in data or not data["series"]:
                 markdown_content += f"## Series {series_id}\nData unavailable.\n\n"

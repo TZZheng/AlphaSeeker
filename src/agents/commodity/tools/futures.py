@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
 import yfinance as yf
 
+from src.shared.reliability import cached_retry_call
+
 
 # ---------------------------------------------------------------------------
 # Commodity → yfinance futures ticker mapping
@@ -145,7 +147,13 @@ def _iter_candidate_contracts(
 
 def _fetch_last_close(symbol: str) -> Optional[float]:
     try:
-        hist = yf.Ticker(symbol).history(period="1mo")
+        hist = cached_retry_call(
+            "yfinance_futures_history",
+            {"symbol": symbol, "period": "1mo"},
+            lambda: yf.Ticker(symbol).history(period="1mo"),
+            ttl_seconds=900,
+            attempts=3,
+        )
         if hist.empty or "Close" not in hist.columns:
             return None
         close_series = hist["Close"].dropna()

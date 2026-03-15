@@ -3,6 +3,8 @@ import pandas as pd
 import os
 from datetime import datetime
 
+from src.shared.reliability import cached_retry_call
+
 class MarketDataError(Exception):
     """Custom exception for market data errors."""
     pass
@@ -22,10 +24,13 @@ def fetch_historical_data(ticker: str, period: str = "1y") -> str:
         MarketDataError: If the ticker is invalid or data download fails.
     """
     try:
-        # Validate ticker by fetching info (fast check)
-        stock = yf.Ticker(ticker)
-        # Verify valid history request
-        hist = stock.history(period=period)
+        hist = cached_retry_call(
+            "yfinance_history",
+            {"ticker": ticker, "period": period},
+            lambda: yf.Ticker(ticker).history(period=period),
+            ttl_seconds=900,
+            attempts=3,
+        )
         
         if hist.empty:
             raise MarketDataError(f"No data found for ticker '{ticker}' with period '{period}'.")

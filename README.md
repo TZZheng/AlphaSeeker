@@ -83,7 +83,8 @@ AlphaSeeker/
 ├── config/
 │   └── models.yaml
 ├── docs/
-│   └── equity_agent.md
+│   ├── equity_agent.md
+│   └── local_first_research_workflow.md
 ├── src/
 │   ├── supervisor/
 │   ├── agents/
@@ -137,6 +138,7 @@ uv run pytest -m "live"
 ## Roadmap
 
 See `TODO.md` for planned work and next milestones.
+For the local-memory product direction, see `docs/local_first_research_workflow.md`.
 
 ## Contributing
 

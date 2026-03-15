@@ -50,6 +50,7 @@ def test_validate_routing_state_requires_sub_agents() -> None:
     out = validate_routing_state(state)
 
     assert out["error"] == "No sub-agents selected by classifier"
+    assert out["last_node_result"].status == "failed"
 
 
 def test_validate_routing_state_requires_entities() -> None:
@@ -58,6 +59,7 @@ def test_validate_routing_state_requires_entities() -> None:
     out = validate_routing_state(state)
 
     assert out["error"] == "Classifier did not produce classified_entities"
+    assert out["last_node_result"].status == "failed"
 
 
 def test_validate_routing_state_requires_matching_requests() -> None:
@@ -72,11 +74,13 @@ def test_validate_routing_state_requires_matching_requests() -> None:
     out = validate_routing_state(state)
 
     assert "Missing SubAgentRequest for: macro" == out["error"]
+    assert out["last_node_result"].status == "failed"
 
 
 def test_validate_routing_state_success() -> None:
     out = validate_routing_state(_state_with_routes())
-    assert out == {}
+    assert out["last_node_result"].status == "ok"
+    assert "error" not in out
 
 
 def test_as_classified_state_success() -> None:
@@ -170,7 +174,8 @@ def test_synthesize_results_success_contract(monkeypatch: pytest.MonkeyPatch) ->
         }
     )
 
-    assert out == {"final_response": "Unified answer"}
+    assert out["final_response"] == "Unified answer"
+    assert out["last_node_result"].status == "ok"
 
 
 def test_synthesize_results_returns_error_contract_on_exception(
@@ -191,12 +196,12 @@ def test_synthesize_results_returns_error_contract_on_exception(
 
     assert out["final_response"].startswith("Synthesis failed:")
     assert out["error"] == "llm down"
+    assert out["last_node_result"].status == "failed"
 
 
 def test_synthesize_results_empty_agent_results_contract() -> None:
     out = synthesize_results({"user_prompt": "Analyze AAPL"})
 
-    assert out == {
-        "final_response": "No agent produced results.",
-        "error": "Empty agent_results",
-    }
+    assert out["final_response"] == "No agent produced results."
+    assert out["error"] == "Empty agent_results"
+    assert out["last_node_result"].status == "failed"

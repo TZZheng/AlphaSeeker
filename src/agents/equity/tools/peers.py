@@ -14,6 +14,7 @@ from langchain_core.messages import HumanMessage
 
 from src.shared.web_search import search_web
 from src.shared.llm_manager import get_llm
+from src.shared.reliability import cached_retry_call
 
 # Use a cheap/fast model for extraction
 MODEL_PEER_EXTRACTION = "sf/Qwen/Qwen3-14B"  # or similar fast model
@@ -22,6 +23,17 @@ MODEL_PEER_EXTRACTION = "sf/Qwen/Qwen3-14B"  # or similar fast model
 class PeerAnalysisError(Exception):
     """Custom exception for peer analysis errors."""
     pass
+
+
+def _ticker_info(ticker: str) -> Dict[str, Any]:
+    """Fetch and cache Yahoo Finance info payloads used in peer analysis."""
+    return cached_retry_call(
+        "yfinance_peer_info",
+        {"ticker": ticker.upper()},
+        lambda: yf.Ticker(ticker).info,
+        ttl_seconds=1800,
+        attempts=3,
+    )
 
 
 # --- Well-known sector peer pools (Fallback only) ---
@@ -155,9 +167,10 @@ def evaluate_candidates(
         Dict with keys "Giants", "Peers", "Disruptors".
     """
     # 1. Get Target Market Cap
+    t_info: Dict[str, Any] = {}
     target_mcap = None
     try:
-        t_info = yf.Ticker(target_ticker).info
+        t_info = _ticker_info(target_ticker)
         target_mcap = t_info.get("marketCap")
     except Exception as e:
         print(f"Warning: failed to fetch market cap for {target_ticker}: {e}")
@@ -209,8 +222,7 @@ def evaluate_candidates(
                  continue
 
             # Try as ticker
-            stock = yf.Ticker(cand)
-            info = stock.info
+            info = _ticker_info(cand)
             mcap = info.get("marketCap")
             
             # If valid ticker found
@@ -232,8 +244,7 @@ def evaluate_candidates(
             
             if resolved_ticker:
                 # Retry with resolved ticker
-                stock = yf.Ticker(resolved_ticker)
-                info = stock.info
+                info = _ticker_info(resolved_ticker)
                 mcap = info.get("marketCap")
                 if mcap and mcap > 0:
                     cand = resolved_ticker # Use the ticker
@@ -264,7 +275,7 @@ def evaluate_candidates(
 
 def _is_valid_ticker(ticker: str) -> bool:
     try:
-        info = yf.Ticker(ticker).info
+        info = _ticker_info(ticker)
         return "marketCap" in info
     except Exception as e:
         print(f"Warning: failed ticker validation for {ticker}: {e}")
@@ -321,8 +332,7 @@ def fetch_peer_metrics(
                 continue
 
             # Public company
-            stock = yf.Ticker(ticker)
-            info = stock.info
+            info = _ticker_info(ticker)
 
             mcap = info.get('marketCap')
             # Skip if really broken

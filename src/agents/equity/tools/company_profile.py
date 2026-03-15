@@ -13,10 +13,32 @@ import os
 from datetime import datetime
 from typing import Tuple, Dict, Any
 
+from src.shared.reliability import cached_retry_call
+
 
 class CompanyProfileError(Exception):
     """Custom exception for company profile errors."""
     pass
+
+
+def _load_company_profile_snapshot(ticker: str) -> Dict[str, Any]:
+    """Fetch and cache the raw Yahoo Finance payload used by the profile tool."""
+    def _load() -> Dict[str, Any]:
+        stock = yf.Ticker(ticker)
+        return {
+            "info": stock.info,
+            "major_holders": stock.major_holders,
+            "institutional_holders": stock.institutional_holders,
+            "mutualfund_holders": stock.mutualfund_holders,
+        }
+
+    return cached_retry_call(
+        "yfinance_company_profile",
+        {"ticker": ticker},
+        _load,
+        ttl_seconds=1800,
+        attempts=3,
+    )
 
 
 def fetch_company_profile(ticker: str) -> Tuple[str, Dict[str, Any]]:
@@ -33,8 +55,8 @@ def fetch_company_profile(ticker: str) -> Tuple[str, Dict[str, Any]]:
         CompanyProfileError: If the ticker is invalid or data fetch fails.
     """
     try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
+        snapshot = _load_company_profile_snapshot(ticker)
+        info = snapshot["info"]
 
         if not info or info.get("regularMarketPrice") is None:
             # Fallback check — some tickers have sparse info
@@ -70,7 +92,7 @@ def fetch_company_profile(ticker: str) -> Tuple[str, Dict[str, Any]]:
         # --- Major Holders ---
         md += "## Ownership Structure\n"
         try:
-            major_holders = stock.major_holders
+            major_holders = snapshot["major_holders"]
             if major_holders is not None and not major_holders.empty:
                 md += "### Major Holders\n"
                 md += major_holders.to_markdown(index=False) + "\n\n"
@@ -81,7 +103,7 @@ def fetch_company_profile(ticker: str) -> Tuple[str, Dict[str, Any]]:
 
         # --- Institutional Holders ---
         try:
-            inst_holders = stock.institutional_holders
+            inst_holders = snapshot["institutional_holders"]
             if inst_holders is not None and not inst_holders.empty:
                 md += "### Top Institutional Holders\n"
                 # Format for readability
@@ -106,7 +128,7 @@ def fetch_company_profile(ticker: str) -> Tuple[str, Dict[str, Any]]:
 
         # --- Mutual Fund Holders (bonus) ---
         try:
-            mf_holders = stock.mutualfund_holders
+            mf_holders = snapshot["mutualfund_holders"]
             if mf_holders is not None and not mf_holders.empty:
                 md += "### Top Mutual Fund Holders\n"
                 display_mf = mf_holders.head(10).copy()

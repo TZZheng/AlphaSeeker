@@ -49,6 +49,8 @@ import datetime
 import requests
 import pandas as pd
 
+from src.shared.reliability import request_json
+
 def get_series_for_topic(topic: str) -> List[str]:
     """
     Maps a macro topic string to the relevant FRED series IDs.
@@ -131,9 +133,13 @@ def fetch_fred_series(
             "api_key": api_key,
             "file_type": "json"
         }
-        meta_resp = requests.get(meta_url, params=meta_params)
-        meta_resp.raise_for_status()
-        meta_json = meta_resp.json()
+        meta_json = request_json(
+            meta_url,
+            params=meta_params,
+            timeout=15,
+            ttl_seconds=21600,
+            attempts=3,
+        )
         
         if not meta_json.get("seriess"):
             continue
@@ -167,9 +173,13 @@ def fetch_fred_series(
             "sort_order": "desc",
             "limit": limit
         }
-        obs_resp = requests.get(obs_url, params=obs_params)
-        obs_resp.raise_for_status()
-        obs_json = obs_resp.json()
+        obs_json = request_json(
+            obs_url,
+            params=obs_params,
+            timeout=15,
+            ttl_seconds=21600,
+            attempts=3,
+        )
         
         observations = obs_json.get("observations", [])
         if not observations:

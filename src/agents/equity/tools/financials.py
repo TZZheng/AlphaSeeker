@@ -4,11 +4,36 @@ import os
 from datetime import datetime
 from typing import Tuple, Dict, Any, List
 from src.shared.web_search import search_web, deep_search
+from src.shared.reliability import cached_retry_call
 
 
 class FinancialsError(Exception):
     """Custom exception for financial data errors."""
     pass
+
+
+def _load_financial_snapshot(ticker: str) -> Dict[str, Any]:
+    """Fetch and cache the raw Yahoo Finance payload used by the financials tool."""
+    def _load() -> Dict[str, Any]:
+        stock = yf.Ticker(ticker)
+        return {
+            "info": stock.info,
+            "income_stmt": stock.income_stmt,
+            "balance_sheet": stock.balance_sheet,
+            "cashflow": stock.cashflow,
+            "quarterly_income_stmt": stock.quarterly_income_stmt,
+            "quarterly_balance_sheet": stock.quarterly_balance_sheet,
+            "quarterly_cashflow": stock.quarterly_cashflow,
+            "sustainability": stock.sustainability,
+        }
+
+    return cached_retry_call(
+        "yfinance_financials",
+        {"ticker": ticker},
+        _load,
+        ttl_seconds=1800,
+        attempts=3,
+    )
 
 
 def fetch_financial_metrics(ticker: str) -> Tuple[str, Dict[str, Any]]:
@@ -32,8 +57,8 @@ def fetch_financial_metrics(ticker: str) -> Tuple[str, Dict[str, Any]]:
         FinancialsError: If the ticker is invalid or data fetch fails.
     """
     try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
+        snapshot = _load_financial_snapshot(ticker)
+        info = snapshot["info"]
 
         # --- Key Ratios ---
         # yfinance 404s often result in empty info or missing keys, but no exception.
@@ -60,9 +85,12 @@ def fetch_financial_metrics(ticker: str) -> Tuple[str, Dict[str, Any]]:
         total_revenue = info.get('totalRevenue', 'N/A')
         fiscal_year_end = info.get('lastFiscalYearEnd', 'N/A')
         # --- Annual Statements (last 2 years) ---
-        income_stmt = stock.income_stmt.iloc[:, :2] if not stock.income_stmt.empty else pd.DataFrame()
-        balance_sheet = stock.balance_sheet.iloc[:, :2] if not stock.balance_sheet.empty else pd.DataFrame()
-        cash_flow = stock.cashflow.iloc[:, :2] if not stock.cashflow.empty else pd.DataFrame()
+        income_stmt_src = snapshot["income_stmt"]
+        balance_sheet_src = snapshot["balance_sheet"]
+        cash_flow_src = snapshot["cashflow"]
+        income_stmt = income_stmt_src.iloc[:, :2] if not income_stmt_src.empty else pd.DataFrame()
+        balance_sheet = balance_sheet_src.iloc[:, :2] if not balance_sheet_src.empty else pd.DataFrame()
+        cash_flow = cash_flow_src.iloc[:, :2] if not cash_flow_src.empty else pd.DataFrame()
         
 
         
@@ -73,9 +101,12 @@ def fetch_financial_metrics(ticker: str) -> Tuple[str, Dict[str, Any]]:
             raise FinancialsError("Financial statements are empty (recent IPO?).")
 
         # --- Quarterly Statements (last 4 quarters) ---
-        q_income_stmt = stock.quarterly_income_stmt.iloc[:, :4] if not stock.quarterly_income_stmt.empty else pd.DataFrame()
-        q_balance_sheet = stock.quarterly_balance_sheet.iloc[:, :1] if not stock.quarterly_balance_sheet.empty else pd.DataFrame()
-        q_cash_flow = stock.quarterly_cashflow.iloc[:, :4] if not stock.quarterly_cashflow.empty else pd.DataFrame()
+        q_income_stmt_src = snapshot["quarterly_income_stmt"]
+        q_balance_sheet_src = snapshot["quarterly_balance_sheet"]
+        q_cash_flow_src = snapshot["quarterly_cashflow"]
+        q_income_stmt = q_income_stmt_src.iloc[:, :4] if not q_income_stmt_src.empty else pd.DataFrame()
+        q_balance_sheet = q_balance_sheet_src.iloc[:, :1] if not q_balance_sheet_src.empty else pd.DataFrame()
+        q_cash_flow = q_cash_flow_src.iloc[:, :4] if not q_cash_flow_src.empty else pd.DataFrame()
 
         # --- TTM Approximation (sum of last 4 quarterly income periods) ---
         ttm_income = pd.DataFrame()
@@ -94,7 +125,7 @@ def fetch_financial_metrics(ticker: str) -> Tuple[str, Dict[str, Any]]:
         
         # --- ESG Data ---
         try:
-            esg_df = stock.sustainability
+            esg_df = snapshot["sustainability"]
             if esg_df is not None and not esg_df.empty:
                 esg_data = esg_df.to_markdown()
             else:

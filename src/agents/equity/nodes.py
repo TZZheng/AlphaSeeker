@@ -32,6 +32,7 @@ from src.agents.equity.tools.earnings_calls import research_earnings_call
 from src.agents.equity.tools.company_profile import fetch_company_profile
 from src.shared.llm_manager import get_llm
 from src.shared.model_config import get_model
+from src.shared.node_contracts import contract_node, partial_patch
 from src.shared.text_utils import condense_context, read_file_safe
 from src.shared.report_filename import build_prompt_report_filename, extract_prompt_text
 
@@ -421,7 +422,10 @@ def fetch_company_profile_node(state: AgentState) -> StatePatch:
         }
     except Exception as e:
         print(f"Warning: Company profile fetch failed: {e}")
-        return {"company_profile_path": None, "error": None}
+        return partial_patch(
+            {"company_profile_path": None, "error": None},
+            error=f"Company profile fetch failed: {e}",
+        )
 
 
 def fetch_financials(state: AgentState) -> StatePatch:
@@ -437,7 +441,10 @@ def fetch_financials(state: AgentState) -> StatePatch:
         return {"financials_path": file_path, "source_metadata": new_metadata, "error": None}
     except Exception as e:
         print(f"Warning: Financials fetch failed: {e}")
-        return {"financials_path": None, "error": None}
+        return partial_patch(
+            {"financials_path": None, "error": None},
+            error=f"Financials fetch failed: {e}",
+        )
 
 
 def research_qualitative(state: AgentState) -> StatePatch:
@@ -660,7 +667,10 @@ def synthesize_research(state: AgentState) -> StatePatch:
 
     if not research_data:
         print("Warning: No research data to synthesize")
-        return {"research_brief": {}, "error": None}
+        return partial_patch(
+            {"research_brief": {}, "error": None},
+            error="No research data available for synthesis",
+        )
 
     # --- MAP STEP ---
     all_text_items = list(research_data.values())
@@ -795,7 +805,7 @@ def review_and_expand_peers(state: AgentState) -> StatePatch:
     
     if not extracted_facts:
         print("Warning: No facts available for peer inference.")
-        return state
+        return partial_patch({}, error="No extracted facts available for peer analysis")
 
     print("--- Reviewing and Expanding Peers ---")
 
@@ -1212,3 +1222,17 @@ def check_error(state: AgentState) -> Literal["continue", "end"]:
     """Guards every node transition."""
     if state.get("error"): return "end"
     return "continue"
+
+
+planner = contract_node("planner")(planner)
+fetch_data = contract_node("fetch_data")(fetch_data)
+generate_chart = contract_node("generate_chart")(generate_chart)
+fetch_company_profile_node = contract_node("fetch_company_profile_node")(fetch_company_profile_node)
+fetch_financials = contract_node("fetch_financials")(fetch_financials)
+research_qualitative = contract_node("research_qualitative")(research_qualitative)
+synthesize_research = contract_node("synthesize_research")(synthesize_research)
+review_and_expand_peers = contract_node("review_and_expand_peers")(review_and_expand_peers)
+generate_section = contract_node("generate_section")(generate_section)
+generate_summary = contract_node("generate_summary")(generate_summary)
+verify_content = contract_node("verify_content")(verify_content)
+save_report = contract_node("save_report")(save_report)

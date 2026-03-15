@@ -43,7 +43,7 @@ def test_download_year_rows_parses_zip_fixture(
     monkeypatch.setattr(
         cftc.requests,
         "get",
-        lambda _url, timeout=30: _DummyResponse(payload),
+        lambda _url, **_kwargs: _DummyResponse(payload),
     )
 
     rows = cftc._download_year_rows(2026)
