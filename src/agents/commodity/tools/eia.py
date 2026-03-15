@@ -8,6 +8,7 @@ Requires: EIA_API_KEY environment variable (free from https://www.eia.gov/openda
 """
 
 import os
+import re
 from typing import List, Tuple, Dict, Optional
 
 from src.shared.reliability import request_json
@@ -32,6 +33,12 @@ EIA_SERIES: Dict[str, Dict[str, str]] = {
         "PET.WGTSTUS1.W":   "Weekly U.S. Ending Stocks of Motor Gasoline (Thousand Barrels)",
     },
 }
+
+
+def _sanitize_eia_error_message(message: str, api_key: str) -> str:
+    """Redact credentials from exception text before logging or persisting it."""
+    sanitized = message.replace(api_key, "[REDACTED]")
+    return re.sub(r"(api_key=)[^&\\s]+", r"\1[REDACTED]", sanitized)
 
 
 def get_series_for_commodity(asset: str) -> Dict[str, str]:
@@ -134,8 +141,9 @@ def fetch_eia_series(
             markdown_content += "\n"
 
         except Exception as e:
-            print(f"Error fetching EIA series {series_id}: {e}")
-            markdown_content += f"## Series {series_id}\nError fetching data: {e}\n\n"
+            sanitized_error = _sanitize_eia_error_message(str(e), api_key)
+            print(f"Error fetching EIA series {series_id}: {sanitized_error}")
+            markdown_content += f"## Series {series_id}\nError fetching data: {sanitized_error}\n\n"
             
     save_dir = os.path.join(os.getcwd(), "data")
     os.makedirs(save_dir, exist_ok=True)
