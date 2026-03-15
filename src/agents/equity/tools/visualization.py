@@ -1,7 +1,11 @@
 import pandas as pd
-import matplotlib.pyplot as plt
+import matplotlib
 import os
 from datetime import datetime
+
+# Non-interactive backend is required in worker threads/CI.
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 class VisualizationError(Exception):
     """Custom exception for visualization errors."""

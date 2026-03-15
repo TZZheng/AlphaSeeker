@@ -12,9 +12,11 @@ All agents import from here. No domain-specific logic lives in this module.
 import time
 from typing import List, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from configparser import ConfigParser
 
 from ddgs import DDGS
 import trafilatura
+from trafilatura.settings import DEFAULT_CONFIG
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # ---------------------------------------------------------------------------
@@ -75,7 +77,12 @@ def search_news(query: str, max_results: int = 5) -> List[Dict[str, str]]:
 # ---------------------------------------------------------------------------
 
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=5))
-def read_url(url: str, max_chars: int = 8000) -> Optional[str]:
+def read_url(
+    url: str,
+    max_chars: int = 8000,
+    download_timeout_seconds: int = 12,
+    extraction_timeout_seconds: int = 12,
+) -> Optional[str]:
     """
     Fetches and extracts clean article text from a URL using trafilatura.
 
@@ -87,7 +94,12 @@ def read_url(url: str, max_chars: int = 8000) -> Optional[str]:
         Extracted text or None if extraction failed.
     """
     try:
-        downloaded = trafilatura.fetch_url(url)
+        config = ConfigParser()
+        config.read_dict({"DEFAULT": dict(DEFAULT_CONFIG.defaults())})
+        config["DEFAULT"]["download_timeout"] = str(download_timeout_seconds)
+        config["DEFAULT"]["extraction_timeout"] = str(extraction_timeout_seconds)
+
+        downloaded = trafilatura.fetch_url(url, config=config)
         if not downloaded:
             return None
         text = trafilatura.extract(
@@ -96,6 +108,7 @@ def read_url(url: str, max_chars: int = 8000) -> Optional[str]:
             include_tables=True,
             favor_precision=False,
             deduplicate=True,
+            config=config,
         )
         if text and len(text) > max_chars:
             text = text[:max_chars] + f"\n... [truncated at {max_chars} chars]"
@@ -108,6 +121,8 @@ def read_urls_parallel(
     urls: List[str],
     max_workers: int = 15,
     max_chars_per_url: int = 8000,
+    download_timeout_seconds: int = 12,
+    extraction_timeout_seconds: int = 12,
 ) -> Dict[str, str]:
     """
     Reads multiple URLs in parallel using ThreadPoolExecutor.
@@ -124,7 +139,12 @@ def read_urls_parallel(
     unique_urls = list(set(urls))
 
     def _fetch(url: str) -> tuple[str, Optional[str]]:
-        return url, read_url(url, max_chars=max_chars_per_url)
+        return url, read_url(
+            url,
+            max_chars=max_chars_per_url,
+            download_timeout_seconds=download_timeout_seconds,
+            extraction_timeout_seconds=extraction_timeout_seconds,
+        )
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_fetch, url): url for url in unique_urls}
@@ -150,6 +170,8 @@ def deep_search(
     max_chars_per_url: int = 8000,
     search_delay: float = 0.3,
     use_news: bool = False,
+    download_timeout_seconds: int = 12,
+    extraction_timeout_seconds: int = 12,
 ) -> List[Dict[str, str]]:
     """
     Orchestrates: search multiple queries → collect top URLs → read full pages.
@@ -190,7 +212,13 @@ def deep_search(
     all_urls = [r["url"] for r in query_results if r["url"]]
     print(f"Deep search: {len(queries)} queries → {len(all_urls)} URLs to read")
 
-    url_texts = read_urls_parallel(all_urls, max_workers=max_workers, max_chars_per_url=max_chars_per_url)
+    url_texts = read_urls_parallel(
+        all_urls,
+        max_workers=max_workers,
+        max_chars_per_url=max_chars_per_url,
+        download_timeout_seconds=download_timeout_seconds,
+        extraction_timeout_seconds=extraction_timeout_seconds,
+    )
 
     print(f"Deep search: Successfully read {len(url_texts)} / {len(all_urls)} URLs")
 
