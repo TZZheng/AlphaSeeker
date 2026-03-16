@@ -37,6 +37,14 @@ from src.supervisor.synthesizer import SynthesisInput, run_synthesis
 # Supervisor State — carries data between all nodes in this graph
 # ---------------------------------------------------------------------------
 
+
+def _prefer_latest_node_result(
+    left: NodeResult | None,
+    right: NodeResult | None,
+) -> NodeResult | None:
+    """Resolve parallel node result updates by keeping the most recent non-null value."""
+    return right if right is not None else left
+
 class SupervisorState(TypedDict, total=False):
     # Input
     user_prompt: Required[str]                              # Raw natural language input from the user
@@ -51,7 +59,7 @@ class SupervisorState(TypedDict, total=False):
     # merge their dicts safely: {"equity": "..."} | {"macro": "..."} = both keys.
     agent_results: Annotated[Dict[str, str], operator.ior]
     node_results: Annotated[Dict[str, NodeResult], operator.ior]
-    last_node_result: NodeResult
+    last_node_result: Annotated[NodeResult | None, _prefer_latest_node_result]
 
     # Final Output
     final_response: str                 # Synthesized, integrated response for the user
@@ -139,7 +147,6 @@ def classify_intent(state: SupervisorState) -> dict:
     classified_entities = {}
     
     for task in classification.tasks:
-        sub_agents_needed.append(task.agent_type)
         request = SubAgentRequest(
             user_prompt=prompt,
         )
@@ -150,7 +157,11 @@ def classify_intent(state: SupervisorState) -> dict:
         elif task.agent_type == "commodity":
             request.asset = task.asset
             
+        # Keep the most recent request payload if the classifier repeats an agent,
+        # but only fan out to each agent type once.
         classified_entities[task.agent_type] = request
+        if task.agent_type not in sub_agents_needed:
+            sub_agents_needed.append(task.agent_type)
         
     print(f"\n--- [Supervisor] Classified Intent: {classification.primary_intent} ---")
     print(f"--- [Supervisor] Sub-agents needed: {sub_agents_needed} ---")
@@ -437,7 +448,11 @@ def route_to_agents(state: SupervisorState):
     from src.supervisor.router import AGENT_NODE_MAP
     from langgraph.types import Send
     sends = []
+    seen_agents = set()
     for agent in state.get("sub_agents_needed", []):
+        if agent in seen_agents:
+            continue
+        seen_agents.add(agent)
         node = AGENT_NODE_MAP.get(agent)
         if node:
             sends.append(Send(node, state))

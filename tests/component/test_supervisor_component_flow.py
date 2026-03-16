@@ -154,3 +154,59 @@ def test_classification_validation_and_routing_component(
     assert valid["last_node_result"].status == "ok"
     assert isinstance(sends, list)
     assert [send.node for send in sends] == ["run_equity_agent", "run_macro_agent"]
+
+
+def test_supervisor_app_invocation_handles_parallel_merge_and_duplicate_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    macro_module = types.SimpleNamespace(
+        app=_FakeApp(
+            result={
+                "report_content": {
+                    "overview": {"title": "Macro Overview", "content": "Dollar and rates details"}
+                }
+            }
+        )
+    )
+    commodity_module = types.SimpleNamespace(
+        app=_FakeApp(
+            result={
+                "report_content": {
+                    "overview": {
+                        "title": "Commodity Overview",
+                        "content": "Oil shock details",
+                    }
+                }
+            }
+        )
+    )
+
+    monkeypatch.setitem(sys.modules, "src.agents.macro.graph", macro_module)
+    monkeypatch.setitem(sys.modules, "src.agents.commodity.graph", commodity_module)
+
+    fake_classification = supervisor_graph.ClassificationResult(
+        primary_intent="macro",
+        tasks=[
+            supervisor_graph.AgentTask(agent_type="macro", topic="U.S. dollar"),
+            supervisor_graph.AgentTask(agent_type="commodity", asset="crude oil"),
+            supervisor_graph.AgentTask(agent_type="macro", topic="U.S. Treasury yields"),
+        ],
+        reasoning="duplicate macro branch",
+    )
+
+    monkeypatch.setattr("src.supervisor.router.classify_user_prompt", lambda _prompt: fake_classification)
+    monkeypatch.setattr(
+        supervisor_graph,
+        "run_synthesis",
+        lambda _input: SynthesisOutput(
+            final_response="Unified supervisor output",
+            mode="synthesis",
+            agents_used=["macro", "commodity"],
+        ),
+    )
+
+    final = supervisor_graph.app.invoke({"user_prompt": "Conflict spillover scenario"})
+
+    assert final["final_response"] == "Unified supervisor output"
+    assert set(final["agent_results"]) == {"macro", "commodity"}
+    assert final["last_node_result"].status == "ok"

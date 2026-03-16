@@ -9,6 +9,10 @@ Multi-agent quantitative research for equities, macro, and commodities.
 
 AlphaSeeker takes a financial question, routes it to the right specialist agents, gathers real data through code, and returns a single synthesized report. The project is built for research workflows where you want more than a generic chatbot answer: you want domain routing, saved artifacts, charts, and a clearer trail of how the answer was produced.
 
+![AAPL Research Snapshot](docs/examples/assets/aapl_equity_one_pager.png)
+
+> This image is a curated visual summary built from [the AAPL one-pager](docs/examples/aapl_equity_one_pager.html), not the raw generated Markdown report. The original saved report is [AAPL_analysis_report.md](docs/examples/AAPL_analysis_report.md).
+
 ## Table of Contents
 
 - [Overview](#overview)
@@ -167,9 +171,17 @@ If you are not used to the term "role" here: it means a specific job inside an a
 
 ## Example Outputs
 
-Current sample artifacts in this repo:
+Recommended first examples:
 
-- [AAPL equity report](reports/AAPL_initiation_report.md)
+- [AAPL one-page showcase](docs/examples/aapl_equity_one_pager.md)
+- [AAPL curated case study](docs/examples/aapl_equity_case_study.md)
+- [AAPL full generated report](docs/examples/AAPL_analysis_report.md)
+
+Additional sample artifacts:
+
+- [AAPL HTML one-pager for screenshotting](docs/examples/aapl_equity_one_pager.html)
+- [One-page U.S.-Iran conflict asset](docs/examples/us_iran_conflict_usd_one_pager.md)
+- [Curated U.S.-Iran conflict case study](docs/examples/us_iran_conflict_usd_case_study.md)
 - [CRWV equity report](reports/CRWV_initiation_report.md)
 - [Crude oil commodity report](reports/Commodity_Crude_Oil.md)
 - [Supervisor crude oil synthesis](reports/Supervisor_US_Iran_Crude_Oil.md)

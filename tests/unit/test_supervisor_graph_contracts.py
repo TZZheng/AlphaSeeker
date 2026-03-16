@@ -9,10 +9,12 @@ from src.shared.schemas import SubAgentRequest
 from src.supervisor.graph import (
     _as_classified_state,
     _extract_report,
+    classify_intent,
     route_to_agents,
     synthesize_results,
     validate_routing_state,
 )
+from src.supervisor.router import AgentTask, ClassificationResult
 from src.supervisor.synthesizer import SynthesisOutput
 
 pytestmark = pytest.mark.unit
@@ -102,6 +104,18 @@ def test_route_to_agents_returns_send_fanout() -> None:
     assert [s.node for s in sends] == ["run_equity_agent", "run_macro_agent"]
 
 
+def test_route_to_agents_deduplicates_repeated_agents() -> None:
+    sends = route_to_agents(
+        {
+            "user_prompt": "Analyze conflict spillovers",
+            "sub_agents_needed": ["macro", "commodity", "macro"],
+        }
+    )
+
+    assert isinstance(sends, list)
+    assert [s.node for s in sends] == ["run_macro_agent", "run_commodity_agent"]
+
+
 def test_route_to_agents_returns_handle_error_on_state_error() -> None:
     out = route_to_agents({"user_prompt": "x", "error": "bad"})
     assert out == "handle_error"
@@ -154,6 +168,28 @@ def test_extract_report_uses_error_fallback() -> None:
     out = _extract_report({"error": "upstream failed"}, agent_type="commodity")
 
     assert out == "**Commodity Agent:** Pipeline failed — upstream failed"
+
+
+def test_classify_intent_deduplicates_repeated_agent_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_classification = ClassificationResult(
+        primary_intent="macro",
+        tasks=[
+            AgentTask(agent_type="macro", topic="U.S. dollar"),
+            AgentTask(agent_type="commodity", asset="crude oil"),
+            AgentTask(agent_type="macro", topic="U.S. Treasury yields"),
+        ],
+        reasoning="duplicate macro task",
+    )
+
+    monkeypatch.setattr("src.supervisor.router.classify_user_prompt", lambda _prompt: fake_classification)
+
+    out = classify_intent({"user_prompt": "Conflict shock"})
+
+    assert out["sub_agents_needed"] == ["macro", "commodity"]
+    assert out["classified_entities"]["macro"].topic == "U.S. Treasury yields"
+    assert out["last_node_result"].status == "ok"
 
 
 def test_synthesize_results_success_contract(monkeypatch: pytest.MonkeyPatch) -> None:
