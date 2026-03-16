@@ -177,15 +177,6 @@ Recommended first examples:
 - [AAPL curated case study](docs/examples/aapl_equity_case_study.md)
 - [AAPL full generated report](docs/examples/AAPL_analysis_report.md)
 
-Additional sample artifacts:
-
-- [AAPL HTML one-pager for screenshotting](docs/examples/aapl_equity_one_pager.html)
-- [One-page U.S.-Iran conflict asset](docs/examples/us_iran_conflict_usd_one_pager.md)
-- [Curated U.S.-Iran conflict case study](docs/examples/us_iran_conflict_usd_case_study.md)
-- [CRWV equity report](reports/CRWV_initiation_report.md)
-- [Crude oil commodity report](reports/Commodity_Crude_Oil.md)
-- [Supervisor crude oil synthesis](reports/Supervisor_US_Iran_Crude_Oil.md)
-
 Runtime outputs are written to local folders and intentionally git-ignored where appropriate:
 
 - `data/` for fetched datasets and debug artifacts
