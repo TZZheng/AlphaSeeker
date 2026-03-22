@@ -28,6 +28,13 @@ _DEFAULTS: Dict[str, Dict[str, str]] = {
         "classify": "sf/Qwen/Qwen3.5-4B",
         "synthesize": "kimi-k2.5",
     },
+    "harness": {
+        "selector": "sf/Qwen/Qwen3-8B",
+        "controller": "sf/Qwen/Qwen3-8B",
+        "condense": "sf/Qwen/Qwen3-8B",
+        "writer": "kimi-k2.5",
+        "verify": "kimi-k2.5",
+    },
     "equity": {
         "plan": "sf/Qwen/Qwen3-14B",
         "condense": "sf/Qwen/Qwen3-14B",

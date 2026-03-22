@@ -23,6 +23,16 @@ supervisor:
   synthesize: "kimi-k2.5"               # Final multi-agent synthesis (high quality)
 
 # ---------------------------------------------------------------------------
+# Dynamic Harness
+# ---------------------------------------------------------------------------
+harness:
+  selector: "sf/Qwen/Qwen3-8B"
+  controller: "sf/Qwen/Qwen3-8B"
+  condense: "sf/Qwen/Qwen3-8B"
+  writer: "kimi-k2.5"
+  verify: "kimi-k2.5"
+
+# ---------------------------------------------------------------------------
 # Equity Research Sub-Agent
 # ---------------------------------------------------------------------------
 equity:

@@ -81,3 +81,11 @@ Priority order for this phase: **Foundation -> Measurement -> Serving -> Operati
 
 ### Operations
 - [ ] **Security & Ops Hardening:** Use managed secrets, stage/prod environment separation, release tagging/rollback workflow, spend guardrails, and retention policies for checkpoints/artifacts.
+
+## Harness Follow-Ups From Live Runs (2026-03-22)
+- [ ] **Harden verifier structured output parsing:** The live judge frequently omits `decision` or returns `improvement_instructions` as a string instead of a list. Add response coercion, a retry path, or a repair step before falling back.
+- [ ] **Fix verifier evidence-window truncation:** The verifier only sees a limited tail of the evidence ledger, which can make valid citations look missing in broad runs. Pass all cited IDs or a citation-targeted evidence subset into the judge prompt.
+- [ ] **Downgrade broken EIA artifacts to `partial` or `failed`:** `fetch_eia_inventory` can currently return `ok` even when the saved artifact is only HTTP 404 errors. Detect error-only payloads before recording success.
+- [ ] **Investigate `fetch_macro_indicators` live stalls:** The FRED-backed macro skill hung during a broad harness run. Add tighter network timeouts, better logging, and a graceful timeout result.
+- [ ] **Add a writer timeout or stronger prompt-size control:** Broad live runs can stall in the final draft stage even after evidence collection succeeds. Add a timeout budget and more aggressive context trimming for the writer.
+- [ ] **Tighten citation quality for material claims:** The writer sometimes uses search headline evidence for financial claims that should prefer filings, company releases, or earnings-call notes.
