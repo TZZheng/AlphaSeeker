@@ -30,10 +30,13 @@ _DEFAULTS: Dict[str, Dict[str, str]] = {
     },
     "harness": {
         "selector": "sf/Qwen/Qwen3-8B",
+        "planner": "sf/Qwen/Qwen3-8B",
         "controller": "sf/Qwen/Qwen3-8B",
+        "worker": "sf/Qwen/Qwen3-8B",
         "condense": "sf/Qwen/Qwen3-8B",
         "writer": "kimi-k2.5",
         "verify": "kimi-k2.5",
+        "evaluator": "kimi-k2.5",
     },
     "equity": {
         "plan": "sf/Qwen/Qwen3-14B",

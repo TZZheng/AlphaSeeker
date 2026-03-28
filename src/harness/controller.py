@@ -1,4 +1,4 @@
-"""LLM controller for deciding the next harness action."""
+"""Plan-aware controller for deciding the next harness action."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from typing import cast
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from src.harness.types import ControllerDecision, HarnessState
+from src.harness.types import ControllerDecision, HarnessState, ResearchStep
 from src.shared.llm_manager import get_llm
 from src.shared.model_config import get_model
 
@@ -14,120 +14,158 @@ from src.shared.model_config import get_model
 def _format_skills(state: HarnessState) -> str:
     lines = []
     for spec in state.available_skills:
+        lines.append(f"- {spec.name} ({spec.pack}): {spec.description}")
+    return "\n".join(lines) or "- No skills loaded."
+
+
+def _format_steps(state: HarnessState) -> str:
+    if not state.research_plan or not state.research_plan.steps:
+        return "No research plan loaded."
+    lines = []
+    for step in state.research_plan.steps:
+        status = state.step_statuses.get(step.id, "pending")
         lines.append(
-            f"- {spec.name} ({spec.pack}): {spec.description} | input_schema={spec.input_schema}"
+            f"- {step.id} [{status}] depends_on={step.depends_on} "
+            f"parallel_safe={step.parallel_safe} objective={step.objective}"
         )
     return "\n".join(lines)
 
 
-def _format_evidence(state: HarnessState, limit: int = 10) -> str:
-    if not state.evidence_ledger:
-        return "No evidence collected yet."
+def _format_follow_up_calls(state: HarnessState) -> str:
+    if not state.verification_reports:
+        return "None"
+    last_report = state.verification_reports[-1]
+    if not last_report.required_follow_up_calls:
+        return "None"
+    return "\n".join(
+        f"- {call.name} {call.arguments}" for call in last_report.required_follow_up_calls
+    )
 
-    lines = []
-    for item in state.evidence_ledger[-limit:]:
-        source_text = ", ".join(item.sources or item.artifact_paths) or item.source_type
-        content = (item.content or "").strip()
-        if len(content) > 400:
-            content = content[:400] + "..."
-        lines.append(f"- [{item.id}] {item.summary} | {source_text}\n{content}")
-    return "\n".join(lines)
+
+def get_unblocked_steps(state: HarnessState) -> list[ResearchStep]:
+    """Return pending steps whose dependencies are already satisfied."""
+
+    if not state.research_plan:
+        return []
+
+    ready: list[ResearchStep] = []
+    for step in state.research_plan.steps:
+        status = state.step_statuses.get(step.id, "pending")
+        if status in {"completed", "partial", "skipped"}:
+            continue
+        if status == "failed":
+            continue
+        dependencies_met = all(
+            state.step_statuses.get(dep) in {"completed", "partial", "skipped"}
+            for dep in step.depends_on
+        )
+        if dependencies_met:
+            ready.append(step)
+    return ready
 
 
 def _fallback_decision(state: HarnessState) -> ControllerDecision:
-    skill_names = {spec.name for spec in state.available_skills}
-
     if state.latest_draft and state.verification_reports:
         last_report = state.verification_reports[-1]
         if last_report.decision == "pass":
             return ControllerDecision(
                 action="finalize",
-                rationale="The latest verified draft already passed the judge.",
+                rationale="The latest evaluated draft already passed.",
             )
 
-    if not state.evidence_ledger:
-        if "search_and_read" in skill_names:
+    if state.verification_reports:
+        last_report = state.verification_reports[-1]
+        if last_report.required_follow_up_calls:
+            call = last_report.required_follow_up_calls[0]
             return ControllerDecision(
                 action="call_skill",
-                rationale="Start by collecting full-text evidence for the user prompt.",
-                skill_call={
-                    "name": "search_and_read",
-                    "arguments": {"queries": [state.request.user_prompt], "urls_per_query": 2},
-                },
+                rationale="Evaluator requested a concrete follow-up call.",
+                skill_call=call,
             )
-        if "search_web" in skill_names:
+        if (
+            last_report.decision == "revise"
+            and state.revision_count < state.request.max_revision_rounds
+            and state.latest_draft
+        ):
             return ControllerDecision(
-                action="call_skill",
-                rationale="Start by collecting discovery results for the user prompt.",
-                skill_call={"name": "search_web", "arguments": {"query": state.request.user_prompt}},
+                action="draft",
+                rationale="Revise the draft against evaluator section feedback.",
             )
 
-    if state.verification_reports and state.verification_reports[-1].decision == "revise":
-        if state.revision_count < state.request.max_revision_rounds and "search_and_read" in skill_names:
-            critique = " ".join(state.verification_reports[-1].improvement_instructions[:2]).strip()
-            query = state.request.user_prompt
-            if critique:
-                query = f"{query} {critique}"
+    ready_steps = get_unblocked_steps(state)
+    if ready_steps:
+        parallel_ready = [
+            step.id for step in ready_steps if step.parallel_safe
+        ][: state.request.max_parallel_steps]
+        if (
+            state.request.allow_parallel_steps
+            and len(parallel_ready) > 1
+        ):
             return ControllerDecision(
-                action="call_skill",
-                rationale="Gather another round of evidence to address the verifier critique.",
-                skill_call={
-                    "name": "search_and_read",
-                    "arguments": {"queries": [query], "urls_per_query": 2},
-                },
+                action="execute_parallel_steps",
+                rationale="Multiple independent steps are ready and parallel-safe.",
+                step_ids=parallel_ready,
             )
         return ControllerDecision(
-            action="draft",
-            rationale="Revise the draft using the collected evidence and verifier feedback.",
+            action="execute_step",
+            rationale=f"Run the next unblocked step: {ready_steps[0].id}.",
+            step_id=ready_steps[0].id,
         )
 
     if not state.latest_draft:
         return ControllerDecision(
             action="draft",
-            rationale="Sufficient evidence exists to attempt a draft.",
+            rationale="All planned steps are complete enough for a draft.",
         )
 
     return ControllerDecision(
         action="finalize",
-        rationale="A draft already exists and no better next skill is obvious.",
+        rationale="No remaining unblocked steps and a draft already exists.",
     )
 
 
 def decide_next_step(state: HarnessState) -> ControllerDecision:
-    """Pick the next action for the harness, with a heuristic fallback."""
+    """Pick the next action for the harness, with a scheduler-oriented fallback."""
 
     system_prompt = """
 You are the controller for a research harness.
+You are scheduling work, not inventing a new plan.
+
 You may choose exactly one next action:
 1. call_skill
-2. draft
-3. finalize
+2. execute_step
+3. execute_parallel_steps
+4. draft
+5. finalize
 
 Rules:
-- Prefer gathering evidence before drafting.
-- Use only one skill call at a time.
-- Do not finalize an unverified draft unless the revision budget is exhausted.
-- When calling a skill, populate both skill name and arguments.
-- Keep arguments minimal and concrete.
+- Prefer executing unblocked planned steps before drafting.
+- Use required_follow_up_calls when evaluator feedback provides them.
+- Only schedule steps whose dependencies are already satisfied.
+- Use execute_parallel_steps only for independent, parallel-safe steps.
+- Draft only when the remaining gaps are best solved by writing or revising.
 """
 
-    user_prompt = f"""User request:
-{state.request.user_prompt}
+    user_prompt = f"""Mission:
+{state.mission_text or state.request.user_prompt}
+
+Progress:
+{state.progress_text or "No progress file loaded."}
 
 Enabled packs:
-{", ".join(state.enabled_packs)}
+{", ".join(state.enabled_packs) or "None"}
 
 Available skills:
 {_format_skills(state)}
 
-Working memory:
-{chr(10).join(state.working_memory[-6:]) or "No memory yet."}
+Research plan:
+{_format_steps(state)}
+
+Evaluator follow-up calls:
+{_format_follow_up_calls(state)}
 
 Revision notes:
-{chr(10).join(state.revision_notes[-6:]) or "No revision notes yet."}
-
-Recent evidence:
-{_format_evidence(state)}
+{chr(10).join(state.revision_notes[-8:]) or "None"}
 """
 
     try:
