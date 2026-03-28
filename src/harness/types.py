@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timezone
+import time
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -12,6 +13,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 DOMAIN_PACKS = ("equity", "macro", "commodity")
 ALL_PACKS = ("core", *DOMAIN_PACKS)
 STEP_TERMINAL_STATUSES = ("completed", "partial", "failed", "skipped")
+RESEARCH_PROFILES = ("standard", "deep")
+EVALUATOR_PARSE_MODES = (
+    "direct_structured",
+    "normalized_structured",
+    "rule_based_fallback",
+)
 
 
 def _utc_now_iso() -> str:
@@ -41,6 +48,180 @@ class SkillCall(BaseModel):
 
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrievalQueryBucket(BaseModel):
+    """A themed bucket of retrieval queries for deep research."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str
+    intent: str
+    queries: list[str] = Field(default_factory=list)
+
+
+class DiscoveredSource(BaseModel):
+    """One candidate source discovered during broad retrieval."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str
+    query: str
+    query_bucket: str
+    search_type: Literal["web", "news", "artifact", "dataset"]
+    title: str
+    url: str
+    canonical_url: str
+    domain: str = ""
+    snippet: str = ""
+    publication_date: str | None = None
+    discovered_rank: int = 0
+    freshness_score: float = 0.0
+    relevance_score: float = 0.0
+    uniqueness_score: float = 0.0
+    source_quality_score: float = 0.0
+    composite_score: float = 0.0
+    coverage_tags: list[str] = Field(default_factory=list)
+
+
+class ReadQueueEntry(BaseModel):
+    """A ranked source selected for full-text reading."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str
+    canonical_url: str
+    title: str
+    domain: str = ""
+    query_bucket: str = ""
+    priority_rank: int
+    priority_score: float
+    coverage_tags: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class ReadResultRecord(BaseModel):
+    """One attempted full-text ingestion result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str
+    canonical_url: str
+    title: str
+    status: Literal["read", "failed"]
+    text: str = ""
+    text_chars: int = 0
+    publication_date: str | None = None
+    error: str | None = None
+    query_bucket: str = ""
+    coverage_tags: list[str] = Field(default_factory=list)
+
+
+class SourceCard(BaseModel):
+    """A normalized representation of one ingested source."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str
+    title: str
+    canonical_url: str = ""
+    domain: str = ""
+    source_kind: Literal["web", "news", "artifact", "dataset", "note"] = "web"
+    publication_date: str | None = None
+    summary: str
+    extracted_facts: list[str] = Field(default_factory=list)
+    extracted_numbers: list[str] = Field(default_factory=list)
+    extracted_dates: list[str] = Field(default_factory=list)
+    supporting_evidence: list[str] = Field(default_factory=list)
+    counterevidence: list[str] = Field(default_factory=list)
+    section_relevance: list[str] = Field(default_factory=list)
+    freshness_label: str = ""
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class FactIndexRecord(BaseModel):
+    """A normalized fact extracted from one or more source cards."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    fact_id: str
+    fact: str
+    source_ids: list[str] = Field(default_factory=list)
+    section_labels: list[str] = Field(default_factory=list)
+    numbers: list[str] = Field(default_factory=list)
+    dates: list[str] = Field(default_factory=list)
+    stance: Literal["supporting", "counterevidence", "neutral"] = "neutral"
+
+
+class SectionBrief(BaseModel):
+    """A compressed section-level brief used by the deep writer."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    section_label: str
+    summary: str
+    evidence_ids: list[str] = Field(default_factory=list)
+    source_ids: list[str] = Field(default_factory=list)
+    key_facts: list[str] = Field(default_factory=list)
+    counterpoints: list[str] = Field(default_factory=list)
+    coverage_status: Literal["strong", "partial", "missing"] = "missing"
+
+
+class CoverageMatrixEntry(BaseModel):
+    """One machine-readable coverage row for retrieval or QA scheduling."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    coverage_type: Literal["section", "contract", "freshness", "counterevidence", "evidence_type"]
+    label: str
+    status: Literal["strong", "partial", "missing"]
+    evidence_count: int = 0
+    evidence_ids: list[str] = Field(default_factory=list)
+    source_ids: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class CoverageMatrix(BaseModel):
+    """Coverage summary used by the controller and evaluator in deep mode."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sections: list[CoverageMatrixEntry] = Field(default_factory=list)
+    contract_clauses: list[CoverageMatrixEntry] = Field(default_factory=list)
+    freshness_requirements: list[CoverageMatrixEntry] = Field(default_factory=list)
+    counterevidence_requirements: list[CoverageMatrixEntry] = Field(default_factory=list)
+    evidence_types: list[CoverageMatrixEntry] = Field(default_factory=list)
+    needs_more_retrieval: bool = False
+    next_priority_labels: list[str] = Field(default_factory=list)
+    stats: dict[str, Any] = Field(default_factory=dict)
+
+
+class DeepRetrievalStageOutput(BaseModel):
+    """Typed stage output returned by the composite deep retrieval skill."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    stage: Literal[
+        "plan_queries",
+        "discover",
+        "rank",
+        "build_read_queue",
+        "ingest_batch",
+        "extract_batch",
+        "refresh_coverage",
+        "run_wave",
+    ]
+    query_bucket_count: int = 0
+    query_count: int = 0
+    discovered_count: int = 0
+    deduped_count: int = 0
+    read_queue_count: int = 0
+    successful_read_count: int = 0
+    failed_read_count: int = 0
+    source_card_count: int = 0
+    extraction_batch_count: int = 0
+    coverage_status: str = ""
+    artifact_paths: list[str] = Field(default_factory=list)
 
 
 class ResearchBrief(BaseModel):
@@ -199,6 +380,17 @@ class PhaseUpdate(BaseModel):
     created_at: str = Field(default_factory=_utc_now_iso)
 
 
+class PhaseTimingEvent(BaseModel):
+    """One measured latency sample for a major harness phase."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phase: Literal["planner", "retrieval", "writer", "evaluator"]
+    duration_seconds: float
+    detail: str = ""
+    created_at: str = Field(default_factory=_utc_now_iso)
+
+
 class StepExecutionResult(BaseModel):
     """Worker result for one structured research step."""
 
@@ -337,6 +529,15 @@ class VerificationReport(BaseModel):
     required_follow_up_calls: list[SkillCall] = Field(default_factory=list)
     counterevidence_gaps: list[str] = Field(default_factory=list)
     report_section_feedback: list[ReportSectionFeedback] = Field(default_factory=list)
+    unresolved_gaps: list[str] = Field(default_factory=list)
+    suggested_retrieval_queries: list[str] = Field(default_factory=list)
+    wall_clock_exhausted: bool = False
+    qa_iteration: int = 0
+    evaluator_parse_mode: Literal[
+        "direct_structured",
+        "normalized_structured",
+        "rule_based_fallback",
+    ] = "rule_based_fallback"
     raw_feedback: str = ""
 
 
@@ -347,6 +548,8 @@ class HarnessRequest(BaseModel):
 
     user_prompt: str
     runtime: str = "harness"
+    research_profile: Literal["standard", "deep"] = "standard"
+    wall_clock_budget_seconds: int = 300
     max_steps: int = 18
     max_revision_rounds: int = 6
     max_chars_before_condense: int = 6000
@@ -357,6 +560,31 @@ class HarnessRequest(BaseModel):
     selected_packs: list[str] | None = None
     run_id: str | None = None
     resume_from: str | None = None
+    deep_query_target: int = 60
+    deep_candidate_target: int = 300
+    deep_read_queue_target: int = 120
+    deep_read_batch_size: int = 20
+    deep_successful_read_target: int = 80
+
+    @model_validator(mode="before")
+    @classmethod
+    def _apply_profile_defaults(cls, values: Any) -> Any:
+        if not isinstance(values, dict):
+            return values
+        profile = str(values.get("research_profile", "standard")).strip().lower()
+        if profile not in RESEARCH_PROFILES:
+            raise ValueError(f"Illegal research_profile: {profile}")
+        if profile == "deep":
+            values.setdefault("wall_clock_budget_seconds", 1200)
+            values.setdefault("max_steps", 120)
+            values.setdefault("max_revision_rounds", 20)
+            values.setdefault("max_worker_iterations", 6)
+            values.setdefault("deep_query_target", 60)
+            values.setdefault("deep_candidate_target", 300)
+            values.setdefault("deep_read_queue_target", 120)
+            values.setdefault("deep_read_batch_size", 20)
+            values.setdefault("deep_successful_read_target", 80)
+        return values
 
 
 class HarnessState(BaseModel):
@@ -368,6 +596,8 @@ class HarnessState(BaseModel):
     run_id: str = ""
     run_root: str | None = None
     dossier_paths: dict[str, str] = Field(default_factory=dict)
+    started_at_epoch: float = Field(default_factory=time.time)
+    elapsed_seconds: float = 0.0
     enabled_packs: list[str] = Field(default_factory=list)
     available_skills: list[SkillSpec] = Field(default_factory=list)
     mission_text: str = ""
@@ -375,13 +605,26 @@ class HarnessState(BaseModel):
     research_brief: ResearchBrief | None = None
     research_plan: ResearchPlan | None = None
     research_contract: ResearchContract | None = None
+    deep_query_buckets: list[RetrievalQueryBucket] = Field(default_factory=list)
+    discovered_sources: list[DiscoveredSource] = Field(default_factory=list)
+    read_queue: list[ReadQueueEntry] = Field(default_factory=list)
+    read_results: list[ReadResultRecord] = Field(default_factory=list)
+    source_cards: list[SourceCard] = Field(default_factory=list)
+    fact_index: list[FactIndexRecord] = Field(default_factory=list)
+    section_briefs: list[SectionBrief] = Field(default_factory=list)
+    coverage_matrix: CoverageMatrix | None = None
     evidence_ledger: list[EvidenceItem] = Field(default_factory=list)
     skill_history: list[SkillResult] = Field(default_factory=list)
     step_results: list[StepExecutionResult] = Field(default_factory=list)
     step_statuses: dict[str, str] = Field(default_factory=dict)
     phase_history: list[PhaseUpdate] = Field(default_factory=list)
+    phase_timing_events: list[PhaseTimingEvent] = Field(default_factory=list)
+    phase_timing_totals_seconds: dict[str, float] = Field(default_factory=dict)
+    latency_bottleneck: Literal["planner", "retrieval", "writer", "evaluator", "unknown"] = "unknown"
     controller_log: list[ControllerDecision] = Field(default_factory=list)
     verification_reports: list[VerificationReport] = Field(default_factory=list)
+    pending_follow_up_calls: list[SkillCall] = Field(default_factory=list)
+    executed_follow_up_calls: list[SkillCall] = Field(default_factory=list)
     working_memory: list[str] = Field(default_factory=list)
     revision_notes: list[str] = Field(default_factory=list)
     findings: list[str] = Field(default_factory=list)
@@ -392,6 +635,10 @@ class HarnessState(BaseModel):
     final_response: str | None = None
     step_count: int = 0
     revision_count: int = 0
+    qa_iteration_count: int = 0
+    deep_retrieval_wave_count: int = 0
+    timed_out: bool = False
+    timeout_reason: str | None = None
     status: Literal["running", "completed", "failed"] = "running"
     report_path: str | None = None
     trace_path: str | None = None

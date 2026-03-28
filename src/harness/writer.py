@@ -109,6 +109,44 @@ def _format_step_results(state: HarnessState) -> str:
     return "\n".join(lines)
 
 
+def _format_section_briefs(state: HarnessState) -> str:
+    if not state.section_briefs:
+        return "No section briefs."
+    lines = []
+    for brief in state.section_briefs[:16]:
+        lines.append(f"## {brief.section_label} [{brief.coverage_status}]")
+        lines.append(brief.summary)
+        for fact in brief.key_facts[:4]:
+            lines.append(f"- fact: {fact}")
+        for point in brief.counterpoints[:2]:
+            lines.append(f"- counterpoint: {point}")
+    return "\n".join(lines)
+
+
+def _format_fact_index(state: HarnessState) -> str:
+    if not state.fact_index:
+        return "No fact index."
+    lines = []
+    for record in state.fact_index[:24]:
+        lines.append(
+            f"- [{record.fact_id}] ({record.stance}) {record.fact} | sections={record.section_labels}"
+        )
+    return "\n".join(lines)
+
+
+def _format_coverage_matrix(state: HarnessState) -> str:
+    if not state.coverage_matrix:
+        return "No coverage matrix."
+    lines = []
+    for entry in [
+        *state.coverage_matrix.sections,
+        *state.coverage_matrix.evidence_types,
+        *state.coverage_matrix.counterevidence_requirements,
+    ][:18]:
+        lines.append(f"- {entry.coverage_type}:{entry.label} [{entry.status}]")
+    return "\n".join(lines)
+
+
 def _title_from_prompt(state: HarnessState) -> str:
     text = state.request.user_prompt.strip().rstrip(".?")
     if not text:
@@ -177,6 +215,18 @@ def _section_evidence(state: HarnessState, section_label: str) -> list[str]:
 
 
 def _fallback_section_text(state: HarnessState, section_label: str) -> str:
+    if state.request.research_profile == "deep":
+        for brief in state.section_briefs:
+            if brief.section_label == section_label and brief.coverage_status != "missing":
+                facts = "\n".join(f"- {fact}" for fact in brief.key_facts[:5])
+                counterpoints = "\n".join(f"- {point}" for point in brief.counterpoints[:3])
+                body = brief.summary
+                if facts:
+                    body += f"\n\n{facts}"
+                if counterpoints:
+                    body += f"\n\nCounterevidence:\n{counterpoints}"
+                return body
+
     evidence_ids = _section_evidence(state, section_label)
     citations = " ".join(f"[{evidence_id}]" for evidence_id in evidence_ids) or "[E1]"
 
@@ -277,6 +327,13 @@ Rules:
 - Preserve unflagged sections if they are already adequate.
 """
 
+    if state.request.research_profile == "deep":
+        system_prompt += """
+- Draft from the supplied section briefs, fact index, and coverage matrix, not from raw working memory alone.
+- For deep single-name equity, aim for roughly 4,000 to 8,000 words when the corpus depth supports it.
+- Integrate counterevidence and peer pressure as first-class parts of the report.
+"""
+
     user_prompt = f"""Mission:
 {state.mission_text or state.request.user_prompt}
 
@@ -288,6 +345,15 @@ Contract:
 
 Step results:
 {_format_step_results(state)}
+
+Section briefs:
+{_format_section_briefs(state)}
+
+Fact index:
+{_format_fact_index(state)}
+
+Coverage matrix:
+{_format_coverage_matrix(state)}
 
 Revision notes:
 {chr(10).join(state.revision_notes[-10:]) or "None"}

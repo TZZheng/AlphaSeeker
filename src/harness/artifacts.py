@@ -6,7 +6,19 @@ import json
 from pathlib import Path
 from typing import Any
 
-from src.harness.types import HarnessState, VerificationReport
+from src.harness.types import (
+    ClaimRecord,
+    CoverageMatrix,
+    DiscoveredSource,
+    FactIndexRecord,
+    HarnessState,
+    ReadQueueEntry,
+    ReadResultRecord,
+    RetrievalQueryBucket,
+    SectionBrief,
+    SourceCard,
+    VerificationReport,
+)
 from src.shared.report_filename import build_prompt_report_filename
 
 
@@ -38,6 +50,13 @@ def build_run_paths(state: HarnessState) -> dict[str, str]:
         "qa_report": str(run_root / "qa_report.json"),
         "findings": str(run_root / "findings.json"),
         "claim_map": str(run_root / "claim_map.json"),
+        "discovered_sources": str(run_root / "discovered_sources.json"),
+        "read_queue": str(run_root / "read_queue.json"),
+        "read_results": str(run_root / "read_results.json"),
+        "source_cards": str(run_root / "source_cards.jsonl"),
+        "fact_index": str(run_root / "fact_index.json"),
+        "section_briefs": str(run_root / "section_briefs.json"),
+        "coverage_matrix": str(run_root / "coverage_matrix.json"),
         "checkpoints_dir": str(checkpoints_dir),
         "report": str(report_path),
         "trace": str(trace_path),
@@ -58,6 +77,13 @@ def _write_json(path: str, payload: Any) -> None:
     Path(path).write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
 
 
+def _write_jsonl(path: str, rows: list[dict[str, Any]]) -> None:
+    text = "\n".join(json.dumps(row, ensure_ascii=True) for row in rows)
+    if text:
+        text += "\n"
+    Path(path).write_text(text, encoding="utf-8")
+
+
 def _read_text(path: str) -> str:
     file_path = Path(path)
     if not file_path.exists():
@@ -70,6 +96,19 @@ def _read_json(path: str) -> Any:
     if not file_path.exists():
         return None
     return json.loads(file_path.read_text(encoding="utf-8"))
+
+
+def _read_jsonl(path: str) -> list[dict[str, Any]]:
+    file_path = Path(path)
+    if not file_path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in file_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        rows.append(json.loads(line))
+    return rows
 
 
 def _render_mission(state: HarnessState) -> str:
@@ -214,6 +253,43 @@ def _qa_payload(report: VerificationReport | None) -> dict[str, Any]:
     return report.model_dump(mode="json")
 
 
+def sync_reduction_artifacts(state: HarnessState) -> None:
+    """Persist deep-research artifacts independently of the full dossier refresh."""
+
+    if not state.dossier_paths:
+        state.dossier_paths = build_run_paths(state)
+    ensure_run_directories(state.dossier_paths)
+    _write_json(
+        state.dossier_paths["discovered_sources"],
+        {"query_buckets": [bucket.model_dump(mode="json") for bucket in state.deep_query_buckets],
+         "sources": [source.model_dump(mode="json") for source in state.discovered_sources]},
+    )
+    _write_json(
+        state.dossier_paths["read_queue"],
+        {"queue": [entry.model_dump(mode="json") for entry in state.read_queue]},
+    )
+    _write_json(
+        state.dossier_paths["read_results"],
+        {"results": [entry.model_dump(mode="json") for entry in state.read_results]},
+    )
+    _write_jsonl(
+        state.dossier_paths["source_cards"],
+        [card.model_dump(mode="json") for card in state.source_cards],
+    )
+    _write_json(
+        state.dossier_paths["fact_index"],
+        {"facts": [record.model_dump(mode="json") for record in state.fact_index]},
+    )
+    _write_json(
+        state.dossier_paths["section_briefs"],
+        {"sections": [brief.model_dump(mode="json") for brief in state.section_briefs]},
+    )
+    _write_json(
+        state.dossier_paths["coverage_matrix"],
+        state.coverage_matrix.model_dump(mode="json") if state.coverage_matrix else {},
+    )
+
+
 def sync_dossier(state: HarnessState) -> None:
     """Persist the mission/progress dossier and structured artifacts."""
 
@@ -249,6 +325,7 @@ def sync_dossier(state: HarnessState) -> None:
         state.dossier_paths["claim_map"],
         {"claims": [claim.model_dump(mode="json") for claim in state.claim_map]},
     )
+    sync_reduction_artifacts(state)
 
 
 def refresh_dossier(state: HarnessState) -> None:
@@ -276,9 +353,54 @@ def refresh_dossier(state: HarnessState) -> None:
     if isinstance(claim_payload, dict):
         claims = claim_payload.get("claims")
         if isinstance(claims, list):
-            from src.harness.types import ClaimRecord
-
             state.claim_map = [ClaimRecord.model_validate(item) for item in claims]
+
+    discovered_payload = _read_json(state.dossier_paths["discovered_sources"])
+    if isinstance(discovered_payload, dict):
+        query_buckets = discovered_payload.get("query_buckets")
+        if isinstance(query_buckets, list):
+            state.deep_query_buckets = [
+                RetrievalQueryBucket.model_validate(item) for item in query_buckets
+            ]
+        sources = discovered_payload.get("sources")
+        if isinstance(sources, list):
+            state.discovered_sources = [
+                DiscoveredSource.model_validate(item) for item in sources
+            ]
+
+    read_queue_payload = _read_json(state.dossier_paths["read_queue"])
+    if isinstance(read_queue_payload, dict):
+        queue_items = read_queue_payload.get("queue")
+        if isinstance(queue_items, list):
+            state.read_queue = [ReadQueueEntry.model_validate(item) for item in queue_items]
+
+    read_results_payload = _read_json(state.dossier_paths["read_results"])
+    if isinstance(read_results_payload, dict):
+        read_items = read_results_payload.get("results")
+        if isinstance(read_items, list):
+            state.read_results = [
+                ReadResultRecord.model_validate(item) for item in read_items
+            ]
+
+    source_card_rows = _read_jsonl(state.dossier_paths["source_cards"])
+    if source_card_rows:
+        state.source_cards = [SourceCard.model_validate(item) for item in source_card_rows]
+
+    fact_payload = _read_json(state.dossier_paths["fact_index"])
+    if isinstance(fact_payload, dict):
+        facts = fact_payload.get("facts")
+        if isinstance(facts, list):
+            state.fact_index = [FactIndexRecord.model_validate(item) for item in facts]
+
+    section_payload = _read_json(state.dossier_paths["section_briefs"])
+    if isinstance(section_payload, dict):
+        sections = section_payload.get("sections")
+        if isinstance(sections, list):
+            state.section_briefs = [SectionBrief.model_validate(item) for item in sections]
+
+    coverage_payload = _read_json(state.dossier_paths["coverage_matrix"])
+    if isinstance(coverage_payload, dict) and coverage_payload:
+        state.coverage_matrix = CoverageMatrix.model_validate(coverage_payload)
 
 
 def initialize_dossier(state: HarnessState) -> None:

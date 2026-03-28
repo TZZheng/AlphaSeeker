@@ -4,6 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.harness.artifacts import sync_reduction_artifacts
+from src.harness.deep_research import (
+    build_query_buckets,
+    build_read_queue,
+    build_stage_output,
+    discover_sources,
+    extract_source_cards,
+    ingest_read_queue,
+    rank_discovered_sources,
+    refresh_reduction_state,
+)
 from src.harness.skills.common import (
     ensure_str_list,
     json_preview,
@@ -21,6 +32,16 @@ DEFAULT_SEARCH_MAX_RESULTS = 8
 DEFAULT_NEWS_MAX_RESULTS = 8
 DEFAULT_URLS_PER_QUERY = 4
 DEFAULT_MAX_CHARS_PER_URL = 12000
+DEEP_RETRIEVAL_STAGES = {
+    "plan_queries",
+    "discover",
+    "rank",
+    "build_read_queue",
+    "ingest_batch",
+    "extract_batch",
+    "refresh_coverage",
+    "run_wave",
+}
 
 
 def search_web_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillResult:
@@ -216,6 +237,132 @@ def read_artifact_skill(arguments: dict[str, Any], _state: HarnessState) -> Skil
     )
 
 
+def deep_retrieval_skill(arguments: dict[str, Any], state: HarnessState) -> SkillResult:
+    """Composite retrieval skill for the opt-in deep research profile.
+
+    A "composite skill" in backend terms is one higher-level entry point that
+    coordinates several smaller operations behind a typed interface.
+    """
+
+    stage = str(arguments.get("stage") or "run_wave").strip()
+    if stage not in DEEP_RETRIEVAL_STAGES:
+        return make_result(
+            "deep_retrieval",
+            arguments,
+            status="failed",
+            summary="deep_retrieval received an illegal stage.",
+            error=f"Illegal stage '{stage}'.",
+        )
+
+    prompt = str(arguments.get("prompt") or state.request.user_prompt).strip()
+    query_target = int(arguments.get("query_target", state.request.deep_query_target))
+    candidate_target = int(arguments.get("candidate_target", state.request.deep_candidate_target))
+    read_queue_target = int(arguments.get("read_queue_target", state.request.deep_read_queue_target))
+    batch_size = int(arguments.get("ingest_batch_size", state.request.deep_read_batch_size))
+    max_chars_per_url = int(arguments.get("max_chars_per_url", DEFAULT_MAX_CHARS_PER_URL))
+    artifact_paths = [
+        state.dossier_paths.get("discovered_sources", ""),
+        state.dossier_paths.get("read_queue", ""),
+        state.dossier_paths.get("read_results", ""),
+        state.dossier_paths.get("source_cards", ""),
+        state.dossier_paths.get("fact_index", ""),
+        state.dossier_paths.get("section_briefs", ""),
+        state.dossier_paths.get("coverage_matrix", ""),
+    ]
+    artifact_paths = [path for path in artifact_paths if path]
+
+    if stage in {"plan_queries", "discover", "run_wave"} and not state.deep_query_buckets:
+        state.deep_query_buckets = build_query_buckets(
+            prompt,
+            [pack for pack in state.enabled_packs if pack != "core"],
+            query_target=query_target,
+        )
+
+    if stage == "plan_queries":
+        sync_reduction_artifacts(state)
+        stage_output = build_stage_output(state, stage, artifact_paths)
+        return make_result(
+            "deep_retrieval",
+            arguments,
+            status="ok",
+            summary=f"Planned {stage_output.query_count} deep retrieval querie(s).",
+            structured_data=stage_output.model_dump(mode="json"),
+            artifacts=artifact_paths,
+        )
+
+    if stage in {"discover", "run_wave"} and not state.discovered_sources:
+        candidates = discover_sources(
+            prompt,
+            state.deep_query_buckets,
+            candidate_target=candidate_target,
+        )
+        state.discovered_sources = rank_discovered_sources(candidates, prompt)
+
+    if stage in {"rank", "run_wave"} and state.discovered_sources:
+        state.discovered_sources = rank_discovered_sources(state.discovered_sources, prompt)
+
+    if stage in {"build_read_queue", "run_wave"} and not state.read_queue:
+        state.read_queue = build_read_queue(state.discovered_sources, queue_target=read_queue_target)
+
+    if stage in {"ingest_batch", "run_wave"} and state.read_queue:
+        new_results = ingest_read_queue(
+            state.read_queue,
+            state.discovered_sources,
+            state.read_results,
+            batch_size=batch_size,
+            max_chars_per_url=max_chars_per_url,
+        )
+        if new_results:
+            state.read_results.extend(new_results)
+            state.deep_retrieval_wave_count += 1
+
+    if stage in {"extract_batch", "run_wave"} and state.read_results:
+        new_cards = extract_source_cards(
+            state.read_results,
+            state.discovered_sources,
+            state.research_plan.required_sections if state.research_plan else [],
+            existing_cards=state.source_cards,
+        )
+        if new_cards:
+            state.source_cards.extend(new_cards)
+
+    if stage in {"extract_batch", "refresh_coverage", "run_wave"}:
+        refresh_reduction_state(state)
+    else:
+        sync_reduction_artifacts(state)
+
+    stage_output = build_stage_output(state, stage, artifact_paths)
+    evidence = [
+        note_evidence(
+            "deep_retrieval",
+            (
+                f"Deep retrieval stage '{stage}' now has "
+                f"{stage_output.discovered_count} discovered candidates, "
+                f"{stage_output.read_queue_count} queued reads, and "
+                f"{stage_output.source_card_count} source cards."
+            ),
+            metadata={
+                "stage": stage,
+                "coverage_status": stage_output.coverage_status,
+                "successful_read_count": stage_output.successful_read_count,
+            },
+        )
+    ]
+    return make_result(
+        "deep_retrieval",
+        arguments,
+        status="ok",
+        summary=(
+            f"Deep retrieval stage '{stage}' completed with "
+            f"{stage_output.discovered_count} candidates and "
+            f"{stage_output.successful_read_count} successful reads."
+        ),
+        structured_data=stage_output.model_dump(mode="json"),
+        artifacts=artifact_paths,
+        evidence=evidence,
+    )
+
+
 CORE_SKILLS = [
     SkillSpec(
         name="search_web",
@@ -262,5 +409,21 @@ CORE_SKILLS = [
         input_schema={"path": "string", "max_chars": "integer"},
         produces_artifacts=False,
         executor=read_artifact_skill,
+    ),
+    SkillSpec(
+        name="deep_retrieval",
+        description="Build, rank, ingest, and reduce a staged deep-research corpus.",
+        pack="core",
+        input_schema={
+            "stage": "string",
+            "prompt": "string",
+            "query_target": "integer",
+            "candidate_target": "integer",
+            "read_queue_target": "integer",
+            "ingest_batch_size": "integer",
+            "max_chars_per_url": "integer",
+        },
+        produces_artifacts=True,
+        executor=deep_retrieval_skill,
     ),
 ]

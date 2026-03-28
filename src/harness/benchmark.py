@@ -45,6 +45,19 @@ class BenchmarkMetrics(BaseModel):
     numeric_inconsistency_count: int
     counterevidence_gap_count: int
     runtime_status: str
+    discovered_source_count: int = 0
+    full_read_count: int = 0
+    extraction_batch_count: int = 0
+    qa_iteration_count: int = 0
+    elapsed_seconds: float = 0.0
+    final_word_count: int = 0
+    final_evaluator_decision: str = "unknown"
+    evaluator_parse_mode: str = "unknown"
+    planner_seconds: float = 0.0
+    retrieval_seconds: float = 0.0
+    writer_seconds: float = 0.0
+    evaluator_seconds: float = 0.0
+    latency_bottleneck: str = "unknown"
 
 
 class BenchmarkResult(BaseModel):
@@ -91,6 +104,16 @@ DEFAULT_BENCHMARK_CASES = [
 DEFAULT_BENCHMARK_LANES = [
     BenchmarkLane(lane_id="weak", request_overrides={"max_steps": 6, "max_revision_rounds": 1}),
     BenchmarkLane(lane_id="strong", request_overrides={"max_steps": 8, "max_revision_rounds": 2}),
+    BenchmarkLane(
+        lane_id="deep_soak",
+        request_overrides={
+            "research_profile": "deep",
+            "wall_clock_budget_seconds": 1200,
+            "max_steps": 120,
+            "max_revision_rounds": 20,
+            "max_worker_iterations": 6,
+        },
+    ),
 ]
 
 
@@ -98,10 +121,38 @@ def extract_metrics(response: HarnessResponse) -> BenchmarkMetrics:
     """Summarize the saved QA report into benchmark-friendly metrics."""
 
     qa_payload: dict[str, object] = {}
+    coverage_payload: dict[str, object] = {}
+    trace_payload: dict[str, object] = {}
     if response.dossier_paths.get("qa_report"):
         qa_path = Path(response.dossier_paths["qa_report"])
         if qa_path.exists():
             qa_payload = json.loads(qa_path.read_text(encoding="utf-8"))
+    if response.dossier_paths.get("coverage_matrix"):
+        coverage_path = Path(response.dossier_paths["coverage_matrix"])
+        if coverage_path.exists():
+            coverage_payload = json.loads(coverage_path.read_text(encoding="utf-8"))
+    if response.trace_path:
+        trace_path = Path(response.trace_path)
+        if trace_path.exists():
+            trace_payload = json.loads(trace_path.read_text(encoding="utf-8"))
+
+    stats = coverage_payload.get("stats", {}) if isinstance(coverage_payload, dict) else {}
+    qa_iteration_count = max(
+        int(stats.get("qa_iteration_count", 0) or 0),
+        int(trace_payload.get("qa_iteration_count", 0) or 0),
+        int(qa_payload.get("qa_iteration", 0) or 0),
+    )
+    elapsed_seconds = max(
+        float(stats.get("elapsed_seconds", 0.0) or 0.0),
+        float(trace_payload.get("elapsed_seconds", 0.0) or 0.0),
+    )
+    final_word_count = max(
+        int(stats.get("final_word_count", 0) or 0),
+        len(response.final_response.split()),
+    )
+    phase_timings = trace_payload.get("phase_timing_totals_seconds", {})
+    if not isinstance(phase_timings, dict):
+        phase_timings = {}
 
     return BenchmarkMetrics(
         artifact_creation_success=all(
@@ -122,6 +173,19 @@ def extract_metrics(response: HarnessResponse) -> BenchmarkMetrics:
         numeric_inconsistency_count=len(qa_payload.get("numeric_inconsistencies", [])),
         counterevidence_gap_count=len(qa_payload.get("counterevidence_gaps", [])),
         runtime_status=response.status,
+        discovered_source_count=int(stats.get("discovered_count", 0) or 0),
+        full_read_count=int(stats.get("full_read_count", 0) or 0),
+        extraction_batch_count=int(stats.get("extraction_batch_count", 0) or 0),
+        qa_iteration_count=qa_iteration_count,
+        elapsed_seconds=elapsed_seconds,
+        final_word_count=final_word_count,
+        final_evaluator_decision=str(qa_payload.get("decision", "unknown")),
+        evaluator_parse_mode=str(qa_payload.get("evaluator_parse_mode", "unknown")),
+        planner_seconds=float(phase_timings.get("planner", 0.0) or 0.0),
+        retrieval_seconds=float(phase_timings.get("retrieval", 0.0) or 0.0),
+        writer_seconds=float(phase_timings.get("writer", 0.0) or 0.0),
+        evaluator_seconds=float(phase_timings.get("evaluator", 0.0) or 0.0),
+        latency_bottleneck=str(trace_payload.get("latency_bottleneck", "unknown")),
     )
 
 
@@ -174,6 +238,14 @@ def compare_benchmark_results(
             - baseline_item.metrics.counterevidence_gap_count,
             "freshness_failure_delta": item.metrics.freshness_failures
             - baseline_item.metrics.freshness_failures,
+            "discovered_source_delta": item.metrics.discovered_source_count
+            - baseline_item.metrics.discovered_source_count,
+            "full_read_delta": item.metrics.full_read_count
+            - baseline_item.metrics.full_read_count,
+            "qa_iteration_delta": item.metrics.qa_iteration_count
+            - baseline_item.metrics.qa_iteration_count,
+            "final_word_count_delta": item.metrics.final_word_count
+            - baseline_item.metrics.final_word_count,
         }
     return comparison
 

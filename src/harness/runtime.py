@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+import time
 from typing import Callable
 
 from src.harness.artifacts import (
@@ -18,6 +19,7 @@ from src.harness.artifacts import (
 )
 from src.harness.claims import build_claim_map
 from src.harness.controller import decide_next_step
+from src.harness.deep_research import merge_skill_result_into_corpus, refresh_reduction_state
 from src.harness.planner import plan_research
 from src.harness.registry import build_skill_registry, get_skills_for_packs
 from src.harness.types import (
@@ -27,6 +29,7 @@ from src.harness.types import (
     HarnessResponse,
     HarnessState,
     PhaseUpdate,
+    PhaseTimingEvent,
     ResearchBrief,
     ResearchContract,
     ResearchPlan,
@@ -141,12 +144,89 @@ def _record_skill_result(state: HarnessState, result: SkillResult) -> None:
     state.working_memory.append(memory_entry)
     if result.status == "failed" and result.error:
         state.error = result.error
+    if state.request.research_profile == "deep":
+        merge_skill_result_into_corpus(state, result)
 
 
 def _record_phase(state: HarnessState, phase: str, summary: str) -> None:
     state.phase_history.append(PhaseUpdate(phase=phase, summary=summary))
+    _update_elapsed(state)
     sync_dossier(state)
     write_checkpoint(state, phase)
+
+
+def _classify_latency_bottleneck(state: HarnessState) -> str:
+    if not state.phase_timing_totals_seconds:
+        return "unknown"
+    ranked = sorted(
+        (
+            (phase, duration)
+            for phase, duration in state.phase_timing_totals_seconds.items()
+            if phase in {"planner", "retrieval", "writer", "evaluator"}
+        ),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    if not ranked or ranked[0][1] <= 0:
+        return "unknown"
+    return ranked[0][0]
+
+
+def _record_phase_timing(state: HarnessState, phase: str, started_at: float, *, detail: str = "") -> float:
+    duration = max(0.0, time.perf_counter() - started_at)
+    state.phase_timing_events.append(
+        PhaseTimingEvent(
+            phase=phase,  # type: ignore[arg-type]
+            duration_seconds=duration,
+            detail=detail,
+        )
+    )
+    state.phase_timing_totals_seconds[phase] = (
+        state.phase_timing_totals_seconds.get(phase, 0.0) + duration
+    )
+    state.latency_bottleneck = _classify_latency_bottleneck(state)  # type: ignore[assignment]
+    return duration
+
+
+def _update_elapsed(state: HarnessState) -> None:
+    state.elapsed_seconds = max(0.0, time.time() - state.started_at_epoch)
+
+
+def _wall_clock_exhausted(state: HarnessState) -> bool:
+    _update_elapsed(state)
+    return (
+        state.request.research_profile == "deep"
+        and state.elapsed_seconds >= state.request.wall_clock_budget_seconds
+    )
+
+
+def _mark_timeout(state: HarnessState, reason: str) -> None:
+    state.timed_out = True
+    state.timeout_reason = reason
+    state.status = "completed"
+    if state.verification_reports:
+        report = state.verification_reports[-1]
+        unresolved = list(
+            dict.fromkeys(
+                [
+                    *report.blocking_issues,
+                    *report.missing_sections,
+                    *report.missing_evidence_types,
+                    *report.counterevidence_gaps,
+                    *report.freshness_warnings,
+                    *report.numeric_inconsistencies,
+                    *report.unresolved_gaps,
+                ]
+            )
+        )
+        state.verification_reports[-1] = report.model_copy(
+            update={
+                "summary": f"{report.summary} Timeout: {reason}.",
+                "wall_clock_exhausted": True,
+                "unresolved_gaps": unresolved,
+            }
+        )
+    sync_dossier(state)
 
 
 def _refresh_context(state: HarnessState) -> None:
@@ -179,6 +259,7 @@ def _run_planner(
 ) -> None:
     _refresh_context(state)
     override = _domain_override(state.request)
+    started_at = time.perf_counter()
     if planner_fn is not None:
         brief, plan, contract = planner_fn(state, registry_map)
     else:
@@ -186,12 +267,17 @@ def _run_planner(
             state.request.user_prompt,
             registry=registry_map,
             selected_packs=override,
+            research_profile=state.request.research_profile,
         )
+    duration = _record_phase_timing(state, "planner", started_at, detail="plan_research")
     _apply_plan_to_state(state, brief, plan, contract, registry_map)
     _record_phase(
         state,
         "planner",
-        f"Planned {len(plan.steps)} steps across packs: {', '.join(state.enabled_packs)}.",
+        (
+            f"Planned {len(plan.steps)} steps across packs: {', '.join(state.enabled_packs)} "
+            f"in {duration:.2f}s."
+        ),
     )
 
 
@@ -288,8 +374,28 @@ def _run_parallel_steps(
 def _verify_latest_draft(state: HarnessState, verifier_fn: VerifierFn) -> VerificationReport:
     draft = state.latest_draft or ""
     report = verifier_fn(state, draft)
+    state.qa_iteration_count += 1
+    report.qa_iteration = state.qa_iteration_count
     state.verification_reports.append(report)
+    if report.decision == "revise":
+        state.pending_follow_up_calls = [
+            call.model_copy(deep=True) for call in report.required_follow_up_calls
+        ]
+    else:
+        state.pending_follow_up_calls = []
     return report
+
+
+def _consume_follow_up_call(state: HarnessState, result: SkillResult) -> bool:
+    for index, call in enumerate(state.pending_follow_up_calls):
+        if call.name != result.skill_name:
+            continue
+        if call.arguments != result.arguments:
+            continue
+        consumed = state.pending_follow_up_calls.pop(index)
+        state.executed_follow_up_calls.append(consumed)
+        return True
+    return False
 
 
 def _finalize_from_draft(state: HarnessState) -> None:
@@ -304,9 +410,18 @@ def _finalize_from_draft(state: HarnessState) -> None:
 def _ensure_final_draft(state: HarnessState, writer_fn: WriterFn) -> None:
     if not state.latest_draft:
         _refresh_context(state)
+        started_at = time.perf_counter()
         state.latest_draft = writer_fn(state)
+        duration = _record_phase_timing(
+            state,
+            "writer",
+            started_at,
+            detail="final_fallback_draft",
+        )
         state.claim_map = build_claim_map(state, state.latest_draft)
-        _record_phase(state, "writer", "Generated a final fallback draft.")
+        if state.request.research_profile == "deep":
+            refresh_reduction_state(state)
+        _record_phase(state, "writer", f"Generated a final fallback draft in {duration:.2f}s.")
 
 
 def _build_trace_payload(state: HarnessState) -> dict[str, object]:
@@ -319,15 +434,35 @@ def _build_trace_payload(state: HarnessState) -> dict[str, object]:
             "controller_log": [decision.model_dump(mode="json") for decision in state.controller_log],
             "skill_history": [result.model_dump(mode="json") for result in state.skill_history],
             "step_results": [result.model_dump(mode="json") for result in state.step_results],
+            "deep_query_buckets": [bucket.model_dump(mode="json") for bucket in state.deep_query_buckets],
+            "discovered_sources": [item.model_dump(mode="json") for item in state.discovered_sources],
+            "read_queue": [item.model_dump(mode="json") for item in state.read_queue],
+            "read_results": [item.model_dump(mode="json") for item in state.read_results],
+            "source_cards": [item.model_dump(mode="json") for item in state.source_cards],
+            "fact_index": [item.model_dump(mode="json") for item in state.fact_index],
+            "section_briefs": [item.model_dump(mode="json") for item in state.section_briefs],
+            "coverage_matrix": (
+                state.coverage_matrix.model_dump(mode="json") if state.coverage_matrix else None
+            ),
             "evidence_ledger": [item.model_dump(mode="json") for item in state.evidence_ledger],
             "verification_reports": [report.model_dump(mode="json") for report in state.verification_reports],
+            "pending_follow_up_calls": [call.model_dump(mode="json") for call in state.pending_follow_up_calls],
+            "executed_follow_up_calls": [call.model_dump(mode="json") for call in state.executed_follow_up_calls],
             "phase_history": [update.model_dump(mode="json") for update in state.phase_history],
+            "phase_timing_events": [event.model_dump(mode="json") for event in state.phase_timing_events],
+            "phase_timing_totals_seconds": state.phase_timing_totals_seconds,
+            "latency_bottleneck": state.latency_bottleneck,
             "claim_map": [claim.model_dump(mode="json") for claim in state.claim_map],
             "working_memory": state.working_memory,
             "revision_notes": state.revision_notes,
             "artifacts": state.artifacts,
             "latest_draft": state.latest_draft,
             "final_response": state.final_response,
+            "elapsed_seconds": state.elapsed_seconds,
+            "qa_iteration_count": state.qa_iteration_count,
+            "deep_retrieval_wave_count": state.deep_retrieval_wave_count,
+            "timed_out": state.timed_out,
+            "timeout_reason": state.timeout_reason,
             "step_count": state.step_count,
             "revision_count": state.revision_count,
             "status": state.status,
@@ -342,6 +477,7 @@ def _build_trace_payload(state: HarnessState) -> dict[str, object]:
 
 
 def _persist_outputs(state: HarnessState) -> None:
+    _update_elapsed(state)
     persist_report(state)
     payload = _build_trace_payload(state)
     payload["trace_path"] = state.dossier_paths.get("trace")
@@ -388,6 +524,9 @@ def run_harness(
         )
 
     for _ in range(request.max_steps):
+        if _wall_clock_exhausted(state):
+            _mark_timeout(state, "wall_clock_budget_exhausted")
+            break
         state.step_count += 1
         _refresh_context(state)
         decision = controller(state)
@@ -399,9 +538,28 @@ def run_harness(
             if call is None:
                 state.error = "Controller returned call_skill without a skill_call payload."
                 continue
+            started_at = time.perf_counter()
             result = execute_skill_call(state, call, registry_map)
+            duration = _record_phase_timing(
+                state,
+                "retrieval",
+                started_at,
+                detail=f"call_skill:{call.name}",
+            )
             _record_skill_result(state, result)
-            _record_phase(state, "worker", f"Executed direct skill call: {call.name}.")
+            was_follow_up = _consume_follow_up_call(state, result)
+            if was_follow_up:
+                _record_phase(
+                    state,
+                    "worker",
+                    f"Executed evaluator follow-up call: {call.name} in {duration:.2f}s.",
+                )
+            else:
+                _record_phase(
+                    state,
+                    "worker",
+                    f"Executed direct skill call: {call.name} in {duration:.2f}s.",
+                )
             continue
 
         if decision.action == "execute_step":
@@ -409,47 +567,80 @@ def run_harness(
             if step is None:
                 state.error = f"Controller referenced unknown step '{decision.step_id}'."
                 continue
+            started_at = time.perf_counter()
             step_result = _run_step_worker(state, step, registry_map, worker_fn)
+            duration = _record_phase_timing(
+                state,
+                "retrieval",
+                started_at,
+                detail=f"execute_step:{step.id}",
+            )
             _record_step_execution(state, step_result)
-            _record_phase(state, "worker", step_result.summary)
+            _record_phase(state, "worker", f"{step_result.summary} ({duration:.2f}s)")
             continue
 
         if decision.action == "execute_parallel_steps":
+            started_at = time.perf_counter()
             step_results = _run_parallel_steps(state, decision.step_ids, registry_map, worker_fn)
+            duration = _record_phase_timing(
+                state,
+                "retrieval",
+                started_at,
+                detail="execute_parallel_steps",
+            )
             for step_result in step_results:
                 _record_step_execution(state, step_result)
             if step_results:
                 joined = ", ".join(result.step_id for result in step_results)
-                _record_phase(state, "worker", f"Executed parallel steps: {joined}.")
+                _record_phase(
+                    state,
+                    "worker",
+                    f"Executed parallel steps: {joined} in {duration:.2f}s.",
+                )
             continue
 
         if decision.action == "draft":
             _refresh_context(state)
+            writer_started_at = time.perf_counter()
             state.latest_draft = writer(state)
+            writer_duration = _record_phase_timing(
+                state,
+                "writer",
+                writer_started_at,
+                detail="draft",
+            )
             state.claim_map = build_claim_map(state, state.latest_draft)
-            _record_phase(state, "writer", "Generated draft.")
+            if state.request.research_profile == "deep":
+                refresh_reduction_state(state)
+            _record_phase(state, "writer", f"Generated draft in {writer_duration:.2f}s.")
 
             _refresh_context(state)
+            evaluator_started_at = time.perf_counter()
             report = _verify_latest_draft(state, verifier)
-            _record_phase(state, "evaluator", report.summary)
+            evaluator_duration = _record_phase_timing(
+                state,
+                "evaluator",
+                evaluator_started_at,
+                detail="draft_evaluation",
+            )
+            _record_phase(
+                state,
+                "evaluator",
+                f"{report.summary} ({evaluator_duration:.2f}s)",
+            )
             if report.decision == "pass":
                 _finalize_from_draft(state)
                 break
-            if report.decision == "revise" and state.revision_count < request.max_revision_rounds:
-                state.revision_count += 1
-                state.revision_notes.append(report.summary)
-                state.revision_notes.extend(report.improvement_instructions)
-                continue
-            _finalize_from_draft(state)
-            break
-
-        if decision.action == "finalize":
-            _ensure_final_draft(state, writer)
-            if not state.verification_reports or state.verification_reports[-1].decision == "revise":
-                _refresh_context(state)
-                report = _verify_latest_draft(state, verifier)
-                _record_phase(state, "evaluator", report.summary)
-                if report.decision == "revise" and state.revision_count < request.max_revision_rounds:
+            if report.decision == "revise":
+                if state.request.research_profile == "deep":
+                    if _wall_clock_exhausted(state):
+                        _mark_timeout(state, "wall_clock_budget_exhausted")
+                        break
+                    state.revision_count += 1
+                    state.revision_notes.append(report.summary)
+                    state.revision_notes.extend(report.improvement_instructions)
+                    continue
+                if state.revision_count < request.max_revision_rounds:
                     state.revision_count += 1
                     state.revision_notes.append(report.summary)
                     state.revision_notes.extend(report.improvement_instructions)
@@ -457,14 +648,66 @@ def run_harness(
             _finalize_from_draft(state)
             break
 
+        if decision.action == "finalize":
+            _ensure_final_draft(state, writer)
+            if not state.verification_reports or state.verification_reports[-1].decision == "revise":
+                _refresh_context(state)
+                evaluator_started_at = time.perf_counter()
+                report = _verify_latest_draft(state, verifier)
+                evaluator_duration = _record_phase_timing(
+                    state,
+                    "evaluator",
+                    evaluator_started_at,
+                    detail="finalize_evaluation",
+                )
+                _record_phase(
+                    state,
+                    "evaluator",
+                    f"{report.summary} ({evaluator_duration:.2f}s)",
+                )
+                if report.decision == "revise":
+                    if state.request.research_profile == "deep" and not _wall_clock_exhausted(state):
+                        state.revision_count += 1
+                        state.revision_notes.append(report.summary)
+                        state.revision_notes.extend(report.improvement_instructions)
+                        continue
+                    if state.revision_count < request.max_revision_rounds:
+                        state.revision_count += 1
+                        state.revision_notes.append(report.summary)
+                        state.revision_notes.extend(report.improvement_instructions)
+                        continue
+                    if state.request.research_profile == "deep":
+                        _mark_timeout(state, "finalize_requested_before_pass")
+            _finalize_from_draft(state)
+            break
+
     else:
         _ensure_final_draft(state, writer)
         if not state.verification_reports:
             _refresh_context(state)
+            evaluator_started_at = time.perf_counter()
             report = _verify_latest_draft(state, verifier)
-            _record_phase(state, "evaluator", report.summary)
+            evaluator_duration = _record_phase_timing(
+                state,
+                "evaluator",
+                evaluator_started_at,
+                detail="final_loop_evaluation",
+            )
+            _record_phase(
+                state,
+                "evaluator",
+                f"{report.summary} ({evaluator_duration:.2f}s)",
+            )
+        if state.request.research_profile == "deep" and state.verification_reports:
+            if state.verification_reports[-1].decision != "pass":
+                _mark_timeout(state, "max_steps_exhausted")
         _finalize_from_draft(state)
 
+    if state.request.research_profile == "deep" and not state.timed_out and _wall_clock_exhausted(state):
+        _mark_timeout(state, "wall_clock_budget_exhausted")
+    if state.timed_out and not state.final_response:
+        _ensure_final_draft(state, writer)
+        _finalize_from_draft(state)
     _record_phase(state, "finalize", f"Run finished with status: {state.status}.")
     _persist_outputs(state)
     return HarnessResponse(

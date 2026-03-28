@@ -103,6 +103,37 @@ def _fallback_brief(prompt: str) -> ResearchBrief:
     )
 
 
+def _brief_from_selected_packs(prompt: str, selected_packs: list[str]) -> ResearchBrief:
+    domain_packs = [pack for pack in selected_packs if pack in DOMAIN_PACKS]
+
+    sub_questions = []
+    if "equity" in domain_packs:
+        sub_questions.extend(
+            [
+                "What does the current company profile imply about the business model?",
+                "What do financials, market data, filings, and peers imply about valuation and risk?",
+            ]
+        )
+    if "macro" in domain_packs:
+        sub_questions.append("What macro variables transmit into the user question?")
+    if "commodity" in domain_packs:
+        sub_questions.append("What do physical balances, curve structure, and positioning imply?")
+
+    return ResearchBrief(
+        primary_question=prompt.strip(),
+        sub_questions=sub_questions,
+        domain_packs=domain_packs,
+        user_constraints=["Use current evidence when available."],
+        likely_report_shape=_likely_sections(domain_packs),
+        key_unknowns=["Precise numeric support depends on live data retrieval."],
+        likely_risks_of_failure=[
+            "Time-sensitive evidence may be incomplete.",
+            "Cross-domain prompts may miss an explicit transmission mechanism without a plan.",
+        ],
+        rationale="Explicit pack override supplied by the caller.",
+    )
+
+
 def _default_search_queries(prompt: str) -> list[str]:
     queries = [
         prompt,
@@ -128,43 +159,79 @@ def _default_search_queries(prompt: str) -> list[str]:
     return deduped[:5]
 
 
-def _fallback_plan(brief: ResearchBrief) -> ResearchPlan:
+def _fallback_plan(brief: ResearchBrief, *, research_profile: str = "standard") -> ResearchPlan:
     prompt = brief.primary_question
     ticker = _extract_ticker(prompt) or "AAPL"
     asset = _extract_asset(prompt) or "crude oil"
     macro_topic = _extract_macro_topic(prompt)
     company_name = ticker
 
-    steps: list[ResearchStep] = [
-        ResearchStep(
-            id="collect_context",
-            objective="Collect broad web and news evidence for the mission.",
-            recommended_skill_calls=[
-                SkillCall(
-                    name="search_and_read",
-                    arguments={
-                        "queries": _default_search_queries(prompt),
-                        "urls_per_query": 4,
-                        "use_news": any(keyword in prompt.lower() for keyword in _LATEST_KEYWORDS),
-                    },
-                ),
-                SkillCall(
-                    name="search_web",
-                    arguments={"query": prompt, "max_results": 8},
-                ),
-                SkillCall(
-                    name="search_news",
-                    arguments={"query": prompt, "max_results": 8},
-                ),
-            ],
-            required_outputs=["broad research evidence", "recent discovery results"],
-            completion_criteria=[
-                "Multiple grounded evidence items exist.",
-                "Recent evidence is collected when the prompt is time-sensitive.",
-            ],
-            report_sections=["Executive Summary", "Key Findings"],
+    steps: list[ResearchStep] = []
+    if research_profile == "deep":
+        steps.append(
+            ResearchStep(
+                id="build_deep_corpus",
+                objective="Build a staged retrieval corpus with ranked reads and reduced source cards.",
+                recommended_skill_calls=[
+                    SkillCall(
+                        name="deep_retrieval",
+                        arguments={
+                            "stage": "run_wave",
+                            "prompt": prompt,
+                            "query_target": 60,
+                            "candidate_target": 300,
+                            "read_queue_target": 120,
+                            "ingest_batch_size": 20,
+                        },
+                    )
+                ],
+                required_outputs=[
+                    "discovered_sources.json",
+                    "read_queue.json",
+                    "read_results.json",
+                    "source_cards.jsonl",
+                    "coverage_matrix.json",
+                ],
+                completion_criteria=[
+                    "A broad candidate source set exists.",
+                    "The read queue and reduced source cards are persisted.",
+                ],
+                report_sections=_likely_sections(brief.domain_packs),
+            )
         )
-    ]
+    else:
+        steps.append(
+            ResearchStep(
+                id="collect_context",
+                objective="Collect broad web and news evidence for the mission.",
+                recommended_skill_calls=[
+                    SkillCall(
+                        name="search_and_read",
+                        arguments={
+                            "queries": _default_search_queries(prompt),
+                            "urls_per_query": 4,
+                            "use_news": any(keyword in prompt.lower() for keyword in _LATEST_KEYWORDS),
+                        },
+                    ),
+                    SkillCall(
+                        name="search_web",
+                        arguments={"query": prompt, "max_results": 8},
+                    ),
+                    SkillCall(
+                        name="search_news",
+                        arguments={"query": prompt, "max_results": 8},
+                    ),
+                ],
+                required_outputs=["broad research evidence", "recent discovery results"],
+                completion_criteria=[
+                    "Multiple grounded evidence items exist.",
+                    "Recent evidence is collected when the prompt is time-sensitive.",
+                ],
+                report_sections=["Executive Summary", "Key Findings"],
+            )
+        )
+
+    context_dependency = "build_deep_corpus" if research_profile == "deep" else "collect_context"
 
     if "equity" in brief.domain_packs:
         steps.extend(
@@ -172,7 +239,7 @@ def _fallback_plan(brief: ResearchBrief) -> ResearchPlan:
                 ResearchStep(
                     id="collect_company_profile",
                     objective="Collect company profile evidence.",
-                    depends_on=["collect_context"],
+                    depends_on=[context_dependency],
                     recommended_skill_calls=[
                         SkillCall(name="fetch_company_profile", arguments={"ticker": ticker})
                     ],
@@ -185,7 +252,7 @@ def _fallback_plan(brief: ResearchBrief) -> ResearchPlan:
                 ResearchStep(
                     id="collect_financials",
                     objective="Collect financial statement and ratio evidence.",
-                    depends_on=["collect_context"],
+                    depends_on=[context_dependency],
                     recommended_skill_calls=[
                         SkillCall(name="fetch_financials", arguments={"ticker": ticker})
                     ],
@@ -198,7 +265,7 @@ def _fallback_plan(brief: ResearchBrief) -> ResearchPlan:
                 ResearchStep(
                     id="collect_market_data",
                     objective="Collect market data and price history evidence.",
-                    depends_on=["collect_context"],
+                    depends_on=[context_dependency],
                     recommended_skill_calls=[
                         SkillCall(name="fetch_market_data", arguments={"ticker": ticker, "period": "1y"})
                     ],
@@ -211,7 +278,7 @@ def _fallback_plan(brief: ResearchBrief) -> ResearchPlan:
                 ResearchStep(
                     id="collect_filings",
                     objective="Collect recent SEC filing evidence.",
-                    depends_on=["collect_context"],
+                    depends_on=[context_dependency],
                     recommended_skill_calls=[
                         SkillCall(
                             name="search_sec_filings",
@@ -256,7 +323,7 @@ def _fallback_plan(brief: ResearchBrief) -> ResearchPlan:
                 ResearchStep(
                     id="macro_indicators",
                     objective="Collect macro indicator evidence.",
-                    depends_on=["collect_context"],
+                    depends_on=[context_dependency],
                     recommended_skill_calls=[
                         SkillCall(
                             name="fetch_macro_indicators",
@@ -272,7 +339,7 @@ def _fallback_plan(brief: ResearchBrief) -> ResearchPlan:
                 ResearchStep(
                     id="macro_cross_country",
                     objective="Collect cross-country macro context when useful.",
-                    depends_on=["collect_context"],
+                    depends_on=[context_dependency],
                     recommended_skill_calls=[
                         SkillCall(
                             name="fetch_world_bank_indicators",
@@ -294,7 +361,7 @@ def _fallback_plan(brief: ResearchBrief) -> ResearchPlan:
                 ResearchStep(
                     id="commodity_inventory",
                     objective="Collect inventory and supply evidence.",
-                    depends_on=["collect_context"],
+                    depends_on=[context_dependency],
                     recommended_skill_calls=[
                         SkillCall(name="fetch_eia_inventory", arguments={"asset": asset})
                     ],
@@ -307,7 +374,7 @@ def _fallback_plan(brief: ResearchBrief) -> ResearchPlan:
                 ResearchStep(
                     id="commodity_positioning",
                     objective="Collect positioning evidence.",
-                    depends_on=["collect_context"],
+                    depends_on=[context_dependency],
                     recommended_skill_calls=[
                         SkillCall(name="fetch_cot_report", arguments={"asset": asset, "num_weeks": 12})
                     ],
@@ -320,7 +387,7 @@ def _fallback_plan(brief: ResearchBrief) -> ResearchPlan:
                 ResearchStep(
                     id="commodity_curve",
                     objective="Collect futures-curve evidence.",
-                    depends_on=["collect_context"],
+                    depends_on=[context_dependency],
                     recommended_skill_calls=[
                         SkillCall(name="fetch_futures_curve", arguments={"asset": asset, "num_contracts": 12})
                     ],
@@ -337,18 +404,29 @@ def _fallback_plan(brief: ResearchBrief) -> ResearchPlan:
         ResearchStep(
             id="collect_counterevidence",
             objective="Collect explicit counterevidence and alternative scenarios.",
-            depends_on=["collect_context"],
+            depends_on=[context_dependency],
             recommended_skill_calls=[
-                SkillCall(
-                    name="search_and_read",
-                    arguments={
-                        "queries": [
-                            f"{prompt} risks bearish case alternative scenario",
-                            f"{prompt} conflicting evidence downside triggers",
-                        ],
-                        "urls_per_query": 3,
-                        "use_news": any(keyword in prompt.lower() for keyword in _LATEST_KEYWORDS),
-                    },
+                (
+                    SkillCall(
+                        name="deep_retrieval",
+                        arguments={
+                            "stage": "run_wave",
+                            "prompt": prompt,
+                            "ingest_batch_size": 20,
+                        },
+                    )
+                    if research_profile == "deep"
+                    else SkillCall(
+                        name="search_and_read",
+                        arguments={
+                            "queries": [
+                                f"{prompt} risks bearish case alternative scenario",
+                                f"{prompt} conflicting evidence downside triggers",
+                            ],
+                            "urls_per_query": 3,
+                            "use_news": any(keyword in prompt.lower() for keyword in _LATEST_KEYWORDS),
+                        },
+                    )
                 )
             ],
             required_outputs=["counterevidence"],
@@ -418,6 +496,25 @@ def _filter_plan_to_registry(plan: ResearchPlan, registry_map: dict[str, object]
             )
         )
     return plan.model_copy(update={"steps": normalized_steps})
+
+
+def _ensure_profile_specific_steps(
+    brief: ResearchBrief,
+    plan: ResearchPlan,
+    *,
+    research_profile: str,
+) -> ResearchPlan:
+    if research_profile != "deep":
+        return plan
+    has_deep_retrieval = any(
+        call.name == "deep_retrieval"
+        for step in plan.steps
+        for call in step.recommended_skill_calls
+    )
+    if has_deep_retrieval:
+        return plan
+    deep_seed = _fallback_plan(brief, research_profile="deep").steps[0]
+    return plan.model_copy(update={"steps": [deep_seed, *plan.steps]})
 
 
 def validate_research_plan(plan: ResearchPlan, registry: dict[str, object] | None = None) -> ResearchPlan:
@@ -528,6 +625,7 @@ def plan_research(
     *,
     registry: dict[str, object] | None = None,
     selected_packs: list[str] | None = None,
+    research_profile: str = "standard",
 ) -> tuple[ResearchBrief, ResearchPlan, ResearchContract]:
     """Run the multi-pass planner with deterministic fallbacks."""
 
@@ -535,19 +633,13 @@ def plan_research(
 
     used_fallback_plan = False
     if selected_packs is not None:
-        brief = _fallback_brief(prompt)
         normalized = []
         for pack in selected_packs:
             pack_name = pack.strip().lower()
             if pack_name in DOMAIN_PACKS and pack_name not in normalized:
                 normalized.append(pack_name)
-        brief = brief.model_copy(
-            update={
-                "domain_packs": normalized,
-                "likely_report_shape": _likely_sections(normalized),
-            }
-        )
-        plan = _fallback_plan(brief)
+        brief = _brief_from_selected_packs(prompt, normalized)
+        plan = _fallback_plan(brief, research_profile=research_profile)
         used_fallback_plan = True
     else:
         try:
@@ -560,12 +652,13 @@ def plan_research(
             plan = _llm_plan(brief, registry_map)
         except Exception as exc:
             print(f"Harness planner plan fallback triggered: {exc}")
-            plan = _fallback_plan(brief)
+            plan = _fallback_plan(brief, research_profile=research_profile)
             used_fallback_plan = True
 
     if used_fallback_plan:
         plan = _filter_plan_to_registry(plan, registry_map)
 
+    plan = _ensure_profile_specific_steps(brief, plan, research_profile=research_profile)
     plan = validate_research_plan(plan, registry_map)
 
     try:

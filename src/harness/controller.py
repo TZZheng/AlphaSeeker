@@ -32,6 +32,10 @@ def _format_steps(state: HarnessState) -> str:
 
 
 def _format_follow_up_calls(state: HarnessState) -> str:
+    if state.pending_follow_up_calls:
+        return "\n".join(
+            f"- {call.name} {call.arguments}" for call in state.pending_follow_up_calls
+        )
     if not state.verification_reports:
         return "None"
     last_report = state.verification_reports[-1]
@@ -40,6 +44,25 @@ def _format_follow_up_calls(state: HarnessState) -> str:
     return "\n".join(
         f"- {call.name} {call.arguments}" for call in last_report.required_follow_up_calls
     )
+
+
+def _format_coverage_matrix(state: HarnessState) -> str:
+    if not state.coverage_matrix:
+        return "None"
+    lines = []
+    for entry in [
+        *state.coverage_matrix.sections,
+        *state.coverage_matrix.evidence_types,
+        *state.coverage_matrix.counterevidence_requirements,
+    ][:18]:
+        lines.append(f"- {entry.coverage_type}:{entry.label} [{entry.status}] count={entry.evidence_count}")
+    stats = state.coverage_matrix.stats
+    if stats:
+        lines.append(
+            f"- stats discovered={stats.get('discovered_count', 0)} full_reads={stats.get('full_read_count', 0)} "
+            f"qa_iterations={stats.get('qa_iteration_count', 0)}"
+        )
+    return "\n".join(lines) or "None"
 
 
 def get_unblocked_steps(state: HarnessState) -> list[ResearchStep]:
@@ -74,14 +97,14 @@ def _fallback_decision(state: HarnessState) -> ControllerDecision:
             )
 
     if state.verification_reports:
-        last_report = state.verification_reports[-1]
-        if last_report.required_follow_up_calls:
-            call = last_report.required_follow_up_calls[0]
+        if state.pending_follow_up_calls:
+            call = state.pending_follow_up_calls[0]
             return ControllerDecision(
                 action="call_skill",
                 rationale="Evaluator requested a concrete follow-up call.",
                 skill_call=call,
             )
+        last_report = state.verification_reports[-1]
         if (
             last_report.decision == "revise"
             and state.revision_count < state.request.max_revision_rounds
@@ -110,6 +133,24 @@ def _fallback_decision(state: HarnessState) -> ControllerDecision:
             action="execute_step",
             rationale=f"Run the next unblocked step: {ready_steps[0].id}.",
             step_id=ready_steps[0].id,
+        )
+
+    if (
+        state.request.research_profile == "deep"
+        and state.coverage_matrix is not None
+        and state.coverage_matrix.needs_more_retrieval
+    ):
+        return ControllerDecision(
+            action="call_skill",
+            rationale="Coverage matrix still shows weak sections or evidence types.",
+            skill_call={
+                "name": "deep_retrieval",
+                "arguments": {
+                    "stage": "run_wave",
+                    "prompt": state.request.user_prompt,
+                    "ingest_batch_size": state.request.deep_read_batch_size,
+                },
+            },
         )
 
     if not state.latest_draft:
@@ -163,6 +204,9 @@ Research plan:
 
 Evaluator follow-up calls:
 {_format_follow_up_calls(state)}
+
+Coverage matrix:
+{_format_coverage_matrix(state)}
 
 Revision notes:
 {chr(10).join(state.revision_notes[-8:]) or "None"}
