@@ -12,6 +12,21 @@ from src.shared.llm_manager import get_llm
 from src.shared.model_config import get_model
 
 
+COMMON_SECTION_TITLES = {
+    "Executive Summary",
+    "Key Findings",
+    "Equity Overview",
+    "Peer and Competitive Pressure",
+    "Valuation and Scenarios",
+    "Macro Transmission",
+    "Scenarios",
+    "Commodity Balance",
+    "Curve and Positioning",
+    "Risks and Counterevidence",
+    "Sources",
+}
+
+
 def _content_to_text(content: object) -> str:
     if isinstance(content, str):
         return content
@@ -44,12 +59,18 @@ def _parse_sections(draft: str) -> dict[str, str]:
             current = line[3:].strip()
             buffer = []
             continue
+        bold_match = re.fullmatch(r"\*\*([^*]+)\*\*:?", line.strip())
+        if bold_match:
+            sections[current] = "\n".join(buffer).strip()
+            current = bold_match.group(1).strip()
+            buffer = []
+            continue
         buffer.append(line)
     sections[current] = "\n".join(buffer).strip()
     return sections
 
 
-def _format_evidence(state: HarnessState, limit: int = 16) -> str:
+def _format_evidence(state: HarnessState, limit: int = 28) -> str:
     if not state.evidence_ledger:
         return "No evidence collected."
 
@@ -57,8 +78,8 @@ def _format_evidence(state: HarnessState, limit: int = 16) -> str:
     for item in state.evidence_ledger[-limit:]:
         source_text = ", ".join(item.sources or item.artifact_paths) or item.source_type
         content = (item.content or "").strip()
-        if len(content) > 700:
-            content = content[:700] + "..."
+        if len(content) > 1000:
+            content = content[:1000] + "..."
         chunks.append(f"[{item.id}] {item.summary}\nSource: {source_text}\n{content}")
     return "\n\n".join(chunks)
 
@@ -83,9 +104,57 @@ def _format_step_results(state: HarnessState) -> str:
     lines = []
     for result in state.step_results[-12:]:
         lines.append(f"- {result.step_id} [{result.status}]: {result.summary}")
-        for finding in result.findings[:3]:
+        for finding in result.findings[:6]:
             lines.append(f"  finding: {finding}")
     return "\n".join(lines)
+
+
+def _title_from_prompt(state: HarnessState) -> str:
+    text = state.request.user_prompt.strip().rstrip(".?")
+    if not text:
+        return "Research Report"
+    return text
+
+
+def _normalize_markdown_report(state: HarnessState, draft: str) -> str:
+    """Force a stable title plus markdown section headings."""
+
+    if not draft.strip():
+        return _fallback_draft(state)
+
+    required_sections = set(_ordered_sections(state)) | COMMON_SECTION_TITLES
+    lines = draft.splitlines()
+    normalized_lines: list[str] = []
+    has_title = False
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not has_title and stripped.startswith("# "):
+            has_title = True
+            if stripped.lower().startswith("# response to:"):
+                normalized_lines.append(f"# {_title_from_prompt(state)}")
+            else:
+                normalized_lines.append(line)
+            continue
+
+        bold_match = re.fullmatch(r"\*\*([^*]+)\*\*:?", stripped)
+        if bold_match:
+            heading = bold_match.group(1).strip()
+            if heading in required_sections:
+                normalized_lines.append(f"## {heading}")
+                continue
+
+        if index == 0 and stripped and not stripped.startswith("# "):
+            normalized_lines.append(f"# {_title_from_prompt(state)}")
+            normalized_lines.append("")
+            has_title = True
+
+        normalized_lines.append(line)
+
+    if not has_title:
+        normalized_lines.insert(0, "")
+        normalized_lines.insert(0, f"# {_title_from_prompt(state)}")
+
+    return "\n".join(normalized_lines).strip()
 
 
 def _section_evidence(state: HarnessState, section_label: str) -> list[str]:
@@ -114,15 +183,28 @@ def _fallback_section_text(state: HarnessState, section_label: str) -> str:
     if section_label == "Executive Summary":
         return (
             "The current evidence set points to the main drivers of the question, "
-            "but the conclusion should still be read alongside the explicit risks below. "
+            "the most important scenario split, and the highest-confidence facts. "
+            "This summary should be read alongside the explicit risks and counterevidence below. "
             f"{citations}"
         )
     if section_label == "Key Findings":
         bullets = []
-        for item in state.evidence_ledger[-4:]:
+        for item in state.evidence_ledger[-8:]:
             if item.id:
                 bullets.append(f"- {item.summary} [{item.id}]")
         return "\n".join(bullets) or f"- No grounded findings were collected yet. {citations}"
+    if section_label == "Macro Transmission":
+        return (
+            "The macro transmission runs through rates, inflation expectations, credit conditions, "
+            "and asset-pricing effects. Each channel should be tied back to the collected evidence. "
+            f"{citations}"
+        )
+    if section_label == "Scenarios":
+        return (
+            "Lay out a base case, upside case, and downside case with the main trigger conditions, "
+            "rather than giving only one linear forecast. "
+            f"{citations}"
+        )
     if section_label in {"Peer and Competitive Pressure", "Risks and Counterevidence"}:
         return (
             "Counterevidence matters here: peer pressure, adverse scenarios, or conflicting "
@@ -147,7 +229,7 @@ def _fallback_draft(state: HarnessState) -> str:
         targeted.update(item.section_label for item in last_report.report_section_feedback)
         targeted.update(last_report.missing_sections)
 
-    lines = [f"# Response to: {state.request.user_prompt}", ""]
+    lines = [f"# {_title_from_prompt(state)}", ""]
     for section in _ordered_sections(state):
         lines.append(f"## {section}")
         if (
@@ -182,6 +264,10 @@ Rules:
 - If a statement is an inference, label it clearly as an inference.
 - Cite evidence IDs inline like [E1], [E2].
 - Satisfy the supplied contract and required sections.
+- Start with exactly one H1 title line.
+- Use markdown section headings like '## Executive Summary', never bold-only pseudo-headings.
+- Write a substantive professional report, not a short memo.
+- For a single-domain prompt, aim for roughly 1,200 to 2,200 words when the evidence supports it.
 - End with a Sources section listing the evidence IDs you relied on.
 """
 
@@ -221,8 +307,8 @@ Evidence:
         )
         text = _content_to_text(cast(object, response.content)).strip()
         if text:
-            return text
+            return _normalize_markdown_report(state, text)
     except Exception as exc:
         print(f"Harness writer fallback triggered: {exc}")
 
-    return _fallback_draft(state)
+    return _normalize_markdown_report(state, _fallback_draft(state))

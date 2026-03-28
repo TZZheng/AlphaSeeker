@@ -23,6 +23,12 @@ def _parse_sections(draft: str) -> dict[str, str]:
             current = line[3:].strip()
             buffer = []
             continue
+        bold_match = re.fullmatch(r"\*\*([^*]+)\*\*:?", line.strip())
+        if bold_match:
+            sections[current] = "\n".join(buffer).strip()
+            current = bold_match.group(1).strip()
+            buffer = []
+            continue
         buffer.append(line)
     sections[current] = "\n".join(buffer).strip()
     return sections
@@ -171,7 +177,7 @@ def _rule_based_evaluation(state: HarnessState, draft: str) -> VerificationRepor
                 name="search_and_read",
                 arguments={
                     "queries": [f"{state.request.user_prompt} risks counterevidence bearish case"],
-                    "urls_per_query": 2,
+                    "urls_per_query": 3,
                     "use_news": True,
                 },
             )

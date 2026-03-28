@@ -104,11 +104,28 @@ def _fallback_brief(prompt: str) -> ResearchBrief:
 
 
 def _default_search_queries(prompt: str) -> list[str]:
-    queries = [prompt]
+    queries = [
+        prompt,
+        f"{prompt} latest evidence and data points",
+        f"{prompt} key drivers scenarios risks",
+        f"{prompt} counterarguments and bear case",
+    ]
     lowered = prompt.lower()
     if any(keyword in lowered for keyword in _LATEST_KEYWORDS):
-        queries.append(f"{prompt} latest evidence")
-    return queries[:2]
+        queries.append(f"{prompt} latest news analysis")
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        normalized = query.strip()
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(normalized)
+    return deduped[:5]
 
 
 def _fallback_plan(brief: ResearchBrief) -> ResearchPlan:
@@ -127,18 +144,22 @@ def _fallback_plan(brief: ResearchBrief) -> ResearchPlan:
                     name="search_and_read",
                     arguments={
                         "queries": _default_search_queries(prompt),
-                        "urls_per_query": 2,
+                        "urls_per_query": 4,
                         "use_news": any(keyword in prompt.lower() for keyword in _LATEST_KEYWORDS),
                     },
                 ),
                 SkillCall(
+                    name="search_web",
+                    arguments={"query": prompt, "max_results": 8},
+                ),
+                SkillCall(
                     name="search_news",
-                    arguments={"query": prompt, "max_results": 5},
+                    arguments={"query": prompt, "max_results": 8},
                 ),
             ],
             required_outputs=["broad research evidence", "recent discovery results"],
             completion_criteria=[
-                "At least one grounded evidence item exists.",
+                "Multiple grounded evidence items exist.",
                 "Recent evidence is collected when the prompt is time-sensitive.",
             ],
             report_sections=["Executive Summary", "Key Findings"],
@@ -215,8 +236,9 @@ def _fallback_plan(brief: ResearchBrief) -> ResearchPlan:
                                 "queries": [
                                     f"{ticker} competitor market share loss",
                                     f"{ticker} peer margins valuation competition",
+                                    f"{ticker} moat erosion substitute products",
                                 ],
-                                "urls_per_query": 2,
+                                "urls_per_query": 3,
                             },
                         ),
                     ],
@@ -320,8 +342,11 @@ def _fallback_plan(brief: ResearchBrief) -> ResearchPlan:
                 SkillCall(
                     name="search_and_read",
                     arguments={
-                        "queries": [f"{prompt} risks bearish case alternative scenario"],
-                        "urls_per_query": 2,
+                        "queries": [
+                            f"{prompt} risks bearish case alternative scenario",
+                            f"{prompt} conflicting evidence downside triggers",
+                        ],
+                        "urls_per_query": 3,
                         "use_news": any(keyword in prompt.lower() for keyword in _LATEST_KEYWORDS),
                     },
                 )

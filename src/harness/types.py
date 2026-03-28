@@ -347,8 +347,8 @@ class HarnessRequest(BaseModel):
 
     user_prompt: str
     runtime: str = "harness"
-    max_steps: int = 12
-    max_revision_rounds: int = 2
+    max_steps: int = 18
+    max_revision_rounds: int = 6
     max_chars_before_condense: int = 6000
     max_worker_iterations: int = 3
     max_parallel_steps: int = 3

@@ -17,9 +17,15 @@ from src.shared.text_utils import condense_context, read_file_safe
 from src.shared.web_search import deep_search, search_news, search_web
 
 
+DEFAULT_SEARCH_MAX_RESULTS = 8
+DEFAULT_NEWS_MAX_RESULTS = 8
+DEFAULT_URLS_PER_QUERY = 4
+DEFAULT_MAX_CHARS_PER_URL = 12000
+
+
 def search_web_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillResult:
     query = str(arguments.get("query") or "").strip()
-    max_results = int(arguments.get("max_results", 5))
+    max_results = int(arguments.get("max_results", DEFAULT_SEARCH_MAX_RESULTS))
     if not query:
         return make_result(
             "search_web",
@@ -53,7 +59,7 @@ def search_web_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillRe
 
 def search_news_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillResult:
     query = str(arguments.get("query") or "").strip()
-    max_results = int(arguments.get("max_results", 5))
+    max_results = int(arguments.get("max_results", DEFAULT_NEWS_MAX_RESULTS))
     if not query:
         return make_result(
             "search_news",
@@ -96,9 +102,9 @@ def search_and_read_skill(arguments: dict[str, Any], _state: HarnessState) -> Sk
             error="Missing queries.",
         )
 
-    urls_per_query = int(arguments.get("urls_per_query", 2))
+    urls_per_query = int(arguments.get("urls_per_query", DEFAULT_URLS_PER_QUERY))
     use_news = bool(arguments.get("use_news", False))
-    max_chars_per_url = int(arguments.get("max_chars_per_url", 8000))
+    max_chars_per_url = int(arguments.get("max_chars_per_url", DEFAULT_MAX_CHARS_PER_URL))
     results = deep_search(
         queries=queries,
         urls_per_query=urls_per_query,
