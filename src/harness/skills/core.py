@@ -571,7 +571,7 @@ def read_file_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillRes
         return make_result(
             "read_file",
             arguments,
-            status="ok",
+            status="truncated" if truncated else "ok",
             summary=(
                 f"Read {end_index - start_index} line(s) from {path} starting at line {start_line}."
                 + (" Content was truncated." if truncated else "")
@@ -581,7 +581,6 @@ def read_file_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillRes
                 "start_line": start_line,
                 "returned_lines": max(0, end_index - start_index),
                 "total_lines": len(lines),
-                "truncated": truncated,
             },
             metrics=SkillMetrics(evidence_count=1, artifact_count=1),
             output_text=text,
@@ -599,7 +598,7 @@ def read_file_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillRes
     return make_result(
         "read_file",
         arguments,
-        status="ok",
+        status="truncated" if truncated else "ok",
         summary=(
             f"Read {len(text)} character(s) from {path} starting at offset {start_char}."
             + (" Content was truncated." if truncated else "")
@@ -609,7 +608,6 @@ def read_file_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillRes
             "start_char": start_char,
             "returned_chars": len(text),
             "total_chars": len(full_text),
-            "truncated": truncated,
         },
         metrics=SkillMetrics(evidence_count=1, artifact_count=1),
         output_text=text,

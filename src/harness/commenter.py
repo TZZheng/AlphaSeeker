@@ -472,7 +472,7 @@ def _commenter_read_file(
         },
         _commenter_skill_state(run_root, agent_id, request),
     )
-    if skill_result.status == "ok" and candidate.name == "transcript.jsonl":
+    if skill_result.status in ("ok", "truncated") and candidate.name == "transcript.jsonl":
         full_text = _sanitize_transcript_content(_read_commenter_file_content(candidate))
         start_char = max(0, start_char)
         end_char = len(full_text) if max_chars <= 0 else min(len(full_text), start_char + max_chars)
@@ -482,7 +482,6 @@ def _commenter_read_file(
             "start_char": start_char,
             "returned_chars": len(skill_result.output_text or ""),
             "total_chars": len(full_text),
-            "truncated": end_char < len(full_text),
         }
         skill_result.summary = (
             f"Read {len(skill_result.output_text or '')} character(s) from {candidate} starting at offset {start_char}."

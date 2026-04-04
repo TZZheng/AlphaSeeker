@@ -258,7 +258,7 @@ class SkillResult(BaseModel):
 
     skill_name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
-    status: Literal["ok", "partial", "failed"]
+    status: Literal["ok", "partial", "failed", "truncated"]
     summary: str
     details: dict[str, Any] = Field(default_factory=dict)
     metrics: SkillMetrics = Field(default_factory=SkillMetrics)
