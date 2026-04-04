@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import time
 from typing import Any
 
 import anthropic
@@ -18,6 +19,7 @@ from src.harness.artifacts import (
     load_transport_state,
     save_transport_state,
     write_json_atomic,
+    write_text_atomic,
 )
 
 
@@ -146,6 +148,17 @@ class BaseAgentTransport:
         path = self._llm_turns_root() / f"{turn_index:04d}_{suffix}.json"
         write_json_atomic(path, payload)
         return str(path)
+
+    def _write_thinking_block(self, *, turn_index: int, content: list[str]) -> None:
+        """Write thinking block content to a human-readable text file for live observability."""
+        root = self._llm_turns_root()
+        # Per-turn thinking file: scratch/llm_turns/0001_thinking.txt
+        turn_path = root / f"{turn_index:04d}_thinking.txt"
+        text = "\n\n---\n\n".join(content) if content else ""
+        write_text_atomic(turn_path, text)
+        # Latest thinking symlink so you can always `cat` the most recent one
+        latest_path = root / "thinking_current.txt"
+        write_text_atomic(latest_path, text)
 
     def _append_system_prompt_snapshot(self, *, reason: str) -> None:
         version = self._next_counter("system_prompt_version")
@@ -326,41 +339,145 @@ class MiniMaxAnthropicTransport(BaseAgentTransport):
             api_name="anthropic.messages.create",
             request_payload=request_payload,
         )
-        response = self.client.messages.create(
+        # Use streaming to observe thinking/content blocks as they arrive from the network
+        stream = self.client.messages.stream(
             model=request_payload["model"],
             max_tokens=request_payload["max_tokens"],
             system=request_payload["system"],
             messages=request_payload["messages"],
             tools=request_payload["tools"],
         )
-        assistant_message = {
-            "role": "assistant",
-            "content": [_serialize_payload(block) for block in response.content],
-        }
 
         tool_calls: list[ModelToolCall] = []
         text_blocks: list[str] = []
         thinking_blocks = 0
-        for block in response.content:
-            block_type = getattr(block, "type", "")
-            if block_type == "tool_use":
-                tool_calls.append(
-                    ModelToolCall(
-                        call_id=str(getattr(block, "id", "")),
-                        name=str(getattr(block, "name", "")),
-                        arguments=dict(getattr(block, "input", {}) or {}),
+        thinking_content: list[str] = []
+
+        # Per-thought-chunk entries: (iso_timestamp, block_index, thinking_text)
+        thinking_log_lines: list[str] = []
+        block_index = 0
+        current_tool_call_id: str | None = None
+        current_tool_name: str | None = None
+        current_tool_input: dict[str, Any] = {}
+        current_text: str = ""
+        current_thinking: str = ""
+        stop_reason: str | None = None
+
+        # Open a writable file to stream thinking content incrementally
+        thinking_stream_path = self._llm_turns_root() / f"{turn_index:04d}_thinking.txt"
+        thinking_stream_path.write_text("", encoding="utf-8")
+        latest_thinking_path = self._llm_turns_root() / "thinking_current.txt"
+        latest_thinking_path.write_text("", encoding="utf-8")
+
+        for event in stream:
+            event_type = getattr(event, "type", "")
+            if event_type == "content_block_start":
+                block_type = getattr(event, "name", "")
+                if block_type == "thinking":
+                    thinking_blocks += 1
+                    block_index += 1
+                    current_thinking = ""
+                    thinking_log_lines.append(
+                        f"[{time.strftime('%Y-%m-%dT%H:%M:%SZ')}] thinking_block #{block_index} START"
                     )
-                )
-            elif block_type == "text":
-                text_blocks.append(str(getattr(block, "text", "")))
-            elif block_type == "thinking":
-                thinking_blocks += 1
+                elif block_type == "tool_use":
+                    block_index += 1
+                    current_tool_call_id = str(getattr(event, "id", ""))
+                    current_tool_name = str(getattr(event, "name", ""))
+                    current_tool_input = {}
+                elif block_type == "text":
+                    block_index += 1
+                    current_text = ""
+
+            elif event_type == "content_block_delta":
+                delta = getattr(event, "delta", None)
+                if delta is None:
+                    continue
+                delta_type = getattr(delta, "type", "")
+                if delta_type == "thinking_delta":
+                    chunk = str(getattr(delta, "thinking", ""))
+                    current_thinking += chunk
+                    thinking_log_lines.append(
+                        f"[{time.strftime('%Y-%m-%dT%H:%M:%SZ')}] thinking_block #{block_index} chunk ({len(chunk)} chars)"
+                    )
+                    # Write incrementally so `tail -f` shows live progress
+                    thinking_stream_path.write_text(
+                        "\n".join(thinking_log_lines) + f"\n\n--- thinking_block #{block_index} accumulated ---\n{current_thinking}\n",
+                        encoding="utf-8",
+                    )
+                    latest_thinking_path.write_text(
+                        f"[{time.strftime('%Y-%m-%dT%H:%M:%SZ')}] LIVE thinking_block #{block_index} ({len(current_thinking)} chars so far)\n{current_thinking}",
+                        encoding="utf-8",
+                    )
+                elif delta_type == "text_delta":
+                    chunk = str(getattr(delta, "text", ""))
+                    current_text += chunk
+                elif delta_type == "input_json_delta":
+                    # Accumulate tool input as chunks arrive
+                    chunk = str(getattr(delta, "input_json", ""))
+                    current_tool_input_str = current_tool_input.get("_raw", "") + chunk
+                    current_tool_input["_raw"] = current_tool_input_str
+
+            elif event_type == "content_block_stop":
+                block_type = getattr(event, "name", "")
+                if block_type == "thinking":
+                    thinking_content.append(current_thinking)
+                    thinking_log_lines.append(
+                        f"[{time.strftime('%Y-%m-%dT%H:%M:%SZ')}] thinking_block #{block_index} END ({len(current_thinking)} total chars)"
+                    )
+                elif block_type == "text":
+                    text_blocks.append(current_text)
+                elif block_type == "tool_use":
+                    # Parse accumulated tool input
+                    try:
+                        tool_input = json.loads(current_tool_input.get("_raw", "{}"))
+                    except json.JSONDecodeError:
+                        tool_input = {}
+                    if current_tool_call_id and current_tool_name:
+                        tool_calls.append(
+                            ModelToolCall(
+                                call_id=current_tool_call_id,
+                                name=current_tool_name,
+                                arguments=tool_input,
+                            )
+                        )
+
+            elif event_type == "message_delta":
+                stop_reason = getattr(getattr(event, "delta", None), "stop_reason", None)
+
+            elif event_type == "message_stop":
+                stop_reason = getattr(event, "stop_reason", None)
+
+        # Write final thinking log
+        thinking_stream_path.write_text(
+            "\n".join(thinking_log_lines)
+            + f"\n\n--- FINAL thinking blocks ({thinking_blocks} total) ---\n"
+            + "\n\n".join(f"=== thinking_block #{i+1} ===\n{ct}" for i, ct in enumerate(thinking_content)),
+            encoding="utf-8",
+        )
+        latest_thinking_path.write_text(
+            f"[{time.strftime('%Y-%m-%dT%H:%M:%SZ')}] DONE\n"
+            + "\n".join(f"=== thinking_block #{i+1} ===\n{ct}" for i, ct in enumerate(thinking_content)),
+            encoding="utf-8",
+        )
+
+        assistant_message = {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": tc} for tc in thinking_content
+            ]
+            + ([{"type": "text", "text": tb} for tb in text_blocks if tb])
+            + [
+                {"type": "tool_use", "id": tc.call_id, "name": tc.name, "input": tc.arguments}
+                for tc in tool_calls
+            ],
+        }
         self._record_model_response(
             turn_index=turn_index,
             request_artifact_path=request_artifact_path,
             assistant_message=assistant_message,
-            raw_response=response,
-            stop_reason=getattr(response, "stop_reason", None),
+            raw_response=stream.get_last_message(),
+            stop_reason=stop_reason,
             tool_calls=tool_calls,
             text_blocks=text_blocks,
             provider_thinking_blocks=thinking_blocks,
@@ -368,7 +485,7 @@ class MiniMaxAnthropicTransport(BaseAgentTransport):
         return ModelTurnResult(
             tool_calls=tool_calls,
             text_blocks=text_blocks,
-            stop_reason=getattr(response, "stop_reason", None),
+            stop_reason=stop_reason,
         )
 
     def append_tool_results(self, tool_results: list[dict[str, Any]]) -> None:
