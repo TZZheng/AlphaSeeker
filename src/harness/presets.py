@@ -13,7 +13,8 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
         "list_children",
         "wait_children",
         "list_publish_files",
-        "write_publish_file",
+        "write_file",
+        "edit_file",
         "set_status",
     ],
     "research": [
@@ -22,16 +23,16 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
         "wait_children",
         "list_publish_files",
         "promote_artifact",
-        "write_publish_file",
-        "write_scratch_file",
+        "write_file",
+        "edit_file",
         "set_status",
     ],
     "source_triage": [
         "spawn_subagent",
         "list_publish_files",
         "promote_artifact",
-        "write_publish_file",
-        "write_scratch_file",
+        "write_file",
+        "edit_file",
         "set_status",
     ],
     "writer": [
@@ -39,8 +40,8 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
         "list_children",
         "wait_children",
         "list_publish_files",
-        "write_publish_file",
-        "write_scratch_file",
+        "write_file",
+        "edit_file",
         "set_status",
     ],
     "synthesizer": [
@@ -48,8 +49,8 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
         "list_children",
         "wait_children",
         "list_publish_files",
-        "write_publish_file",
-        "write_scratch_file",
+        "write_file",
+        "edit_file",
         "set_status",
     ],
     "evaluator": [
@@ -57,8 +58,8 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
         "list_children",
         "wait_children",
         "list_publish_files",
-        "write_publish_file",
-        "write_scratch_file",
+        "write_file",
+        "edit_file",
         "set_status",
     ],
 }
@@ -154,7 +155,7 @@ def visible_skills_for_preset(
         spec
         for spec in visible
         if spec.name
-        in {"read_file", "search_in_files", "get_current_datetime", "search_web", "search_news", "read_web_pages", "condense_context"}
+        in {"glob_files", "read_file", "search_in_files", "get_current_datetime", "search_web", "search_news", "read_web_pages", "condense_context"}
     ]
     if preset == "research":
         return visible

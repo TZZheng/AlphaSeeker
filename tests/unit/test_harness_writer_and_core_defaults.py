@@ -44,7 +44,10 @@ def test_render_tools_markdown_lists_agent_tools_and_skills() -> None:
     )
 
     assert "`spawn_subagent`" in text
+    assert "`write_file`" in text
+    assert "`edit_file`" in text
     assert "fetch_company_profile" in text
+    assert "glob_files" in text
     assert "search_in_files" in text
     assert "search_web_resources" not in text
     assert "read_file" in text
@@ -67,8 +70,11 @@ def test_orchestrator_tools_markdown_hides_direct_skills() -> None:
     )
 
     assert "`spawn_subagent`" in text
+    assert "`write_file`" in text
+    assert "`edit_file`" in text
     assert "fetch_company_profile" not in text
     assert "read_file" in text
+    assert "glob_files" in text
     assert "get_current_datetime" in text
     assert "search_in_files" in text
     assert "`evaluator`" in text
@@ -84,6 +90,7 @@ def test_evaluator_preset_gets_primitive_core_skills() -> None:
     names = {spec.name for spec in skills}
 
     assert "read_file" in names
+    assert "glob_files" in names
     assert "search_in_files" in names
     assert "get_current_datetime" in names
     assert "search_web" in names
@@ -226,9 +233,11 @@ def test_shared_system_prompt_no_longer_requires_publish_final_for_all_agents() 
 def test_prompt_environment_mentions_search_before_read() -> None:
     research_text = preset_system_prompt("research")
 
+    assert "glob_files(patterns=[...], paths=[...])" in research_text
     assert "search_in_files(pattern=..., paths=[...])" in research_text
-    assert "read_file(path=..., max_chars=..., start_char=...)" in research_text
+    assert "read_file(path=..., start_line=..., max_lines=...)" in research_text
     assert "read_web_pages(urls=[...])" in research_text
+    assert "write_file(path=..., content=...)" in research_text
     assert "Refresh `publish/summary.md` after meaningful progress" in research_text
     assert "If you are a child agent, `done` requires at least one non-empty published output file" in research_text
 

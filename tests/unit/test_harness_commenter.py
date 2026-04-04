@@ -14,6 +14,7 @@ from src.harness.artifacts import (
     load_commenter_comments,
     mark_commenter_comments_read,
     unread_commenter_comments,
+    write_status,
     write_text_atomic,
 )
 from src.harness.commenter import (
@@ -150,6 +151,29 @@ def test_refresh_commenter_records_raw_response_and_turn_artifacts(
     assert (turns_root / "0001_trace.json").exists()
 
 
+def test_refresh_commenter_skips_terminal_agents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id, request = _create_workspace(tmp_path, monkeypatch)
+    write_status(run_root, agent_id, "done")
+    monkeypatch.setattr(
+        "src.harness.commenter._run_commenter_dialog",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("commenter should not run for terminal agents")),
+    )
+
+    written = refresh_commenter_for_agent(
+        str(run_root),
+        agent_id,
+        request,
+        model_name="gpt-4o",
+        transport_name="text_json",
+    )
+
+    assert written == 0
+    assert load_commenter_comments(run_root, agent_id) == []
+
+
 def test_multiline_comment_is_preserved_in_latest_and_feed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -224,18 +248,18 @@ class _SuccessTransport:
             tool_calls=[
                 ModelToolCall(
                     call_id="call_1",
-                    name="write_publish_file",
-                    arguments={"file_name": "summary.md", "content": "# Summary\n"},
+                    name="write_file",
+                    arguments={"path": "publish/summary.md", "content": "# Summary\n"},
                 ),
                 ModelToolCall(
                     call_id="call_2",
-                    name="write_publish_file",
-                    arguments={"file_name": "artifact_index.md", "content": "# Artifact Index\n"},
+                    name="write_file",
+                    arguments={"path": "publish/artifact_index.md", "content": "# Artifact Index\n"},
                 ),
                 ModelToolCall(
                     call_id="call_3",
-                    name="write_publish_file",
-                    arguments={"file_name": "final.md", "content": "# Final\n\nDone.\n"},
+                    name="write_file",
+                    arguments={"path": "publish/final.md", "content": "# Final\n\nDone.\n"},
                 ),
                 ModelToolCall(call_id="call_4", name="set_status", arguments={"status": "done"}),
             ],

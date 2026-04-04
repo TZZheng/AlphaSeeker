@@ -416,6 +416,11 @@ async def _monitor_commenters(shared: SupervisorState) -> None:
 
         for agent_id, record in snapshot.items():
             if record.status in TERMINAL_STATUSES:
+                task = shared.commenter_tasks.pop(agent_id, None)
+                if task is not None:
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
                 continue
             if agent_id in shared.commenter_tasks:
                 continue

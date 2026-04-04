@@ -42,6 +42,7 @@ COMMENTER_MAX_SELECTED_FILES = 10
 COMMENTER_MAX_FEED_COMMENTS = 3
 COMMENTER_MAX_TOOL_STEPS = 4
 COMMENTER_DEFAULT_READ_MAX_CHARS = 12_000
+COMMENTER_TERMINAL_STATUSES = {"done", "failed", "blocked", "stale", "cancelled"}
 _PROMPTS_ROOT = Path(__file__).with_name("prompts") / "internal"
 
 
@@ -837,6 +838,8 @@ def refresh_commenter_for_agent(
     transport_name: str | None = None,
     observed_fingerprint: str | None = None,
 ) -> int:
+    if read_status(run_root, agent_id) in COMMENTER_TERMINAL_STATUSES:
+        return 0
     state = load_commenter_state(run_root, agent_id) or {}
     fingerprint = observed_fingerprint or compute_commenter_observation_fingerprint(run_root, agent_id)
     resolved_model = model_name or get_model("harness", "agent")
@@ -859,6 +862,8 @@ def refresh_commenter_for_agent(
         model_name=resolved_model,
         transport_name=resolved_transport,
     )
+    if read_status(run_root, agent_id) in COMMENTER_TERMINAL_STATUSES:
+        return 0
     _record_commenter_turn(
         run_root=run_root,
         agent_id=agent_id,

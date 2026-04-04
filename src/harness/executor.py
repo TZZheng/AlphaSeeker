@@ -47,8 +47,8 @@ TOOL_NAMES = [
     "wait_children",
     "list_publish_files",
     "promote_artifact",
-    "write_publish_file",
-    "write_scratch_file",
+    "write_file",
+    "edit_file",
     "set_status",
 ]
 
@@ -141,14 +141,7 @@ def _tool_schema_properties(input_schema: dict[str, Any]) -> dict[str, Any]:
 def _tool_definitions() -> dict[str, dict[str, Any]]:
     return {
         "spawn_subagent": {
-            "description": (
-                "Launch a focused child agent for a delegated task. "
-                f"Legal preset values are: {_LEGAL_PRESET_LIST}. "
-                "Pass exact file paths in context_files when a child should read prior artifacts. "
-                "Those files will be copied into the child workspace and can be read later with read_file(path=...). "
-                "When possible, tell the child which published file or files you expect it to produce. "
-                "Check the returned capacity snapshot before spawning more children."
-            ),
+            "description": f"Launch one child agent for a narrower task. Legal preset values: {_LEGAL_PRESET_LIST}.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -167,14 +160,11 @@ def _tool_definitions() -> dict[str, dict[str, Any]]:
             },
         },
         "list_children": {
-            "description": "List child agents and their compact published status.",
+            "description": "List child agents with status and published-file summaries.",
             "input_schema": {"type": "object", "properties": {}},
         },
         "wait_children": {
-            "description": (
-                "Wait for child agents and return compact summaries, published file paths, and promoted artifact paths "
-                "when they finish. Use short waits by default and synthesize from published child files instead of waiting unnecessarily."
-            ),
+            "description": "Wait for child agents and return their current status and published outputs.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -185,7 +175,7 @@ def _tool_definitions() -> dict[str, dict[str, Any]]:
             },
         },
         "list_publish_files": {
-            "description": "List stable published files for an agent.",
+            "description": "List published files for an agent.",
             "input_schema": {
                 "type": "object",
                 "properties": {"agent_id": {"type": "string"}},
@@ -201,31 +191,35 @@ def _tool_definitions() -> dict[str, dict[str, Any]]:
                 },
             },
         },
-        "write_publish_file": {
-            "description": (
-                "Write a stable published file for parent or user consumption. "
-                "Use this early for publish/summary.md and publish/artifact_index.md when a task is long-running."
-            ),
+        "write_file": {
+            "description": "Write one file under this agent's publish/ or scratch/ tree.",
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "file_name": {"type": "string"},
+                    "path": {"type": "string"},
                     "content": {"type": "string"},
                 },
             },
         },
-        "write_scratch_file": {
-            "description": "Write a scratch working file inside the current agent workspace.",
+        "edit_file": {
+            "description": "Apply one anchored text edit to a file under this agent's publish/ or scratch/ tree.",
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "file_name": {"type": "string"},
+                    "path": {"type": "string"},
+                    "operation": {
+                        "type": "string",
+                        "enum": ["replace", "insert_before", "insert_after", "append", "prepend"],
+                    },
+                    "target_text": {"type": "string"},
                     "content": {"type": "string"},
+                    "occurrence": {"type": "integer"},
+                    "replace_all": {"type": "boolean"},
                 },
             },
         },
         "set_status": {
-            "description": "Set the current agent status when it is ready to stop or block.",
+            "description": "Set this agent's status when it is ready to stop or block.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -672,27 +666,44 @@ def _safe_relative_path(file_name: str) -> Path:
     return relative
 
 
-def _safe_rooted_relative_path(file_name: str, *, root_name: str) -> Path:
-    relative = _safe_relative_path(file_name)
-    parts = list(relative.parts)
-    if parts and parts[0] == root_name:
-        relative = Path(*parts[1:]) if len(parts) > 1 else Path()
+def _resolve_workspace_file_path(
+    session: AgentSession,
+    raw_path: str,
+    *,
+    must_exist: bool,
+) -> tuple[Path, str, str]:
+    candidate = Path(raw_path).expanduser()
+    workspace_paths = agent_workspace_paths(session.run_root, session.agent_id)
+    allowed_roots = {
+        "publish": workspace_paths["publish_root"].resolve(strict=False),
+        "scratch": workspace_paths["scratch_root"].resolve(strict=False),
+    }
+
+    if candidate.is_absolute():
+        resolved = candidate.resolve(strict=False)
+        for root_name, root in allowed_roots.items():
+            if resolved == root or root in resolved.parents:
+                if must_exist and not resolved.exists():
+                    raise ValueError(f"File '{raw_path}' does not exist.")
+                relative = resolved.relative_to(root).as_posix()
+                if not relative or relative == ".":
+                    raise ValueError("Path must point to a file inside publish/ or scratch/.")
+                return resolved, root_name, relative
+        raise ValueError("Path must stay inside this agent's publish/ or scratch/ tree.")
+
+    relative = _safe_relative_path(raw_path)
     if not relative.parts:
-        raise ValueError(f"Illegal file path inside {root_name}/.")
-    return relative
-
-
-def _handle_read_publish_file(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
-    target_agent = str(arguments.get("agent_id") or session.agent_id).strip()
-    file_name = str(arguments.get("file_name") or "summary.md").strip()
-    max_chars = int(arguments.get("max_chars", 4000))
-    relative = _safe_rooted_relative_path(file_name, root_name="publish")
-    path = agent_workspace_paths(session.run_root, target_agent)["publish_root"] / relative
-    text = read_text(path)
-    clipped = text[:max_chars]
-    if len(text) > max_chars:
-        clipped += f"\n\n[truncated at {max_chars} chars]"
-    return {"path": str(path), "content": clipped, "description": _describe_file(path)}
+        raise ValueError("Illegal file path.")
+    root_name = relative.parts[0]
+    if root_name not in allowed_roots:
+        raise ValueError("Relative paths must start with 'publish/' or 'scratch/'.")
+    sub_relative = Path(*relative.parts[1:]) if len(relative.parts) > 1 else Path()
+    if not sub_relative.parts:
+        raise ValueError("Path must point to a file inside publish/ or scratch/.")
+    resolved = allowed_roots[root_name] / sub_relative
+    if must_exist and not resolved.exists():
+        raise ValueError(f"File '{raw_path}' does not exist.")
+    return resolved, root_name, sub_relative.as_posix()
 
 
 def _handle_promote_artifact(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -710,34 +721,115 @@ def _handle_promote_artifact(session: AgentSession, arguments: dict[str, Any]) -
     return promoted
 
 
-def _handle_write_publish_file(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
-    file_name = str(arguments.get("file_name") or "").strip()
+def _handle_write_file(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
+    raw_path = str(arguments.get("path") or "").strip()
     content = str(arguments.get("content") or "")
-    if not file_name:
-        raise ValueError("write_publish_file requires file_name.")
-    relative = _safe_rooted_relative_path(file_name, root_name="publish")
-    path = agent_workspace_paths(session.run_root, session.agent_id)["publish_root"] / relative
+    if not raw_path:
+        raise ValueError("write_file requires path.")
+    path, root_name, relative = _resolve_workspace_file_path(session, raw_path, must_exist=False)
     write_text_atomic(path, content)
+    event_type = "publish_updated" if root_name == "publish" else "scratch_updated"
     append_event(
         session.run_root,
         AgentEvent(
-            event_type="publish_updated",
+            event_type=event_type,
             agent_id=session.agent_id,
-            details={"path": str(path), "file_name": relative.as_posix()},
+            details={"path": str(path), "file_name": relative},
         ),
     )
-    return {"path": str(path), "description": _describe_file(path)}
+    return {"path": str(path), "description": _describe_file(path), "root": root_name}
 
 
-def _handle_write_scratch_file(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
-    file_name = str(arguments.get("file_name") or "").strip()
+def _find_nth_occurrence(text: str, needle: str, occurrence: int) -> int:
+    if occurrence < 1:
+        raise ValueError("occurrence must be >= 1.")
+    index = -1
+    start = 0
+    for _ in range(occurrence):
+        index = text.find(needle, start)
+        if index == -1:
+            return -1
+        start = index + len(needle)
+    return index
+
+
+def _apply_text_edit(original: str, arguments: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    operation = str(arguments.get("operation") or "").strip()
     content = str(arguments.get("content") or "")
-    if not file_name:
-        raise ValueError("write_scratch_file requires file_name.")
-    relative = _safe_rooted_relative_path(file_name, root_name="scratch")
-    path = agent_workspace_paths(session.run_root, session.agent_id)["scratch_root"] / relative
-    write_text_atomic(path, content)
-    return {"path": str(path), "description": _describe_file(path)}
+    target_text = str(arguments.get("target_text") or "")
+    occurrence = int(arguments.get("occurrence", 1))
+    replace_all = bool(arguments.get("replace_all", False))
+
+    if operation not in {"replace", "insert_before", "insert_after", "append", "prepend"}:
+        raise ValueError("Illegal edit operation.")
+
+    if operation == "append":
+        return original + content, {"operation": operation, "matched": True, "match_count": 1}
+    if operation == "prepend":
+        return content + original, {"operation": operation, "matched": True, "match_count": 1}
+    if not target_text:
+        raise ValueError(f"{operation} requires target_text.")
+
+    if operation == "replace":
+        if replace_all:
+            match_count = original.count(target_text)
+            if match_count == 0:
+                raise ValueError("target_text not found for replace.")
+            return (
+                original.replace(target_text, content),
+                {"operation": operation, "matched": True, "match_count": match_count, "replace_all": True},
+            )
+        index = _find_nth_occurrence(original, target_text, occurrence)
+        if index == -1:
+            raise ValueError("target_text not found for replace.")
+        updated = original[:index] + content + original[index + len(target_text) :]
+        return (
+            updated,
+            {"operation": operation, "matched": True, "match_count": 1, "occurrence": occurrence, "replace_all": False},
+        )
+
+    index = _find_nth_occurrence(original, target_text, occurrence)
+    if index == -1:
+        raise ValueError(f"target_text not found for {operation}.")
+    insert_at = index if operation == "insert_before" else index + len(target_text)
+    updated = original[:insert_at] + content + original[insert_at:]
+    return (
+        updated,
+        {"operation": operation, "matched": True, "match_count": 1, "occurrence": occurrence},
+    )
+
+
+def _handle_edit_file(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
+    raw_path = str(arguments.get("path") or "").strip()
+    if not raw_path:
+        raise ValueError("edit_file requires path.")
+    path, root_name, relative = _resolve_workspace_file_path(session, raw_path, must_exist=True)
+    if not path.is_file():
+        raise ValueError(f"File '{relative}' does not exist inside {root_name}/.")
+    original = read_text(path)
+    updated, details = _apply_text_edit(original, arguments)
+    write_text_atomic(path, updated)
+    append_event(
+        session.run_root,
+        AgentEvent(
+            event_type=f"{root_name}_updated",
+            agent_id=session.agent_id,
+            details={
+                "path": str(path),
+                "file_name": relative,
+                **details,
+            },
+        ),
+    )
+    return {
+        "path": str(path),
+        "description": _describe_file(path),
+        "root": root_name,
+        "operation": details["operation"],
+        "match_count": int(details.get("match_count", 0)),
+        "before_chars": len(original),
+        "after_chars": len(updated),
+    }
 
 
 def _handle_set_status(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -766,9 +858,8 @@ _HANDLERS = {
     "list_children": _handle_list_children,
     "wait_children": _handle_wait_children,
     "list_publish_files": _handle_list_publish_files,
-    "read_publish_file": _handle_read_publish_file,
     "promote_artifact": _handle_promote_artifact,
-    "write_publish_file": _handle_write_publish_file,
-    "write_scratch_file": _handle_write_scratch_file,
+    "write_file": _handle_write_file,
+    "edit_file": _handle_edit_file,
     "set_status": _handle_set_status,
 }
