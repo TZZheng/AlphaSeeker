@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import fnmatch
 import json
 from pathlib import Path
 import subprocess
@@ -44,7 +43,6 @@ DEFAULT_CANDIDATE_TARGET = 120
 DEFAULT_READ_QUEUE_TARGET = 40
 DEFAULT_INGEST_BATCH_SIZE = 10
 DEFAULT_FILE_SEARCH_MAX_RESULTS = 20
-DEFAULT_GLOB_MAX_RESULTS = 200
 RETRIEVAL_STAGES = {
     "plan_queries",
     "discover",
@@ -100,108 +98,6 @@ def _python_search_fallback(
             except (OSError, UnicodeDecodeError):
                 continue
     return results
-
-
-def glob_files_skill(arguments: dict[str, Any], state: HarnessState) -> SkillResult:
-    patterns = ensure_str_list(arguments.get("patterns"))
-    if not patterns:
-        single_pattern = str(arguments.get("pattern") or "").strip()
-        if single_pattern:
-            patterns = [single_pattern]
-    if not patterns:
-        return make_result(
-            "glob_files",
-            arguments,
-            status="failed",
-            summary="glob_files requires at least one non-empty pattern.",
-            error="Missing pattern.",
-        )
-
-    max_results = max(1, min(int(arguments.get("max_results", DEFAULT_GLOB_MAX_RESULTS)), 1000))
-    include_dirs = bool(arguments.get("include_dirs", False))
-    requested_paths = ensure_str_list(arguments.get("paths") or arguments.get("roots")) or [state.workspace_path]
-    resolved_paths = _resolve_search_paths(state, requested_paths)
-    if not resolved_paths:
-        return make_result(
-            "glob_files",
-            arguments,
-            status="failed",
-            summary="glob_files could not find any readable target paths.",
-            error="No readable files or directories were provided.",
-        )
-
-    rows: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for raw_root in resolved_paths:
-        root = Path(raw_root)
-        for pattern in patterns:
-            try:
-                if root.is_dir():
-                    candidates = root.glob(pattern)
-                else:
-                    candidates = [root] if fnmatch.fnmatch(root.name, pattern) else []
-            except OSError:
-                continue
-            for candidate in candidates:
-                if len(rows) >= max_results:
-                    break
-                if candidate.is_dir() and not include_dirs:
-                    continue
-                key = str(candidate.resolve(strict=False))
-                if key in seen:
-                    continue
-                seen.add(key)
-                rows.append(
-                    {
-                        "path": str(candidate),
-                        "root": str(root),
-                        "pattern": pattern,
-                        "kind": "directory" if candidate.is_dir() else "file",
-                        "size_bytes": candidate.stat().st_size if candidate.is_file() else 0,
-                    }
-                )
-            if len(rows) >= max_results:
-                break
-        if len(rows) >= max_results:
-            break
-
-    output_lines = [f"{item['kind']}: {item['path']}" for item in rows]
-    evidence = []
-    if rows:
-        evidence.append(
-            note_evidence(
-                "glob_files",
-                f"Matched {len(rows)} path(s) across {len(resolved_paths)} target path(s).",
-                content="\n".join(output_lines),
-                metadata={
-                    "patterns": patterns,
-                    "paths": resolved_paths,
-                    "include_dirs": include_dirs,
-                },
-            )
-        )
-    return make_result(
-        "glob_files",
-        arguments,
-        status="ok",
-        summary=f"Matched {len(rows)} path(s) for {len(patterns)} glob pattern(s).",
-        details={
-            "patterns": patterns,
-            "paths": resolved_paths,
-            "matches": rows,
-            "include_dirs": include_dirs,
-        },
-        metrics=SkillMetrics(
-            evidence_count=len(evidence),
-            artifact_count=0,
-            extra={
-                "match_count": len(rows),
-                "path_count": len(resolved_paths),
-            },
-        ),
-        output_text="\n".join(output_lines),
-        evidence=evidence,
-    )
 
 
 def search_in_files_skill(arguments: dict[str, Any], state: HarnessState) -> SkillResult:
@@ -880,19 +776,6 @@ def retrieve_sources_skill(arguments: dict[str, Any], state: HarnessState) -> Sk
 
 
 CORE_SKILLS = [
-    SkillSpec(
-        name="glob_files",
-        description="Match local file or directory paths by glob pattern so you can discover exact paths before reading them.",
-        pack="core",
-        input_schema={
-            "pattern": "string",
-            "patterns": "string[]",
-            "paths": "string[]",
-            "max_results": "integer",
-            "include_dirs": "boolean",
-        },
-        executor=glob_files_skill,
-    ),
     SkillSpec(
         name="search_in_files",
         description="Search local files or directories for a keyword or exact text match, returning file paths, line numbers, and snippets.",

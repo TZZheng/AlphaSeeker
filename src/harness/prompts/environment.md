@@ -23,7 +23,7 @@ You work inside a file-based multi-agent runtime.
 
 ## Runtime Rules
 
-- Use `glob_files(patterns=[...], paths=[...])` to discover exact file paths by name or path pattern.
+- Use `bash(argv=[...], cwd=...)` for repo-scoped filesystem and Unix operations such as `rg --files -g`, `cp`, `mv`, `mkdir`, and `ls`.
 - Use `search_in_files(pattern=..., paths=[...])` to locate relevant files or lines before reading larger files.
 - Use `read_file(path=..., start_line=..., max_lines=...)` for line-based slices, or `read_file(path=..., max_chars=..., start_char=...)` for character ranges.
 - Use `search_web` or `search_news` to discover URLs, then `read_web_pages(urls=[...])` when you want page content.

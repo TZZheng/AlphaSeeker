@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
+import subprocess
 import time
 from typing import Any
 from uuid import uuid4
@@ -47,6 +49,7 @@ TOOL_NAMES = [
     "wait_children",
     "list_publish_files",
     "promote_artifact",
+    "bash",
     "write_file",
     "edit_file",
     "set_status",
@@ -61,6 +64,9 @@ _TYPE_MAP = {
     "boolean": {"type": "boolean"},
 }
 _LEGAL_PRESET_LIST = ", ".join(f"'{preset}'" for preset in AGENT_PRESETS)
+BASH_ALLOWED_COMMANDS = {"cp", "mv", "mkdir", "ls", "rg"}
+BASH_DEFAULT_TIMEOUT_SECONDS = 10
+BASH_DEFAULT_MAX_OUTPUT_CHARS = 12000
 
 
 @dataclass
@@ -188,6 +194,18 @@ def _tool_definitions() -> dict[str, dict[str, Any]]:
                 "properties": {
                     "source_path": {"type": "string"},
                     "description": {"type": "string"},
+                },
+            },
+        },
+        "bash": {
+            "description": "Run one repo-scoped command from the allowlist.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "argv": {"type": "array", "items": {"type": "string"}},
+                    "cwd": {"type": "string"},
+                    "timeout_seconds": {"type": "integer"},
+                    "max_output_chars": {"type": "integer"},
                 },
             },
         },
@@ -706,6 +724,197 @@ def _resolve_workspace_file_path(
     return resolved, root_name, sub_relative.as_posix()
 
 
+def _project_root_for_session(session: AgentSession) -> Path:
+    cwd = Path.cwd().resolve()
+    if (cwd / "pyproject.toml").exists() or (cwd / ".git").exists():
+        return cwd
+    run_root = Path(session.run_root).resolve(strict=False)
+    for candidate in (run_root, *run_root.parents):
+        if (candidate / "pyproject.toml").exists() or (candidate / ".git").exists():
+            return candidate
+    return cwd
+
+
+def _is_within(root: Path, candidate: Path) -> bool:
+    resolved_root = root.resolve(strict=False)
+    resolved_candidate = candidate.resolve(strict=False)
+    return resolved_candidate == resolved_root or resolved_root in resolved_candidate.parents
+
+
+def _resolve_repo_path(project_root: Path, cwd: Path, raw_path: str, *, allow_missing: bool) -> Path:
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = cwd / candidate
+    resolved = candidate.resolve(strict=False)
+    if not _is_within(project_root, resolved):
+        raise ValueError(f"Path '{raw_path}' escapes the project root.")
+    if not allow_missing and not resolved.exists():
+        raise ValueError(f"Path '{raw_path}' does not exist.")
+    return resolved
+
+
+def _resolve_bash_cwd(session: AgentSession, raw_cwd: str | None) -> tuple[Path, Path]:
+    project_root = _project_root_for_session(session)
+    if not raw_cwd:
+        return project_root, project_root
+    resolved = _resolve_repo_path(project_root, project_root, raw_cwd, allow_missing=False)
+    if not resolved.is_dir():
+        raise ValueError("bash cwd must be a directory inside the project root.")
+    return project_root, resolved
+
+
+def _extract_non_option_args(argv: list[str], *, options_with_values: set[str] | None = None) -> list[str]:
+    values: list[str] = []
+    skip_next = False
+    value_options = options_with_values or set()
+    for item in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if item in value_options:
+            skip_next = True
+            continue
+        if item.startswith("-"):
+            continue
+        values.append(item)
+    return values
+
+
+def _validate_bash_cp_mv(argv: list[str], *, project_root: Path, cwd: Path, command_name: str) -> None:
+    options_with_values: set[str] = set()
+    path_args = _extract_non_option_args(argv[1:], options_with_values=options_with_values)
+    if len(path_args) < 2:
+        raise ValueError(f"{command_name} requires at least one source path and one destination path.")
+    for raw_path in path_args[:-1]:
+        _resolve_repo_path(project_root, cwd, raw_path, allow_missing=False)
+    _resolve_repo_path(project_root, cwd, path_args[-1], allow_missing=True)
+
+
+def _validate_bash_mkdir(argv: list[str], *, project_root: Path, cwd: Path) -> None:
+    path_args = _extract_non_option_args(argv[1:], options_with_values=set())
+    if not path_args:
+        raise ValueError("mkdir requires at least one path.")
+    for raw_path in path_args:
+        _resolve_repo_path(project_root, cwd, raw_path, allow_missing=True)
+
+
+def _validate_bash_ls(argv: list[str], *, project_root: Path, cwd: Path) -> None:
+    path_args = _extract_non_option_args(argv[1:], options_with_values=set())
+    for raw_path in path_args:
+        _resolve_repo_path(project_root, cwd, raw_path, allow_missing=False)
+
+
+def _validate_bash_rg(argv: list[str], *, project_root: Path, cwd: Path) -> None:
+    consumes_value = {"-g", "--glob", "-e", "-m", "--max-count", "--color"}
+    files_mode = any(item == "--files" for item in argv[1:])
+    pattern_from_flag = any(item == "-e" for item in argv[1:])
+    positional: list[str] = []
+    skip_next = False
+    for item in argv[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if item in consumes_value:
+            skip_next = True
+            continue
+        if item.startswith("-"):
+            continue
+        positional.append(item)
+    path_args = positional if files_mode or pattern_from_flag else positional[1:]
+    for raw_path in path_args:
+        _resolve_repo_path(project_root, cwd, raw_path, allow_missing=False)
+
+
+def _truncate_shell_output(text: str, *, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"\n\n[truncated at {max_chars} chars]"
+
+
+def _handle_bash(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
+    raw_argv = arguments.get("argv") or []
+    argv = [str(item) for item in raw_argv if str(item)]
+    if not argv:
+        raise ValueError("bash requires a non-empty argv list.")
+    command_name = Path(argv[0]).name
+    if command_name not in BASH_ALLOWED_COMMANDS:
+        raise ValueError(f"Illegal bash command '{command_name}'. Allowed commands: {', '.join(sorted(BASH_ALLOWED_COMMANDS))}.")
+
+    project_root, cwd = _resolve_bash_cwd(session, str(arguments.get("cwd") or "").strip() or None)
+    if command_name == "cp":
+        _validate_bash_cp_mv(argv, project_root=project_root, cwd=cwd, command_name="cp")
+    elif command_name == "mv":
+        _validate_bash_cp_mv(argv, project_root=project_root, cwd=cwd, command_name="mv")
+    elif command_name == "mkdir":
+        _validate_bash_mkdir(argv, project_root=project_root, cwd=cwd)
+    elif command_name == "ls":
+        _validate_bash_ls(argv, project_root=project_root, cwd=cwd)
+    elif command_name == "rg":
+        _validate_bash_rg(argv, project_root=project_root, cwd=cwd)
+
+    timeout_seconds = max(1, min(int(arguments.get("timeout_seconds", BASH_DEFAULT_TIMEOUT_SECONDS)), 60))
+    max_output_chars = max(200, min(int(arguments.get("max_output_chars", BASH_DEFAULT_MAX_OUTPUT_CHARS)), 40000))
+    try:
+        completed = subprocess.run(
+            argv,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+            env={**os.environ, "PWD": str(cwd)},
+        )
+    except FileNotFoundError:
+        return {
+            "ok": False,
+            "argv": argv,
+            "cwd": str(cwd),
+            "project_root": str(project_root),
+            "returncode": 127,
+            "stdout": "",
+            "stderr": f"Command '{command_name}' is not available.",
+            "content": "",
+            "summary": f"Command '{command_name}' is not available.",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "argv": argv,
+            "cwd": str(cwd),
+            "project_root": str(project_root),
+            "returncode": 124,
+            "stdout": "",
+            "stderr": f"Command timed out after {timeout_seconds} seconds.",
+            "content": "",
+            "summary": f"Command timed out after {timeout_seconds} seconds.",
+        }
+    stdout = _truncate_shell_output(completed.stdout, max_chars=max_output_chars)
+    stderr = _truncate_shell_output(completed.stderr, max_chars=max_output_chars)
+    append_event(
+        session.run_root,
+        AgentEvent(
+            event_type="bash_executed",
+            agent_id=session.agent_id,
+            details={
+                "argv": argv,
+                "cwd": str(cwd),
+                "returncode": completed.returncode,
+            },
+        ),
+    )
+    return {
+        "ok": completed.returncode == 0,
+        "argv": argv,
+        "cwd": str(cwd),
+        "project_root": str(project_root),
+        "returncode": completed.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "content": stdout,
+        "summary": f"Command exited with code {completed.returncode}.",
+    }
+
+
 def _handle_promote_artifact(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
     source_path = str(arguments.get("source_path") or "").strip()
     if not source_path:
@@ -859,6 +1068,7 @@ _HANDLERS = {
     "wait_children": _handle_wait_children,
     "list_publish_files": _handle_list_publish_files,
     "promote_artifact": _handle_promote_artifact,
+    "bash": _handle_bash,
     "write_file": _handle_write_file,
     "edit_file": _handle_edit_file,
     "set_status": _handle_set_status,

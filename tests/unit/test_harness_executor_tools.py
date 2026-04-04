@@ -441,7 +441,7 @@ def test_search_in_files_returns_match_locations(
     assert any(path.endswith("output.md") for path in result["output_files"])
 
 
-def test_glob_files_returns_matching_paths(
+def test_bash_rg_discovers_matching_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -481,17 +481,125 @@ def test_glob_files_returns_matching_paths(
 
     result = execute_model_tool(
         session,
-        "glob_files",
+        "bash",
         {
-            "patterns": ["**/*.md"],
-            "paths": [str(notes_dir)],
+            "argv": ["rg", "--files", "-g", "*.md", str(notes_dir)],
         },
     )
 
-    assert result["status"] == "ok"
-    matches = result["details"]["matches"]
-    assert len(matches) == 1
-    assert matches[0]["path"].endswith("/notes/memo.md")
+    assert result["ok"] is True
+    assert "memo.md" in result["stdout"]
+
+
+def test_bash_copy_and_move_stay_inside_project_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    request = HarnessRequest(user_prompt="Copy a file", run_id="executor-bash-copy-move")
+    run_root, root_agent_id = initialize_run_root(request)
+    registry = build_skill_registry()
+    create_agent_workspace(
+        run_root,
+        agent_id=root_agent_id,
+        parent_id="",
+        preset="research",
+        task_name="Root Task",
+        description="Copy and move files.",
+        task_markdown=render_root_task_markdown(request.user_prompt),
+        tools_markdown=render_tools_markdown(
+            preset="research",
+            available_tools=default_tool_allowlist("research"),
+            available_skills=visible_skills_for_preset(
+                preset="research",
+                available_skills=get_skills_for_packs(registry, ["core"]),
+            ),
+        ),
+    )
+    session = create_or_load_session(
+        request=request,
+        run_root=str(run_root),
+        agent_id=root_agent_id,
+        preset="research",
+        registry_map=registry,
+    )
+
+    written = execute_model_tool(
+        session,
+        "write_file",
+        {"path": "publish/summary.md", "content": "hello\n"},
+    )
+    copied_path = Path(agent_workspace_paths(run_root, root_agent_id)["scratch_root"] / "summary_copy.md")
+    moved_path = Path(agent_workspace_paths(run_root, root_agent_id)["scratch_root"] / "summary_renamed.md")
+
+    copy_result = execute_model_tool(
+        session,
+        "bash",
+        {
+            "argv": ["cp", written["path"], str(copied_path)],
+        },
+    )
+    move_result = execute_model_tool(
+        session,
+        "bash",
+        {
+            "argv": ["mv", str(copied_path), str(moved_path)],
+        },
+    )
+    read_result = execute_model_tool(
+        session,
+        "read_file",
+        {"path": str(moved_path)},
+    )
+
+    assert copy_result["ok"] is True
+    assert move_result["ok"] is True
+    assert read_result["content"] == "hello\n"
+
+
+def test_bash_rejects_paths_outside_project_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    request = HarnessRequest(user_prompt="Reject outside path", run_id="executor-bash-scope")
+    run_root, root_agent_id = initialize_run_root(request)
+    registry = build_skill_registry()
+    create_agent_workspace(
+        run_root,
+        agent_id=root_agent_id,
+        parent_id="",
+        preset="research",
+        task_name="Root Task",
+        description="Reject outside paths.",
+        task_markdown=render_root_task_markdown(request.user_prompt),
+        tools_markdown=render_tools_markdown(
+            preset="research",
+            available_tools=default_tool_allowlist("research"),
+            available_skills=visible_skills_for_preset(
+                preset="research",
+                available_skills=get_skills_for_packs(registry, ["core"]),
+            ),
+        ),
+    )
+    session = create_or_load_session(
+        request=request,
+        run_root=str(run_root),
+        agent_id=root_agent_id,
+        preset="research",
+        registry_map=registry,
+    )
+    outside = tmp_path.parent / "outside.txt"
+    outside.write_text("outside\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="escapes the project root"):
+        execute_model_tool(
+            session,
+            "bash",
+            {
+                "argv": ["cp", str(outside), str(agent_workspace_paths(run_root, root_agent_id)["scratch_root"] / "copy.txt")],
+            },
+        )
 
 
 def test_read_file_supports_line_slices(

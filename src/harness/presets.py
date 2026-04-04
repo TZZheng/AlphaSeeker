@@ -13,6 +13,7 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
         "list_children",
         "wait_children",
         "list_publish_files",
+        "bash",
         "write_file",
         "edit_file",
         "set_status",
@@ -23,6 +24,7 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
         "wait_children",
         "list_publish_files",
         "promote_artifact",
+        "bash",
         "write_file",
         "edit_file",
         "set_status",
@@ -31,6 +33,7 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
         "spawn_subagent",
         "list_publish_files",
         "promote_artifact",
+        "bash",
         "write_file",
         "edit_file",
         "set_status",
@@ -40,6 +43,7 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
         "list_children",
         "wait_children",
         "list_publish_files",
+        "bash",
         "write_file",
         "edit_file",
         "set_status",
@@ -49,6 +53,7 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
         "list_children",
         "wait_children",
         "list_publish_files",
+        "bash",
         "write_file",
         "edit_file",
         "set_status",
@@ -58,6 +63,7 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
         "list_children",
         "wait_children",
         "list_publish_files",
+        "bash",
         "write_file",
         "edit_file",
         "set_status",
@@ -155,7 +161,7 @@ def visible_skills_for_preset(
         spec
         for spec in visible
         if spec.name
-        in {"glob_files", "read_file", "search_in_files", "get_current_datetime", "search_web", "search_news", "read_web_pages", "condense_context"}
+        in {"read_file", "search_in_files", "get_current_datetime", "search_web", "search_news", "read_web_pages", "condense_context"}
     ]
     if preset == "research":
         return visible
