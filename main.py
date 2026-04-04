@@ -50,19 +50,19 @@ def main(argv: list[str] | None = None) -> None:
         if args.runtime == "harness":
             response = run_harness(HarnessRequest(user_prompt=query))
             if response.status == "failed":
-                print(f"Error encountered: {response.final_response}")
+                print(f"Error encountered: {response.error or response.stop_reason or 'Harness failed.'}")
             else:
                 print("Success!")
-                print("\n--- RESPONSE ---")
-                print(response.final_response)
-                if response.enabled_packs:
-                    print(f"\nPacks enabled: {', '.join(response.enabled_packs)}")
-                if response.skills_used:
-                    print(f"Skills used: {', '.join(response.skills_used)}")
-                if response.report_path:
-                    print(f"Report saved: {response.report_path}")
-                if response.trace_path:
-                    print(f"Trace saved: {response.trace_path}")
+                if response.final_report_path and os.path.exists(response.final_report_path):
+                    print("\n--- RESPONSE ---")
+                    with open(response.final_report_path, "r", encoding="utf-8") as fh:
+                        print(fh.read())
+                if response.run_root:
+                    print(f"\nRun root: {response.run_root}")
+                if response.root_agent_path:
+                    print(f"Root agent workspace: {response.root_agent_path}")
+                if response.final_report_path:
+                    print(f"Final report saved: {response.final_report_path}")
         else:
             # The Supervisor handles everything: classification → sub-agent dispatch → synthesis
             initial_state = {

@@ -29,14 +29,8 @@ _DEFAULTS: Dict[str, Dict[str, str]] = {
         "synthesize": "kimi-k2.5",
     },
     "harness": {
-        "selector": "sf/Qwen/Qwen3-8B",
-        "planner": "sf/Qwen/Qwen3-8B",
-        "controller": "sf/Qwen/Qwen3-8B",
-        "worker": "sf/Qwen/Qwen3-8B",
+        "agent": "kimi-k2.5",
         "condense": "sf/Qwen/Qwen3-8B",
-        "writer": "kimi-k2.5",
-        "verify": "kimi-k2.5",
-        "evaluator": "kimi-k2.5",
     },
     "equity": {
         "plan": "sf/Qwen/Qwen3-14B",
@@ -137,12 +131,19 @@ def get_model(agent: str, role: str) -> str:
 
 
 def _provider_label(model_name: str) -> str | None:
+    normalized = model_name.lower()
     if model_name.startswith("sf/"):
         return "sf/*"
     if model_name.startswith("gemini-"):
         return "gemini-*"
     if model_name.startswith("kimi-"):
         return "kimi-*"
+    if (
+        normalized.startswith("minimax/")
+        or normalized.startswith("minimax-")
+        or normalized.startswith("codex-minimax-")
+    ):
+        return "minimax/*"
     if model_name.startswith("gpt-") or model_name.startswith("o1") or model_name.startswith("o3") or model_name.startswith("o4"):
         return "openai"
     if model_name.startswith("claude-"):
@@ -152,12 +153,19 @@ def _provider_label(model_name: str) -> str | None:
 
 def _provider_env_candidates(model_name: str) -> Tuple[str, ...] | None:
     """Map model naming convention to one-or-more acceptable env vars."""
+    normalized = model_name.lower()
     if model_name.startswith("sf/"):
         return ("SILICONFLOW_API_KEY",)
     if model_name.startswith("gemini-"):
         return ("GOOGLE_API_KEY",)
     if model_name.startswith("kimi-"):
         return ("KIMI_API_KEY",)
+    if (
+        normalized.startswith("minimax/")
+        or normalized.startswith("minimax-")
+        or normalized.startswith("codex-minimax-")
+    ):
+        return ("MINIMAX_API_KEY",)
     if model_name.startswith("gpt-") or model_name.startswith("o1") or model_name.startswith("o3") or model_name.startswith("o4"):
         return ("OPENAI_API_KEY",)
     if model_name.startswith("claude-"):

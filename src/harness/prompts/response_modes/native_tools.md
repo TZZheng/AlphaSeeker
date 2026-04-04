@@ -1,0 +1,3 @@
+- You do not return the final answer directly in chat. Use native tool calling to act.
+- Match your actions to your role: coordinate when you are coordinating, execute when you are executing.
+- Use high-level deterministic tools. Do not invent hidden pipeline arguments or unsupported internal stages.

@@ -14,7 +14,7 @@ import datetime
 import concurrent.futures
 from typing import Any, Dict, List, Literal, TypeVar, cast
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.agents.macro.schemas import MacroState, MacroPlan, MacroSection, MacroReport
 from src.shared.llm_manager import get_llm
@@ -392,7 +392,12 @@ def generate_section(state: MacroState) -> StatePatch:
         """
         try:
             structured_llm = get_llm(MODEL_SECTION).with_structured_output(MacroSection)
-            raw_section = structured_llm.invoke([SystemMessage(content=prompt)])
+            raw_section = structured_llm.invoke(
+                [
+                    SystemMessage(content="Generate a MacroSection JSON object that matches the requested schema."),
+                    HumanMessage(content=prompt),
+                ]
+            )
             section = _coerce_model(raw_section, MacroSection)
             return section_key, section
         except Exception as e:
@@ -437,19 +442,30 @@ def generate_report(state: MacroState) -> StatePatch:
     
     class SummaryOutput(BaseModel):
         outlook: str
-        key_risks: str
-        references: List[str]
+        key_risks: str | List[str]
+        references: List[str] = Field(default_factory=list)
         
     structured_llm = get_llm(MODEL_SUMMARY).with_structured_output(SummaryOutput, method="json_mode")
     
     try:
-        raw_summary = structured_llm.invoke([SystemMessage(content=prompt)])
+        raw_summary = structured_llm.invoke(
+            [
+                SystemMessage(content="Generate a summary JSON object that matches the requested schema."),
+                HumanMessage(content=prompt),
+            ]
+        )
         summary = _coerce_model(raw_summary, SummaryOutput)
         
+        key_risks = summary.key_risks
+        if isinstance(key_risks, list):
+            key_risks_text = "\n".join(f"- {item}" for item in key_risks if item)
+        else:
+            key_risks_text = key_risks
+
         final_report = MacroReport(
             topic=topic,
             outlook=summary.outlook,
-            key_risks=summary.key_risks,
+            key_risks=key_risks_text,
             current_conditions=sections["current_conditions"],
             policy_analysis=sections["policy_analysis"],
             global_linkages=sections["global_linkages"],

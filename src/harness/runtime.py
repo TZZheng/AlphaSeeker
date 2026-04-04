@@ -1,724 +1,541 @@
-"""Dependency-aware harness runtime with persistent dossier artifacts."""
+"""Async supervisor kernel for the file-based harness runtime."""
 
 from __future__ import annotations
 
-import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import asyncio
+import contextlib
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import os
 from pathlib import Path
+import sys
 import time
-from typing import Callable
+from typing import Any
 
 from src.harness.artifacts import (
-    build_state_snapshot,
-    initialize_dossier,
-    persist_report,
-    persist_trace,
-    refresh_dossier,
-    sync_dossier,
-    write_checkpoint,
+    agent_workspace_paths,
+    append_event,
+    build_run_root,
+    create_agent_workspace,
+    initialize_run_root,
+    latest_agent_records,
+    load_commenter_state,
+    load_request,
+    read_heartbeat,
+    read_status,
+    refresh_progress_view,
+    save_commenter_state,
+    stale_agents,
+    update_agent_record,
+    write_status,
 )
-from src.harness.claims import build_claim_map
-from src.harness.controller import decide_next_step
-from src.harness.deep_research import merge_skill_result_into_corpus, refresh_reduction_state
-from src.harness.planner import plan_research
+from src.harness.commenter import (
+    COMMENTER_REFRESH_INTERVAL_SECONDS,
+    compute_commenter_observation_fingerprint,
+    refresh_commenter_for_agent,
+)
+from src.harness.presets import default_tool_allowlist, render_root_task_markdown, render_tools_markdown, visible_skills_for_preset
 from src.harness.registry import build_skill_registry, get_skills_for_packs
-from src.harness.types import (
-    ControllerDecision,
-    DOMAIN_PACKS,
-    HarnessRequest,
-    HarnessResponse,
-    HarnessState,
-    PhaseUpdate,
-    PhaseTimingEvent,
-    ResearchBrief,
-    ResearchContract,
-    ResearchPlan,
-    ResearchStep,
-    SkillResult,
-    StepExecutionResult,
-    VerificationReport,
-)
-from src.harness.worker import execute_research_step, execute_skill_call
-from src.harness.writer import write_draft
-from src.harness.verifier import verify_draft
-from src.shared.text_utils import condense_context
+from src.harness.types import AgentEvent, HarnessRequest, HarnessResponse, SkillSpec
 
 
-ControllerFn = Callable[[HarnessState], ControllerDecision]
-WriterFn = Callable[[HarnessState], str]
-VerifierFn = Callable[[HarnessState, str], VerificationReport]
-PlannerFn = Callable[[HarnessState, dict[str, object]], tuple[ResearchBrief, ResearchPlan, ResearchContract]]
-WorkerFn = Callable[[HarnessState, ResearchStep, dict[str, object]], StepExecutionResult]
+TERMINAL_STATUSES = {"done", "failed", "blocked", "stale", "cancelled"}
+POLL_INTERVAL_SECONDS = 1.0
+PROCESS_KILL_GRACE_SECONDS = 2.0
+SOFT_STOP_GRACE_SECONDS = 60.0
 
 
-def _domain_override(request: HarnessRequest) -> list[str] | None:
-    if request.selected_packs is None:
+@dataclass
+class ManagedProcess:
+    agent_id: str
+    process: asyncio.subprocess.Process
+    launched_at_epoch: float
+
+
+@dataclass
+class SupervisorState:
+    request: HarnessRequest
+    run_root: str
+    root_agent_id: str
+    initial_agent_ids: set[str]
+    live: dict[str, ManagedProcess]
+    launcher: Any
+    run_started_at: float
+    commenter_tasks: dict[str, asyncio.Task[None]]
+    stop_reason: str | None = None
+    error: str | None = None
+    stop_requested: bool = False
+    soft_stop_requested: bool = False
+    soft_stop_started_at: float | None = None
+
+
+def _iso_to_epoch(value: str | None) -> float | None:
+    if not value:
         return None
-    selected = []
-    for pack in request.selected_packs:
-        pack_name = pack.strip().lower()
-        if pack_name in DOMAIN_PACKS and pack_name not in selected:
-            selected.append(pack_name)
-    return selected
+    try:
+        normalized = value.replace("Z", "+00:00")
+        return datetime.fromisoformat(normalized).timestamp()
+    except ValueError:
+        return None
 
 
-def initialize_state(
-    request: HarnessRequest,
-    *,
-    registry: dict[str, object] | None = None,
-) -> HarnessState:
-    """Construct the initial harness state before planning."""
-
-    registry_map = registry or build_skill_registry()
-    state = HarnessState(
-        request=request,
-        available_skills=list(registry_map.values()),
+async def _default_launch_agent_process(run_root: str, agent_id: str) -> asyncio.subprocess.Process:
+    return await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "src.harness.agent_worker",
+        "--run-root",
+        run_root,
+        "--agent-id",
+        agent_id,
+        cwd=str(Path.cwd()),
     )
-    initialize_dossier(state)
-    return state
 
 
-def _restore_state_from_checkpoint(
+def _resolve_request(request: HarnessRequest) -> HarnessRequest:
+    if request.resume_from_run_root:
+        stored = load_request(request.resume_from_run_root)
+        return stored.model_copy(update={"resume_from_run_root": request.resume_from_run_root})
+    if request.available_skill_packs:
+        return request
+    return request.model_copy(update={"available_skill_packs": ["core", "equity", "macro", "commodity"]})
+
+
+def _root_skills(registry_map: dict[str, SkillSpec], request: HarnessRequest) -> list[SkillSpec]:
+    return visible_skills_for_preset(
+        preset=request.root_preset,
+        available_skills=get_skills_for_packs(registry_map, request.available_skill_packs or ["core"]),
+    )
+
+
+def _ensure_root_workspace(
     request: HarnessRequest,
     *,
-    registry: dict[str, object] | None = None,
-) -> HarnessState:
-    """Rehydrate runtime state from a previously written checkpoint."""
-
-    checkpoint_path = request.resume_from
-    if not checkpoint_path:
-        raise ValueError("resume_from is required to restore a checkpoint.")
-    payload = json.loads(Path(checkpoint_path).read_text(encoding="utf-8"))
-    state_payload = payload.get("state")
-    if not isinstance(state_payload, dict):
-        raise ValueError("Checkpoint payload is missing a serialized state.")
-
-    state = HarnessState.model_validate(state_payload)
-    state.request = request.model_copy(update={"user_prompt": state.request.user_prompt})
-    state.dossier_paths = payload.get("dossier_paths") or state.dossier_paths
-    registry_map = registry or build_skill_registry()
-    state.available_skills = get_skills_for_packs(registry_map, state.enabled_packs or ["core"])
-    refresh_dossier(state)
-    return state
-
-
-def _assign_evidence_ids(state: HarnessState, result: SkillResult) -> None:
-    start_index = len(state.evidence_ledger) + 1
-    for offset, item in enumerate(result.evidence):
-        if not item.id:
-            item.id = f"E{start_index + offset}"
-
-
-def _maybe_condense_output(state: HarnessState, result: SkillResult) -> None:
-    output_text = result.output_text or ""
-    if len(output_text) <= state.request.max_chars_before_condense:
+    run_root: str,
+    root_agent_id: str,
+    registry_map: dict[str, SkillSpec],
+) -> None:
+    workspace = agent_workspace_paths(run_root, root_agent_id)["workspace"]
+    if workspace.exists():
         return
-    condensed = condense_context(
-        text=output_text,
-        max_chars=state.request.max_chars_before_condense,
-        agent="harness",
-        purpose=f"{result.skill_name} output review",
-    )
-    result.output_text = condensed
-    result.summary = (
-        f"{result.summary} Output was condensed from {len(output_text)} to {len(condensed)} characters."
-    )
-    result.structured_data["condensed"] = True
-    result.structured_data["output_chars_before_condense"] = len(output_text)
-    result.structured_data["output_chars_after_condense"] = len(condensed)
-
-
-def _record_skill_result(state: HarnessState, result: SkillResult) -> None:
-    _assign_evidence_ids(state, result)
-    _maybe_condense_output(state, result)
-
-    state.skill_history.append(result)
-    state.evidence_ledger.extend(result.evidence)
-    for path in result.artifacts:
-        if path not in state.artifacts:
-            state.artifacts.append(path)
-
-    memory_entry = f"[{result.skill_name}] {result.summary}"
-    if result.output_text:
-        memory_entry += f"\n{result.output_text[:1200]}"
-    state.working_memory.append(memory_entry)
-    if result.status == "failed" and result.error:
-        state.error = result.error
-    if state.request.research_profile == "deep":
-        merge_skill_result_into_corpus(state, result)
-
-
-def _record_phase(state: HarnessState, phase: str, summary: str) -> None:
-    state.phase_history.append(PhaseUpdate(phase=phase, summary=summary))
-    _update_elapsed(state)
-    sync_dossier(state)
-    write_checkpoint(state, phase)
-
-
-def _classify_latency_bottleneck(state: HarnessState) -> str:
-    if not state.phase_timing_totals_seconds:
-        return "unknown"
-    ranked = sorted(
-        (
-            (phase, duration)
-            for phase, duration in state.phase_timing_totals_seconds.items()
-            if phase in {"planner", "retrieval", "writer", "evaluator"}
+    create_agent_workspace(
+        run_root,
+        agent_id=root_agent_id,
+        parent_id="",
+        preset=request.root_preset,
+        task_name="Root Task",
+        description=request.user_prompt.strip()[:160],
+        task_markdown=render_root_task_markdown(request.user_prompt),
+        tools_markdown=render_tools_markdown(
+            preset=request.root_preset,
+            available_tools=default_tool_allowlist(request.root_preset),
+            available_skills=_root_skills(registry_map, request),
         ),
-        key=lambda item: item[1],
-        reverse=True,
-    )
-    if not ranked or ranked[0][1] <= 0:
-        return "unknown"
-    return ranked[0][0]
-
-
-def _record_phase_timing(state: HarnessState, phase: str, started_at: float, *, detail: str = "") -> float:
-    duration = max(0.0, time.perf_counter() - started_at)
-    state.phase_timing_events.append(
-        PhaseTimingEvent(
-            phase=phase,  # type: ignore[arg-type]
-            duration_seconds=duration,
-            detail=detail,
-        )
-    )
-    state.phase_timing_totals_seconds[phase] = (
-        state.phase_timing_totals_seconds.get(phase, 0.0) + duration
-    )
-    state.latency_bottleneck = _classify_latency_bottleneck(state)  # type: ignore[assignment]
-    return duration
-
-
-def _update_elapsed(state: HarnessState) -> None:
-    state.elapsed_seconds = max(0.0, time.time() - state.started_at_epoch)
-
-
-def _wall_clock_exhausted(state: HarnessState) -> bool:
-    _update_elapsed(state)
-    return (
-        state.request.research_profile == "deep"
-        and state.elapsed_seconds >= state.request.wall_clock_budget_seconds
     )
 
 
-def _mark_timeout(state: HarnessState, reason: str) -> None:
-    state.timed_out = True
-    state.timeout_reason = reason
-    state.status = "completed"
-    if state.verification_reports:
-        report = state.verification_reports[-1]
-        unresolved = list(
-            dict.fromkeys(
-                [
-                    *report.blocking_issues,
-                    *report.missing_sections,
-                    *report.missing_evidence_types,
-                    *report.counterevidence_gaps,
-                    *report.freshness_warnings,
-                    *report.numeric_inconsistencies,
-                    *report.unresolved_gaps,
-                ]
+def _root_agent_id(run_root: str) -> str:
+    records = latest_agent_records(run_root)
+    if "agent_root" in records:
+        return "agent_root"
+    for record in records.values():
+        if not record.parent_id:
+            return record.agent_id
+    return "agent_root"
+
+
+def _sync_registry_from_files(run_root: str) -> dict[str, Any]:
+    records = latest_agent_records(run_root)
+    changed: list[str] = []
+    for agent_id, record in records.items():
+        status = read_status(run_root, agent_id)
+        pid_text = agent_workspace_paths(run_root, agent_id)["pid"].read_text(encoding="utf-8").strip() if agent_workspace_paths(run_root, agent_id)["pid"].exists() else ""
+        pid = int(pid_text) if pid_text.isdigit() else None
+        if status != record.status or pid != record.pid:
+            update_agent_record(
+                run_root,
+                agent_id=agent_id,
+                status=status,
+                pid=pid,
+                started_at=record.started_at or (datetime.now(timezone.utc).isoformat() if pid else None),
+                finished_at=(datetime.now(timezone.utc).isoformat() if status in TERMINAL_STATUSES else record.finished_at),
+                error=record.error,
             )
+            changed.append(agent_id)
+    if changed:
+        refresh_progress_view(run_root)
+    return {"records": latest_agent_records(run_root), "changed": changed}
+
+
+async def _terminate_process(managed: ManagedProcess) -> None:
+    if managed.process.returncode is not None:
+        return
+    managed.process.terminate()
+    try:
+        await asyncio.wait_for(managed.process.wait(), timeout=PROCESS_KILL_GRACE_SECONDS)
+    except asyncio.TimeoutError:
+        managed.process.kill()
+        await managed.process.wait()
+
+
+async def _cancel_descendants(shared: SupervisorState, *, reason: str) -> None:
+    snapshot = latest_agent_records(shared.run_root)
+    for agent_id, record in snapshot.items():
+        if agent_id == shared.root_agent_id or record.status in TERMINAL_STATUSES:
+            continue
+        managed = shared.live.pop(agent_id, None)
+        if managed is not None:
+            await _terminate_process(managed)
+        write_status(shared.run_root, agent_id, "cancelled")
+        update_agent_record(
+            shared.run_root,
+            agent_id=agent_id,
+            status="cancelled",
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            error=reason,
         )
-        state.verification_reports[-1] = report.model_copy(
-            update={
-                "summary": f"{report.summary} Timeout: {reason}.",
-                "wall_clock_exhausted": True,
-                "unresolved_gaps": unresolved,
-            }
+        append_event(
+            shared.run_root,
+            AgentEvent(
+                event_type="agent_cancelled",
+                agent_id=agent_id,
+                parent_id=record.parent_id,
+                details={"reason": reason},
+            ),
         )
-    sync_dossier(state)
 
 
-def _refresh_context(state: HarnessState) -> None:
-    refresh_dossier(state)
-    if state.request.reset_context_each_phase:
-        state.working_memory = state.working_memory[-4:]
-        state.revision_notes = state.revision_notes[-8:]
-
-
-def _apply_plan_to_state(
-    state: HarnessState,
-    brief: ResearchBrief,
-    plan: ResearchPlan,
-    contract: ResearchContract,
-    registry_map: dict[str, object],
-) -> None:
-    state.research_brief = brief
-    state.research_plan = plan
-    state.research_contract = contract
-    state.enabled_packs = ["core", *plan.domain_packs]
-    state.available_skills = get_skills_for_packs(registry_map, state.enabled_packs)
-    for step in plan.steps:
-        state.step_statuses.setdefault(step.id, "pending")
-
-
-def _run_planner(
-    state: HarnessState,
-    registry_map: dict[str, object],
-    planner_fn: PlannerFn | None,
-) -> None:
-    _refresh_context(state)
-    override = _domain_override(state.request)
-    started_at = time.perf_counter()
-    if planner_fn is not None:
-        brief, plan, contract = planner_fn(state, registry_map)
-    else:
-        brief, plan, contract = plan_research(
-            state.request.user_prompt,
-            registry=registry_map,
-            selected_packs=override,
-            research_profile=state.request.research_profile,
-        )
-    duration = _record_phase_timing(state, "planner", started_at, detail="plan_research")
-    _apply_plan_to_state(state, brief, plan, contract, registry_map)
-    _record_phase(
-        state,
-        "planner",
-        (
-            f"Planned {len(plan.steps)} steps across packs: {', '.join(state.enabled_packs)} "
-            f"in {duration:.2f}s."
+async def _finalize_root_after_forced_stop(shared: SupervisorState) -> None:
+    root_status = read_status(shared.run_root, shared.root_agent_id)
+    if root_status in TERMINAL_STATUSES:
+        return
+    managed = shared.live.pop(shared.root_agent_id, None)
+    if managed is not None:
+        await _terminate_process(managed)
+    write_status(shared.run_root, shared.root_agent_id, "failed")
+    update_agent_record(
+        shared.run_root,
+        agent_id=shared.root_agent_id,
+        status="failed",
+        finished_at=datetime.now(timezone.utc).isoformat(),
+        error=shared.error or "Harness run stopped before the root agent completed.",
+    )
+    append_event(
+        shared.run_root,
+        AgentEvent(
+            event_type="root_stop_forced",
+            agent_id=shared.root_agent_id,
+            details={"stop_reason": shared.stop_reason or "unknown", "error": shared.error or ""},
         ),
     )
 
 
-def _step_by_id(state: HarnessState, step_id: str) -> ResearchStep | None:
-    if not state.research_plan:
-        return None
-    for step in state.research_plan.steps:
-        if step.id == step_id:
-            return step
-    return None
-
-
-def _record_step_execution(state: HarnessState, result: StepExecutionResult) -> None:
-    state.step_results.append(result)
-    state.step_statuses[result.step_id] = result.status
-    for finding in result.findings:
-        if finding not in state.findings:
-            state.findings.append(finding)
-    for path in result.artifact_paths:
-        if path not in state.artifacts:
-            state.artifacts.append(path)
-
-
-def _run_step_worker(
-    state: HarnessState,
-    step: ResearchStep,
-    registry_map: dict[str, object],
-    worker_fn: WorkerFn | None,
-) -> StepExecutionResult:
-    if worker_fn is not None:
-        return worker_fn(state, step, registry_map)
-    return execute_research_step(
-        state,
-        step,
-        registry_map,
-        record_skill_result=_record_skill_result,
-        max_iterations=state.request.max_worker_iterations,
-    )
-
-
-def _run_parallel_steps(
-    state: HarnessState,
-    step_ids: list[str],
-    registry_map: dict[str, object],
-    worker_fn: WorkerFn | None,
-) -> list[StepExecutionResult]:
-    if worker_fn is not None:
-        return [
-            _run_step_worker(state, step, registry_map, worker_fn)
-            for step in (_step_by_id(state, step_id) for step_id in step_ids)
-            if step is not None
-        ]
-
-    def _worker_job(step: ResearchStep) -> tuple[str, StepExecutionResult, list[SkillResult]]:
-        local_state = state.model_copy(deep=True)
-        local_results: list[SkillResult] = []
-
-        def _local_record(_local_state: HarnessState, result: SkillResult) -> None:
-            _assign_evidence_ids(local_state, result)
-            _maybe_condense_output(local_state, result)
-            local_results.append(result)
-            local_state.evidence_ledger.extend(result.evidence)
-
-        step_result = execute_research_step(
-            local_state,
-            step,
-            registry_map,
-            record_skill_result=_local_record,
-            max_iterations=state.request.max_worker_iterations,
-        )
-        return step.id, step_result, local_results
-
-    ordered_steps = [
-        step
-        for step in (_step_by_id(state, step_id) for step_id in step_ids)
-        if step is not None
-    ]
-    results_by_step: dict[str, tuple[StepExecutionResult, list[SkillResult]]] = {}
-    with ThreadPoolExecutor(max_workers=min(len(ordered_steps), state.request.max_parallel_steps)) as pool:
-        future_map = {pool.submit(_worker_job, step): step.id for step in ordered_steps}
-        for future in as_completed(future_map):
-            step_id, step_result, skill_results = future.result()
-            results_by_step[step_id] = (step_result, skill_results)
-
-    ordered_results: list[StepExecutionResult] = []
-    for step in ordered_steps:
-        step_result, skill_results = results_by_step[step.id]
-        for result in skill_results:
-            _record_skill_result(state, result)
-        ordered_results.append(step_result)
-    return ordered_results
-
-
-def _verify_latest_draft(state: HarnessState, verifier_fn: VerifierFn) -> VerificationReport:
-    draft = state.latest_draft or ""
-    report = verifier_fn(state, draft)
-    state.qa_iteration_count += 1
-    report.qa_iteration = state.qa_iteration_count
-    state.verification_reports.append(report)
-    if report.decision == "revise":
-        state.pending_follow_up_calls = [
-            call.model_copy(deep=True) for call in report.required_follow_up_calls
-        ]
-    else:
-        state.pending_follow_up_calls = []
-    return report
-
-
-def _consume_follow_up_call(state: HarnessState, result: SkillResult) -> bool:
-    for index, call in enumerate(state.pending_follow_up_calls):
-        if call.name != result.skill_name:
+async def _launch_queued_agents(shared: SupervisorState) -> None:
+    while not shared.stop_requested:
+        if shared.soft_stop_requested:
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
             continue
-        if call.arguments != result.arguments:
-            continue
-        consumed = state.pending_follow_up_calls.pop(index)
-        state.executed_follow_up_calls.append(consumed)
-        return True
-    return False
-
-
-def _finalize_from_draft(state: HarnessState) -> None:
-    if state.latest_draft:
-        state.final_response = state.latest_draft
-        state.status = "completed"
-        return
-    state.final_response = "Harness failed to generate a draft."
-    state.status = "failed"
-
-
-def _ensure_final_draft(state: HarnessState, writer_fn: WriterFn) -> None:
-    if not state.latest_draft:
-        _refresh_context(state)
-        started_at = time.perf_counter()
-        state.latest_draft = writer_fn(state)
-        duration = _record_phase_timing(
-            state,
-            "writer",
-            started_at,
-            detail="final_fallback_draft",
-        )
-        state.claim_map = build_claim_map(state, state.latest_draft)
-        if state.request.research_profile == "deep":
-            refresh_reduction_state(state)
-        _record_phase(state, "writer", f"Generated a final fallback draft in {duration:.2f}s.")
-
-
-def _build_trace_payload(state: HarnessState) -> dict[str, object]:
-    payload = build_state_snapshot(state)
-    payload.update(
-        {
-            "request": state.request.model_dump(mode="json"),
-            "enabled_packs": state.enabled_packs,
-            "available_skills": [spec.model_dump(mode="json") for spec in state.available_skills],
-            "controller_log": [decision.model_dump(mode="json") for decision in state.controller_log],
-            "skill_history": [result.model_dump(mode="json") for result in state.skill_history],
-            "step_results": [result.model_dump(mode="json") for result in state.step_results],
-            "deep_query_buckets": [bucket.model_dump(mode="json") for bucket in state.deep_query_buckets],
-            "discovered_sources": [item.model_dump(mode="json") for item in state.discovered_sources],
-            "read_queue": [item.model_dump(mode="json") for item in state.read_queue],
-            "read_results": [item.model_dump(mode="json") for item in state.read_results],
-            "source_cards": [item.model_dump(mode="json") for item in state.source_cards],
-            "fact_index": [item.model_dump(mode="json") for item in state.fact_index],
-            "section_briefs": [item.model_dump(mode="json") for item in state.section_briefs],
-            "coverage_matrix": (
-                state.coverage_matrix.model_dump(mode="json") if state.coverage_matrix else None
-            ),
-            "evidence_ledger": [item.model_dump(mode="json") for item in state.evidence_ledger],
-            "verification_reports": [report.model_dump(mode="json") for report in state.verification_reports],
-            "pending_follow_up_calls": [call.model_dump(mode="json") for call in state.pending_follow_up_calls],
-            "executed_follow_up_calls": [call.model_dump(mode="json") for call in state.executed_follow_up_calls],
-            "phase_history": [update.model_dump(mode="json") for update in state.phase_history],
-            "phase_timing_events": [event.model_dump(mode="json") for event in state.phase_timing_events],
-            "phase_timing_totals_seconds": state.phase_timing_totals_seconds,
-            "latency_bottleneck": state.latency_bottleneck,
-            "claim_map": [claim.model_dump(mode="json") for claim in state.claim_map],
-            "working_memory": state.working_memory,
-            "revision_notes": state.revision_notes,
-            "artifacts": state.artifacts,
-            "latest_draft": state.latest_draft,
-            "final_response": state.final_response,
-            "elapsed_seconds": state.elapsed_seconds,
-            "qa_iteration_count": state.qa_iteration_count,
-            "deep_retrieval_wave_count": state.deep_retrieval_wave_count,
-            "timed_out": state.timed_out,
-            "timeout_reason": state.timeout_reason,
-            "step_count": state.step_count,
-            "revision_count": state.revision_count,
-            "status": state.status,
-            "error": state.error,
-            "report_path": state.report_path,
-            "trace_path": state.trace_path,
-            "checkpoint_paths": state.checkpoint_paths,
-            "dossier_paths": state.dossier_paths,
+        snapshot = latest_agent_records(shared.run_root)
+        live_agent_ids = {
+            agent_id
+            for agent_id, record in snapshot.items()
+            if record.status in {"running", "waiting"}
         }
+        live_agent_ids.update(shared.live)
+        for record in snapshot.values():
+            if shared.stop_requested:
+                break
+            if record.status != "queued" or record.agent_id in shared.live:
+                continue
+            if shared.request.resume_from_run_root and record.agent_id in shared.initial_agent_ids and record.agent_id != shared.root_agent_id:
+                continue
+            if len(live_agent_ids) >= shared.request.max_live_agents:
+                break
+            parent_live = sum(
+                1
+                for agent_id in live_agent_ids
+                if snapshot.get(agent_id) is not None and snapshot[agent_id].parent_id == record.parent_id
+            )
+            if record.parent_id and parent_live >= shared.request.max_live_children_per_parent:
+                continue
+            process = await shared.launcher(shared.run_root, record.agent_id)
+            shared.live[record.agent_id] = ManagedProcess(
+                agent_id=record.agent_id,
+                process=process,
+                launched_at_epoch=time.time(),
+            )
+            live_agent_ids.add(record.agent_id)
+            update_agent_record(
+                shared.run_root,
+                agent_id=record.agent_id,
+                status="running",
+                pid=process.pid,
+                started_at=datetime.now(timezone.utc).isoformat(),
+            )
+            append_event(
+                shared.run_root,
+                AgentEvent(
+                    event_type="worker_launched",
+                    agent_id=record.agent_id,
+                    parent_id=record.parent_id,
+                    details={"pid": process.pid},
+                ),
+            )
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+
+async def _monitor_agents(shared: SupervisorState) -> None:
+    while not shared.stop_requested:
+        now_epoch = time.time()
+        elapsed = now_epoch - shared.run_started_at
+        if elapsed >= shared.request.wall_clock_budget_seconds and not shared.soft_stop_requested:
+            shared.soft_stop_requested = True
+            shared.soft_stop_started_at = now_epoch
+            append_event(
+                shared.run_root,
+                AgentEvent(
+                    event_type="run_soft_stop_requested",
+                    agent_id=shared.root_agent_id,
+                    details={
+                        "reason": "wall_clock_budget_reached",
+                        "grace_seconds": SOFT_STOP_GRACE_SECONDS,
+                    },
+                ),
+            )
+        if shared.soft_stop_requested and shared.soft_stop_started_at is not None:
+            if now_epoch - shared.soft_stop_started_at >= SOFT_STOP_GRACE_SECONDS:
+                shared.stop_reason = "wall_clock_budget_exhausted"
+                shared.error = "Harness wall-clock budget exhausted."
+                shared.stop_requested = True
+                break
+
+        snapshot = _sync_registry_from_files(shared.run_root)["records"]
+
+        for stale_id in stale_agents(
+            shared.run_root,
+            stale_after_seconds=shared.request.stale_heartbeat_seconds,
+            now_epoch=now_epoch,
+        ):
+            if read_status(shared.run_root, stale_id) != "stale":
+                write_status(shared.run_root, stale_id, "stale")
+                update_agent_record(
+                    shared.run_root,
+                    agent_id=stale_id,
+                    status="stale",
+                    finished_at=datetime.now(timezone.utc).isoformat(),
+                    error="Heartbeat stale.",
+                )
+                append_event(
+                    shared.run_root,
+                    AgentEvent(
+                        event_type="heartbeat_stale",
+                        agent_id=stale_id,
+                        details={"heartbeat": read_heartbeat(shared.run_root, stale_id)},
+                    ),
+                )
+                managed = shared.live.pop(stale_id, None)
+                if managed is not None:
+                    await _terminate_process(managed)
+
+        for agent_id, managed in list(shared.live.items()):
+            process = managed.process
+            if process.returncode is None:
+                continue
+            shared.live.pop(agent_id, None)
+            current_status = read_status(shared.run_root, agent_id)
+            if current_status not in TERMINAL_STATUSES:
+                write_status(shared.run_root, agent_id, "failed")
+                update_agent_record(
+                    shared.run_root,
+                    agent_id=agent_id,
+                    status="failed",
+                    finished_at=datetime.now(timezone.utc).isoformat(),
+                    error=f"Worker exited with code {process.returncode}.",
+                )
+            append_event(
+                shared.run_root,
+                AgentEvent(
+                    event_type="worker_exited",
+                    agent_id=agent_id,
+                    details={"returncode": process.returncode},
+                ),
+            )
+
+        root_status = read_status(shared.run_root, shared.root_agent_id)
+        if root_status in TERMINAL_STATUSES and shared.root_agent_id not in shared.live:
+            shared.stop_reason = root_status
+            shared.stop_requested = True
+            break
+
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+
+async def _run_commenter_refresh(shared: SupervisorState, agent_id: str, fingerprint: str) -> None:
+    try:
+        written = await asyncio.to_thread(
+            refresh_commenter_for_agent,
+            shared.run_root,
+            agent_id,
+            shared.request,
+            observed_fingerprint=fingerprint,
+        )
+        append_event(
+            shared.run_root,
+            AgentEvent(
+                event_type="commenter_refreshed",
+                agent_id=agent_id,
+                details={"comments_written": written},
+            ),
+        )
+    except Exception as exc:
+        state = load_commenter_state(shared.run_root, agent_id) or {}
+        state["last_attempted_at"] = datetime.now(timezone.utc).isoformat()
+        state["last_error"] = f"{type(exc).__name__}: {exc}"
+        save_commenter_state(shared.run_root, agent_id, state)
+        append_event(
+            shared.run_root,
+            AgentEvent(
+                event_type="commenter_failed",
+                agent_id=agent_id,
+                details={"error": state["last_error"]},
+            ),
+        )
+
+
+async def _monitor_commenters(shared: SupervisorState) -> None:
+    while not shared.stop_requested:
+        snapshot = latest_agent_records(shared.run_root)
+        now_epoch = time.time()
+
+        for agent_id, task in list(shared.commenter_tasks.items()):
+            if not task.done():
+                continue
+            shared.commenter_tasks.pop(agent_id, None)
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        for agent_id, record in snapshot.items():
+            if record.status in TERMINAL_STATUSES:
+                continue
+            if agent_id in shared.commenter_tasks:
+                continue
+            fingerprint = compute_commenter_observation_fingerprint(shared.run_root, agent_id)
+            state = load_commenter_state(shared.run_root, agent_id) or {}
+            last_observed = str(state.get("last_observed_fingerprint") or "")
+            if fingerprint != last_observed:
+                state["last_observed_fingerprint"] = fingerprint
+                state["last_changed_at"] = datetime.now(timezone.utc).isoformat()
+                save_commenter_state(shared.run_root, agent_id, state)
+            last_attempted_at = (
+                _iso_to_epoch(str(state.get("last_attempted_at") or ""))
+                or _iso_to_epoch(str(state.get("last_refreshed_at") or ""))
+                or 0.0
+            )
+            last_commented = str(state.get("last_commented_fingerprint") or "")
+            if (
+                fingerprint
+                and fingerprint != last_commented
+                and now_epoch - last_attempted_at >= COMMENTER_REFRESH_INTERVAL_SECONDS
+            ):
+                state["last_attempted_at"] = datetime.now(timezone.utc).isoformat()
+                save_commenter_state(shared.run_root, agent_id, state)
+                shared.commenter_tasks[agent_id] = asyncio.create_task(
+                    _run_commenter_refresh(shared, agent_id, fingerprint)
+                )
+
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+
+async def _supervise_async(
+    request: HarnessRequest,
+    *,
+    launch_agent_process: Any = None,
+    registry_map: dict[str, SkillSpec] | None = None,
+) -> HarnessResponse:
+    resolved_request = _resolve_request(request)
+    registry = registry_map or build_skill_registry()
+
+    if resolved_request.resume_from_run_root:
+        run_root = str(build_run_root(resolved_request))
+        root_agent_id = _root_agent_id(run_root)
+    else:
+        run_root_path, root_agent_id = initialize_run_root(resolved_request)
+        run_root = str(run_root_path)
+        _ensure_root_workspace(resolved_request, run_root=run_root, root_agent_id=root_agent_id, registry_map=registry)
+
+    launcher = launch_agent_process or _default_launch_agent_process
+    initial_agent_ids = set(latest_agent_records(run_root))
+    shared = SupervisorState(
+        request=resolved_request,
+        run_root=run_root,
+        root_agent_id=root_agent_id,
+        initial_agent_ids=initial_agent_ids,
+        live={},
+        launcher=launcher,
+        run_started_at=time.time(),
+        commenter_tasks={},
     )
-    return payload
 
+    launcher_task = asyncio.create_task(_launch_queued_agents(shared))
+    monitor_task = asyncio.create_task(_monitor_agents(shared))
+    commenter_task = asyncio.create_task(_monitor_commenters(shared))
+    await monitor_task
+    shared.stop_requested = True
+    launcher_task.cancel()
+    commenter_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await launcher_task
+    with contextlib.suppress(asyncio.CancelledError):
+        await commenter_task
 
-def _persist_outputs(state: HarnessState) -> None:
-    _update_elapsed(state)
-    persist_report(state)
-    payload = _build_trace_payload(state)
-    payload["trace_path"] = state.dossier_paths.get("trace")
-    persist_trace(state, payload)
+    if shared.stop_reason not in TERMINAL_STATUSES:
+        await _finalize_root_after_forced_stop(shared)
+
+    await _cancel_descendants(
+        shared,
+        reason=f"Cancelled because root agent stopped with status '{read_status(shared.run_root, shared.root_agent_id)}'.",
+    )
+
+    # Shutdown anything still running.
+    for managed in list(shared.live.values()):
+        await _terminate_process(managed)
+    shared.live.clear()
+    for task in list(shared.commenter_tasks.values()):
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    shared.commenter_tasks.clear()
+
+    root_workspace = agent_workspace_paths(run_root, root_agent_id)["workspace"]
+    final_report = agent_workspace_paths(run_root, root_agent_id)["publish_final"]
+    stop_reason = shared.stop_reason or "unknown"
+    error = shared.error
+    status = "completed" if stop_reason == "done" and final_report.exists() else "failed"
+    if status == "failed" and error is None:
+        error = "Harness run did not finish with a completed root publish/final.md."
+    refresh_progress_view(run_root)
+    return HarnessResponse(
+        status=status,  # type: ignore[arg-type]
+        stop_reason=stop_reason,
+        run_root=run_root,
+        root_agent_path=str(root_workspace),
+        final_report_path=str(final_report) if final_report.exists() else None,
+        error=error,
+    )
 
 
 def run_harness(
     request: HarnessRequest,
     *,
-    controller_fn: ControllerFn | None = None,
-    writer_fn: WriterFn | None = None,
-    verifier_fn: VerifierFn | None = None,
-    planner_fn: PlannerFn | None = None,
-    worker_fn: WorkerFn | None = None,
-    registry: dict[str, object] | None = None,
+    launch_agent_process: Any = None,
+    registry: dict[str, SkillSpec] | None = None,
 ) -> HarnessResponse:
-    """Execute the harness end to end and persist the dossier, report, and trace."""
+    """Run the file-based harness kernel until the root agent stops."""
 
-    controller = controller_fn or decide_next_step
-    writer = writer_fn or write_draft
-    verifier = verifier_fn or verify_draft
-    registry_map = registry or build_skill_registry()
-
-    if request.resume_from:
-        state = _restore_state_from_checkpoint(request, registry=registry_map)
-    else:
-        state = initialize_state(request, registry=registry_map)
-
-    if not state.research_plan:
-        _run_planner(state, registry_map, planner_fn)
-
-    if not state.available_skills:
-        state.status = "failed"
-        state.final_response = "Harness has no available skills for this request."
-        _persist_outputs(state)
-        return HarnessResponse(
-            final_response=state.final_response,
-            status="failed",
-            report_path=state.report_path,
-            trace_path=state.trace_path,
-            enabled_packs=state.enabled_packs,
-            run_root=state.run_root,
-            dossier_paths=state.dossier_paths,
+    return asyncio.run(
+        _supervise_async(
+            request,
+            launch_agent_process=launch_agent_process,
+            registry_map=registry,
         )
-
-    for _ in range(request.max_steps):
-        if _wall_clock_exhausted(state):
-            _mark_timeout(state, "wall_clock_budget_exhausted")
-            break
-        state.step_count += 1
-        _refresh_context(state)
-        decision = controller(state)
-        state.controller_log.append(decision)
-        _record_phase(state, "controller", decision.rationale or decision.action)
-
-        if decision.action == "call_skill":
-            call = decision.skill_call
-            if call is None:
-                state.error = "Controller returned call_skill without a skill_call payload."
-                continue
-            started_at = time.perf_counter()
-            result = execute_skill_call(state, call, registry_map)
-            duration = _record_phase_timing(
-                state,
-                "retrieval",
-                started_at,
-                detail=f"call_skill:{call.name}",
-            )
-            _record_skill_result(state, result)
-            was_follow_up = _consume_follow_up_call(state, result)
-            if was_follow_up:
-                _record_phase(
-                    state,
-                    "worker",
-                    f"Executed evaluator follow-up call: {call.name} in {duration:.2f}s.",
-                )
-            else:
-                _record_phase(
-                    state,
-                    "worker",
-                    f"Executed direct skill call: {call.name} in {duration:.2f}s.",
-                )
-            continue
-
-        if decision.action == "execute_step":
-            step = _step_by_id(state, decision.step_id or "")
-            if step is None:
-                state.error = f"Controller referenced unknown step '{decision.step_id}'."
-                continue
-            started_at = time.perf_counter()
-            step_result = _run_step_worker(state, step, registry_map, worker_fn)
-            duration = _record_phase_timing(
-                state,
-                "retrieval",
-                started_at,
-                detail=f"execute_step:{step.id}",
-            )
-            _record_step_execution(state, step_result)
-            _record_phase(state, "worker", f"{step_result.summary} ({duration:.2f}s)")
-            continue
-
-        if decision.action == "execute_parallel_steps":
-            started_at = time.perf_counter()
-            step_results = _run_parallel_steps(state, decision.step_ids, registry_map, worker_fn)
-            duration = _record_phase_timing(
-                state,
-                "retrieval",
-                started_at,
-                detail="execute_parallel_steps",
-            )
-            for step_result in step_results:
-                _record_step_execution(state, step_result)
-            if step_results:
-                joined = ", ".join(result.step_id for result in step_results)
-                _record_phase(
-                    state,
-                    "worker",
-                    f"Executed parallel steps: {joined} in {duration:.2f}s.",
-                )
-            continue
-
-        if decision.action == "draft":
-            _refresh_context(state)
-            writer_started_at = time.perf_counter()
-            state.latest_draft = writer(state)
-            writer_duration = _record_phase_timing(
-                state,
-                "writer",
-                writer_started_at,
-                detail="draft",
-            )
-            state.claim_map = build_claim_map(state, state.latest_draft)
-            if state.request.research_profile == "deep":
-                refresh_reduction_state(state)
-            _record_phase(state, "writer", f"Generated draft in {writer_duration:.2f}s.")
-
-            _refresh_context(state)
-            evaluator_started_at = time.perf_counter()
-            report = _verify_latest_draft(state, verifier)
-            evaluator_duration = _record_phase_timing(
-                state,
-                "evaluator",
-                evaluator_started_at,
-                detail="draft_evaluation",
-            )
-            _record_phase(
-                state,
-                "evaluator",
-                f"{report.summary} ({evaluator_duration:.2f}s)",
-            )
-            if report.decision == "pass":
-                _finalize_from_draft(state)
-                break
-            if report.decision == "revise":
-                if state.request.research_profile == "deep":
-                    if _wall_clock_exhausted(state):
-                        _mark_timeout(state, "wall_clock_budget_exhausted")
-                        break
-                    state.revision_count += 1
-                    state.revision_notes.append(report.summary)
-                    state.revision_notes.extend(report.improvement_instructions)
-                    continue
-                if state.revision_count < request.max_revision_rounds:
-                    state.revision_count += 1
-                    state.revision_notes.append(report.summary)
-                    state.revision_notes.extend(report.improvement_instructions)
-                    continue
-            _finalize_from_draft(state)
-            break
-
-        if decision.action == "finalize":
-            _ensure_final_draft(state, writer)
-            if not state.verification_reports or state.verification_reports[-1].decision == "revise":
-                _refresh_context(state)
-                evaluator_started_at = time.perf_counter()
-                report = _verify_latest_draft(state, verifier)
-                evaluator_duration = _record_phase_timing(
-                    state,
-                    "evaluator",
-                    evaluator_started_at,
-                    detail="finalize_evaluation",
-                )
-                _record_phase(
-                    state,
-                    "evaluator",
-                    f"{report.summary} ({evaluator_duration:.2f}s)",
-                )
-                if report.decision == "revise":
-                    if state.request.research_profile == "deep" and not _wall_clock_exhausted(state):
-                        state.revision_count += 1
-                        state.revision_notes.append(report.summary)
-                        state.revision_notes.extend(report.improvement_instructions)
-                        continue
-                    if state.revision_count < request.max_revision_rounds:
-                        state.revision_count += 1
-                        state.revision_notes.append(report.summary)
-                        state.revision_notes.extend(report.improvement_instructions)
-                        continue
-                    if state.request.research_profile == "deep":
-                        _mark_timeout(state, "finalize_requested_before_pass")
-            _finalize_from_draft(state)
-            break
-
-    else:
-        _ensure_final_draft(state, writer)
-        if not state.verification_reports:
-            _refresh_context(state)
-            evaluator_started_at = time.perf_counter()
-            report = _verify_latest_draft(state, verifier)
-            evaluator_duration = _record_phase_timing(
-                state,
-                "evaluator",
-                evaluator_started_at,
-                detail="final_loop_evaluation",
-            )
-            _record_phase(
-                state,
-                "evaluator",
-                f"{report.summary} ({evaluator_duration:.2f}s)",
-            )
-        if state.request.research_profile == "deep" and state.verification_reports:
-            if state.verification_reports[-1].decision != "pass":
-                _mark_timeout(state, "max_steps_exhausted")
-        _finalize_from_draft(state)
-
-    if state.request.research_profile == "deep" and not state.timed_out and _wall_clock_exhausted(state):
-        _mark_timeout(state, "wall_clock_budget_exhausted")
-    if state.timed_out and not state.final_response:
-        _ensure_final_draft(state, writer)
-        _finalize_from_draft(state)
-    _record_phase(state, "finalize", f"Run finished with status: {state.status}.")
-    _persist_outputs(state)
-    return HarnessResponse(
-        final_response=state.final_response or "",
-        status=state.status if state.status != "running" else "failed",
-        report_path=state.report_path,
-        trace_path=state.trace_path,
-        verification=state.verification_reports[-1] if state.verification_reports else None,
-        enabled_packs=state.enabled_packs,
-        skills_used=[result.skill_name for result in state.skill_history],
-        artifacts=state.artifacts,
-        run_root=state.run_root,
-        dossier_paths=state.dossier_paths,
     )

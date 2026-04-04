@@ -1,4 +1,4 @@
-"""Deterministic helpers for the harness deep-research profile.
+"""Deterministic retrieval and reduction helpers for the harness.
 
 In backend terms:
 - "corpus building" means collecting and normalizing a large source set on disk.
@@ -20,13 +20,13 @@ from src.harness.artifacts import sync_reduction_artifacts
 from src.harness.types import (
     CoverageMatrix,
     CoverageMatrixEntry,
-    DeepRetrievalStageOutput,
     DiscoveredSource,
     FactIndexRecord,
     HarnessState,
     ReadQueueEntry,
     ReadResultRecord,
     RetrievalQueryBucket,
+    RetrievalStageOutput,
     SectionBrief,
     SkillResult,
     SourceCard,
@@ -645,6 +645,7 @@ def build_fact_index(source_cards: list[SourceCard]) -> list[FactIndexRecord]:
                     fact_id=f"F{counter}",
                     fact=sentence,
                     source_ids=[card.source_id],
+                    evidence_ids=list(card.evidence_ids),
                     section_labels=card.section_relevance,
                     numbers=NUMBER_RE.findall(sentence),
                     dates=DATE_RE.findall(sentence),
@@ -654,6 +655,9 @@ def build_fact_index(source_cards: list[SourceCard]) -> list[FactIndexRecord]:
                 continue
             if card.source_id not in record.source_ids:
                 record.source_ids.append(card.source_id)
+            for evidence_id in card.evidence_ids:
+                if evidence_id and evidence_id not in record.evidence_ids:
+                    record.evidence_ids.append(evidence_id)
             for section in card.section_relevance:
                 if section not in record.section_labels:
                     record.section_labels.append(section)
@@ -676,6 +680,22 @@ def build_section_briefs(
         summaries = [card.summary for card in cards[:4]]
         key_facts = [record.fact for record in facts[:6]]
         counterpoints = [record.fact for record in facts if record.stance == "counterevidence"][:4]
+        evidence_ids = list(
+            dict.fromkeys(
+                [
+                    evidence_id
+                    for card in cards
+                    for evidence_id in card.evidence_ids
+                    if evidence_id
+                ]
+                + [
+                    evidence_id
+                    for record in facts
+                    for evidence_id in record.evidence_ids
+                    if evidence_id
+                ]
+            )
+        )[:12]
         if len(cards) >= 3 or len(facts) >= 4:
             status = "strong"
         elif cards or facts:
@@ -689,7 +709,7 @@ def build_section_briefs(
             SectionBrief(
                 section_label=section,
                 summary=summary[:1200],
-                evidence_ids=[],
+                evidence_ids=evidence_ids,
                 source_ids=[card.source_id for card in cards[:8]],
                 key_facts=key_facts,
                 counterpoints=counterpoints,
@@ -704,6 +724,7 @@ def _coverage_entry(
     label: str,
     source_ids: list[str],
     *,
+    evidence_ids: list[str] | None = None,
     notes: list[str] | None = None,
 ) -> CoverageMatrixEntry:
     if len(source_ids) >= 3:
@@ -717,34 +738,42 @@ def _coverage_entry(
         label=label,
         status=status,
         evidence_count=len(source_ids),
-        evidence_ids=[],
+        evidence_ids=evidence_ids or [],
         source_ids=source_ids,
         notes=notes or [],
     )
 
 
 def build_coverage_matrix(state: HarnessState) -> CoverageMatrix:
-    """Summarize current corpus coverage for controller and evaluator decisions."""
+    """Summarize current corpus coverage for controller and critic decisions."""
 
-    required_sections = state.research_plan.required_sections if state.research_plan else []
+    required_sections = list(getattr(state, "required_sections", []) or [])
     brief_index = {brief.section_label: brief for brief in state.section_briefs}
     section_entries: list[CoverageMatrixEntry] = []
     for section in required_sections:
         brief = brief_index.get(section)
         source_ids = brief.source_ids if brief else []
         notes = [brief.summary] if brief and brief.summary else []
-        entry = _coverage_entry("section", section, source_ids, notes=notes[:1])
+        entry = _coverage_entry(
+            "section",
+            section,
+            source_ids,
+            evidence_ids=(brief.evidence_ids if brief else []),
+            notes=notes[:1],
+        )
         if brief is not None:
             entry.status = brief.coverage_status
         section_entries.append(entry)
 
     contract_entries: list[CoverageMatrixEntry] = []
-    if state.research_contract:
+    research_contract = getattr(state, "research_contract", None)
+    if research_contract:
         clauses = [
-            *state.research_contract.global_clauses,
-            *state.research_contract.section_clauses,
-            *state.research_contract.numeric_clauses,
-            *state.research_contract.counterevidence_clauses,
+            *research_contract.global_clauses,
+            *research_contract.section_clauses,
+            *research_contract.freshness_clauses,
+            *research_contract.numeric_clauses,
+            *research_contract.counterevidence_clauses,
         ]
         for clause in clauses:
             clause_sources: list[str] = []
@@ -762,10 +791,11 @@ def build_coverage_matrix(state: HarnessState) -> CoverageMatrix:
     freshness_entries = [
         _coverage_entry(
             "freshness",
-            requirement,
+            clause.id,
             dated_sources[:8],
+            notes=[clause.text],
         )
-        for requirement in (state.research_plan.freshness_requirements if state.research_plan else [])
+        for clause in (research_contract.freshness_clauses if research_contract else [])
     ]
 
     counter_sources = [
@@ -776,10 +806,11 @@ def build_coverage_matrix(state: HarnessState) -> CoverageMatrix:
     counter_entries = [
         _coverage_entry(
             "counterevidence",
-            topic,
+            clause.id,
             counter_sources[:8],
+            notes=[clause.text],
         )
-        for topic in (state.research_plan.counterevidence_topics if state.research_plan else [])
+        for clause in (research_contract.counterevidence_clauses if research_contract else [])
     ]
 
     evidence_types: list[CoverageMatrixEntry] = []
@@ -806,7 +837,7 @@ def build_coverage_matrix(state: HarnessState) -> CoverageMatrix:
     if "equity" in state.enabled_packs:
         evidence_types.append(_coverage_entry("evidence_type", "peer_or_competitor_evidence", peer_sources[:12]))
     evidence_types.append(_coverage_entry("evidence_type", "dated_current_evidence", dated_sources[:12]))
-    if state.research_plan and any(step.domain_pack for step in state.research_plan.steps):
+    if any(pack != "core" for pack in state.enabled_packs):
         evidence_types.append(_coverage_entry("evidence_type", "domain_tool_evidence", domain_tool_sources[:12]))
 
     successful_reads = sum(1 for item in state.read_results if item.status == "read")
@@ -818,7 +849,7 @@ def build_coverage_matrix(state: HarnessState) -> CoverageMatrix:
     ][:8]
     needs_more_retrieval = bool(
         next_priority_labels
-        or successful_reads < min(state.request.deep_successful_read_target, max(20, len(state.read_queue)))
+        or successful_reads < min(getattr(state.request, "successful_read_target", 12), max(8, len(state.read_queue)))
     )
 
     return CoverageMatrix(
@@ -835,21 +866,19 @@ def build_coverage_matrix(state: HarnessState) -> CoverageMatrix:
             "full_read_count": successful_reads,
             "source_card_count": len(state.source_cards),
             "fact_count": len(state.fact_index),
-            "extraction_batch_count": math.ceil(len(state.source_cards) / max(1, state.request.deep_read_batch_size)),
-            "qa_iteration_count": state.qa_iteration_count,
+            "extraction_batch_count": math.ceil(len(state.source_cards) / max(1, getattr(state.request, "read_batch_size", 10))),
+            "critic_report_count": len(state.critic_reports),
             "elapsed_seconds": round(state.elapsed_seconds, 2),
             "final_word_count": final_word_count,
-            "retrieval_wave_count": state.deep_retrieval_wave_count,
+            "retrieval_wave_count": state.retrieval_wave_count,
         },
     )
 
 
 def refresh_reduction_state(state: HarnessState) -> None:
-    """Rebuild the deep reduction layers and persist them to disk."""
+    """Rebuild the retrieval reduction layers and persist them to disk."""
 
-    if state.request.research_profile != "deep":
-        return
-    required_sections = state.research_plan.required_sections if state.research_plan else []
+    required_sections = list(getattr(state, "required_sections", []) or [])
     state.fact_index = build_fact_index(state.source_cards)
     state.section_briefs = build_section_briefs(required_sections, state.source_cards, state.fact_index)
     state.coverage_matrix = build_coverage_matrix(state)
@@ -857,17 +886,13 @@ def refresh_reduction_state(state: HarnessState) -> None:
 
 
 def merge_skill_result_into_corpus(state: HarnessState, result: SkillResult) -> None:
-    """Map non-deep skill outputs into the same normalized deep corpus."""
+    """Map non-retrieval skill outputs into the same normalized source corpus."""
 
-    if (
-        state.request.research_profile != "deep"
-        or result.skill_name == "deep_retrieval"
-        or not result.evidence
-    ):
+    if result.skill_name in {"retrieve_sources", "search_web_resources"} or not result.evidence:
         return
 
     existing_ids = {card.source_id for card in state.source_cards}
-    required_sections = state.research_plan.required_sections if state.research_plan else []
+    required_sections = list(getattr(state, "required_sections", []) or [])
     for item in result.evidence:
         source_id = item.id or _stable_id("EVID", f"{result.skill_name}|{item.summary}")
         if source_id in existing_ids:
@@ -905,7 +930,7 @@ def merge_skill_result_into_corpus(state: HarnessState, result: SkillResult) -> 
     refresh_reduction_state(state)
 
 
-def build_stage_output(state: HarnessState, stage: str, artifact_paths: list[str]) -> DeepRetrievalStageOutput:
+def build_stage_output(state: HarnessState, stage: str, artifact_paths: list[str]) -> RetrievalStageOutput:
     """Build the typed stage summary returned by the composite skill."""
 
     coverage_status = "needs_more_retrieval"
@@ -913,10 +938,10 @@ def build_stage_output(state: HarnessState, stage: str, artifact_paths: list[str
         coverage_status = "sufficient"
     successful_reads = sum(1 for item in state.read_results if item.status == "read")
     failed_reads = sum(1 for item in state.read_results if item.status == "failed")
-    return DeepRetrievalStageOutput(
+    return RetrievalStageOutput(
         stage=stage,  # type: ignore[arg-type]
-        query_bucket_count=len(state.deep_query_buckets),
-        query_count=sum(len(bucket.queries) for bucket in state.deep_query_buckets),
+        query_bucket_count=len(state.query_buckets),
+        query_count=sum(len(bucket.queries) for bucket in state.query_buckets),
         discovered_count=len(state.discovered_sources),
         deduped_count=len({item.source_id for item in state.discovered_sources}),
         read_queue_count=len(state.read_queue),

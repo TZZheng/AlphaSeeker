@@ -13,6 +13,7 @@ Usage::
 
     llm = get_llm("gemini-3-flash-preview")   # extraction tasks
     llm = get_llm("kimi-k2.5")                # writing tasks
+    llm = get_llm("minimax/MiniMax-M2.5")     # MiniMax via OpenAI-compatible API
 """
 
 import os
@@ -77,6 +78,37 @@ def _log_rate_limit(retry_state):
 def _secret_from_env(var_name: str) -> SecretStr | None:
     value = os.getenv(var_name)
     return SecretStr(value) if value else None
+
+
+def _is_minimax_model(name: str) -> bool:
+    normalized = name.lower()
+    return (
+        normalized.startswith("minimax/")
+        or normalized.startswith("minimax-")
+        or normalized.startswith("codex-minimax-")
+    )
+
+
+def _normalize_minimax_model_name(name: str) -> str:
+    if name.lower().startswith("minimax/"):
+        return name.split("/", 1)[1]
+    return name
+
+
+def _minimax_base_url() -> str:
+    return os.getenv("MINIMAX_BASE_URL", "https://api.minimaxi.com/v1")
+
+
+def _normalize_structured_output_kwargs_for_model(
+    model_name: str,
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    normalized = dict(kwargs)
+    if _is_minimax_model(model_name) and normalized.get("method") == "json_mode":
+        # MiniMax-M2.7 supports OpenAI-compatible tool calling, but its documented
+        # native JSON schema support is not for the reasoning model family.
+        normalized["method"] = "function_calling"
+    return normalized
 
 
 class SupportsModelOps(Protocol):
@@ -193,7 +225,8 @@ class RateLimitWrapper:
         # print(f"DEBUG: RateLimitWrapper.with_structured_output factory creation", flush=True)
         def new_factory(name: str) -> SupportsModelOps:
             base = self.model_factory(name)
-            return _bind_model_method(base, "with_structured_output", *args, **kwargs)
+            normalized_kwargs = _normalize_structured_output_kwargs_for_model(name, kwargs)
+            return _bind_model_method(base, "with_structured_output", *args, **normalized_kwargs)
         return RateLimitWrapper(new_factory, self.current_model_name)
 
     def bind_tools(self, *args, **kwargs):
@@ -265,6 +298,15 @@ def _build_model(model_name: str) -> RateLimitWrapper:
                 temperature=0.3,
                 base_url="https://api.siliconflow.cn/v1",
                 api_key=_secret_from_env("SILICONFLOW_API_KEY"),
+                max_retries=2,
+            )
+        elif _is_minimax_model(name):
+            from langchain_openai import ChatOpenAI
+            return ChatOpenAI(
+                model=_normalize_minimax_model_name(name),
+                temperature=0.3,
+                base_url=_minimax_base_url(),
+                api_key=_secret_from_env("MINIMAX_API_KEY"),
                 max_retries=2,
             )
         elif name.startswith("gemini-"):

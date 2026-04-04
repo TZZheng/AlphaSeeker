@@ -8,6 +8,7 @@
 # Supported provider prefixes:
 #   - "sf/*"       → SiliconFlow (e.g. "sf/Qwen/Qwen3-14B")
 #   - "kimi-*"     → Moonshot Kimi (e.g. "kimi-k2.5")
+#   - "minimax/*"  → MiniMax via OpenAI-compatible API (e.g. "minimax/MiniMax-M2.5")
 #   - "gemini-*"   → Google Gemini (e.g. "gemini-2.5-flash")
 #   - "gpt-*"      → OpenAI (e.g. "gpt-4o")
 #   - "claude-*"   → Anthropic (e.g. "claude-sonnet-4-20250514")
@@ -19,54 +20,48 @@
 # Supervisor Agent
 # ---------------------------------------------------------------------------
 supervisor:
-  classify: "sf/Qwen/Qwen3-8B"       # Intent classification (fast, cheap)
-  synthesize: "kimi-k2.5"               # Final multi-agent synthesis (high quality)
+  classify: "minimax/MiniMax-M2.7"
+  synthesize: "minimax/MiniMax-M2.7"
 
 # ---------------------------------------------------------------------------
 # Dynamic Harness
 # ---------------------------------------------------------------------------
 harness:
-  selector: "sf/Qwen/Qwen3-8B"
-  planner: "sf/Qwen/Qwen3-8B"
-  controller: "kimi-k2.5"
-  worker: "sf/Qwen/Qwen3-8B"
-  condense: "sf/Qwen/Qwen3-8B"
-  writer: "kimi-k2.5"
-  verify: "kimi-k2.5"
-  evaluator: "kimi-k2.5"
+  agent: "minimax/MiniMax-M2.7"
+  condense: "minimax/MiniMax-M2.7"
 
 # ---------------------------------------------------------------------------
 # Equity Research Sub-Agent
 # ---------------------------------------------------------------------------
 equity:
-  plan: "sf/Qwen/Qwen3-8B"             # Planner (structured output, fast)
-  condense: "sf/Qwen/Qwen3-8B"         # Context condensation (summarization)
-  followup: "sf/Qwen/Qwen3-8B"         # Follow-up query generation
-  map: "sf/Qwen/Qwen3-8B"              # Fact extraction from research chunks
-  reduce: "sf/Qwen/Qwen3-8B"           # Organize facts into section briefs
-  section: "kimi-k2.5"                  # Professional report writing
-  summary: "kimi-k2.5"                  # Investment summary synthesis
+  plan: "minimax/MiniMax-M2.7"
+  condense: "minimax/MiniMax-M2.7"
+  followup: "minimax/MiniMax-M2.7"
+  map: "minimax/MiniMax-M2.7"
+  reduce: "minimax/MiniMax-M2.7"
+  section: "minimax/MiniMax-M2.7"
+  summary: "minimax/MiniMax-M2.7"
 
 # ---------------------------------------------------------------------------
 # Macro & Nation Sub-Agent
 # ---------------------------------------------------------------------------
 macro:
-  plan: "sf/Qwen/Qwen3-8B"
-  condense: "sf/Qwen/Qwen3-8B"
-  followup: "sf/Qwen/Qwen3-8B"
-  map: "sf/Qwen/Qwen3-8B"
-  reduce: "sf/Qwen/Qwen3-8B"
-  section: "kimi-k2.5"
-  summary: "kimi-k2.5"
+  plan: "minimax/MiniMax-M2.7"
+  condense: "minimax/MiniMax-M2.7"
+  followup: "minimax/MiniMax-M2.7"
+  map: "minimax/MiniMax-M2.7"
+  reduce: "minimax/MiniMax-M2.7"
+  section: "minimax/MiniMax-M2.7"
+  summary: "minimax/MiniMax-M2.7"
 
 # ---------------------------------------------------------------------------
 # Commodity Sub-Agent
 # ---------------------------------------------------------------------------
 commodity:
-  plan: "sf/Qwen/Qwen3-8B"
-  condense: "sf/Qwen/Qwen3-8B"
-  followup: "sf/Qwen/Qwen3-8B"
-  map: "sf/Qwen/Qwen3-8B"
-  reduce: "sf/Qwen/Qwen3-8B"
-  section: "kimi-k2.5"
-  summary: "kimi-k2.5"
+  plan: "minimax/MiniMax-M2.7"
+  condense: "minimax/MiniMax-M2.7"
+  followup: "minimax/MiniMax-M2.7"
+  map: "minimax/MiniMax-M2.7"
+  reduce: "minimax/MiniMax-M2.7"
+  section: "minimax/MiniMax-M2.7"
+  summary: "minimax/MiniMax-M2.7"

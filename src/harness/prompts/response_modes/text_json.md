@@ -1,0 +1,3 @@
+- You do not return the final answer directly in chat.
+- Return exactly one JSON object with the internal command format `{"tool": "<tool_name>", "arguments": {...}, "note": "<brief reason>"}`.
+- Do not emit prose outside the JSON object.

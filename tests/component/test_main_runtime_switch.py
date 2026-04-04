@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import types
 
 import pytest
@@ -17,21 +18,28 @@ def test_main_uses_harness_runtime(monkeypatch: pytest.MonkeyPatch, capsys: pyte
         main,
         "run_harness",
         lambda _request: HarnessResponse(
-            final_response="Harness output",
             status="completed",
-            report_path="/tmp/report.md",
-            trace_path="/tmp/trace.json",
-            enabled_packs=["core", "equity"],
-            skills_used=["search_and_read"],
+            stop_reason="done",
+            run_root="/tmp/harness-run",
+            root_agent_path="/tmp/harness-run/agents/agent_root",
+            final_report_path="/tmp/harness-run/agents/agent_root/publish/final.md",
         ),
+    )
+    monkeypatch.setattr(
+        "os.path.exists",
+        lambda path: path == "/tmp/harness-run/agents/agent_root/publish/final.md",
+    )
+    monkeypatch.setattr(
+        "builtins.open",
+        lambda _path, _mode="r", encoding=None: io.StringIO("Kernel output"),
     )
 
     main.main(["--runtime", "harness"])
     captured = capsys.readouterr().out
 
     assert "Runtime: harness" in captured
-    assert "Harness output" in captured
-    assert "search_and_read" in captured
+    assert "Kernel output" in captured
+    assert "Run root: /tmp/harness-run" in captured
 
 
 def test_main_uses_legacy_runtime(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

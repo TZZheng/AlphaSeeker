@@ -1,0 +1,774 @@
+"""File-first tool backend for harness agents."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+from pathlib import Path
+import time
+from typing import Any
+from uuid import uuid4
+
+from src.harness.artifacts import (
+    agent_workspace_paths,
+    append_tool_history,
+    append_event,
+    build_reduction_paths,
+    create_agent_workspace,
+    latest_agent_records,
+    load_skill_state,
+    load_object_manifest,
+    promote_object,
+    read_status,
+    read_text,
+    refresh_progress_view,
+    save_skill_state,
+    write_status,
+    write_text_atomic,
+)
+from src.harness.presets import default_tool_allowlist, render_tools_markdown, visible_skills_for_preset
+from src.harness.registry import build_skill_registry, get_skills_for_packs
+from src.harness.skills.common import json_preview
+from src.harness.types import (
+    AGENT_PRESETS,
+    AgentCommand,
+    AgentEvent,
+    HarnessRequest,
+    HarnessState,
+    Observation,
+    SkillResult,
+    SkillSpec,
+)
+
+
+TOOL_NAMES = [
+    "spawn_subagent",
+    "list_children",
+    "wait_children",
+    "list_publish_files",
+    "promote_artifact",
+    "write_publish_file",
+    "write_scratch_file",
+    "set_status",
+]
+
+TERMINAL_STATUSES = {"done", "failed", "blocked", "stale", "cancelled"}
+
+_TYPE_MAP = {
+    "string": {"type": "string"},
+    "integer": {"type": "integer"},
+    "number": {"type": "number"},
+    "boolean": {"type": "boolean"},
+}
+_LEGAL_PRESET_LIST = ", ".join(f"'{preset}'" for preset in AGENT_PRESETS)
+
+
+@dataclass
+class AgentSession:
+    request: HarnessRequest
+    run_root: str
+    agent_id: str
+    preset: str
+    allowed_tools: list[str]
+    registry_map: dict[str, SkillSpec]
+    state: HarnessState
+
+    @property
+    def workspace(self) -> Path:
+        return agent_workspace_paths(self.run_root, self.agent_id)["workspace"]
+
+
+def create_or_load_session(
+    *,
+    request: HarnessRequest,
+    run_root: str,
+    agent_id: str,
+    preset: str,
+    registry_map: dict[str, SkillSpec] | None = None,
+) -> AgentSession:
+    registry = registry_map or build_skill_registry()
+    enabled_packs = request.available_skill_packs or ["core"]
+    allowed_skills = get_skills_for_packs(registry, enabled_packs)
+    state = load_skill_state(run_root, agent_id)
+    if state is None:
+        workspace = agent_workspace_paths(run_root, agent_id)["workspace"]
+        state = HarnessState(
+            request=request,
+            run_id=Path(run_root).name,
+            run_root=run_root,
+            agent_id=agent_id,
+            workspace_path=str(workspace),
+            dossier_paths=build_reduction_paths(workspace),
+            enabled_packs=enabled_packs,
+            available_skills=allowed_skills,
+        )
+        save_skill_state(state)
+    else:
+        state.request = request
+        state.run_root = run_root
+        state.agent_id = agent_id
+        state.available_skills = allowed_skills
+        state.enabled_packs = enabled_packs
+    return AgentSession(
+        request=request,
+        run_root=run_root,
+        agent_id=agent_id,
+        preset=preset,
+        allowed_tools=default_tool_allowlist(preset),
+        registry_map=registry,
+        state=state,
+    )
+
+
+def _tool_schema_properties(input_schema: dict[str, Any]) -> dict[str, Any]:
+    properties: dict[str, Any] = {}
+    for name, raw_type in input_schema.items():
+        if isinstance(raw_type, dict) and "type" in raw_type:
+            properties[name] = raw_type
+            continue
+        type_name = str(raw_type).strip()
+        if type_name.endswith("[]"):
+            item_type = type_name[:-2]
+            properties[name] = {
+                "type": "array",
+                "items": _TYPE_MAP.get(item_type, {"type": "string"}),
+            }
+            continue
+        properties[name] = _TYPE_MAP.get(type_name, {"type": "string"})
+    return properties
+
+
+def _tool_definitions() -> dict[str, dict[str, Any]]:
+    return {
+        "spawn_subagent": {
+            "description": (
+                "Launch a focused child agent for a delegated task. "
+                f"Legal preset values are: {_LEGAL_PRESET_LIST}. "
+                "Pass exact file paths in context_files when a child should read prior artifacts. "
+                "Those files will be copied into the child workspace and can be read later with read_file(path=...). "
+                "When possible, tell the child which published file or files you expect it to produce. "
+                "Check the returned capacity snapshot before spawning more children."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "task_name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "preset": {
+                        "type": "string",
+                        "enum": list(AGENT_PRESETS),
+                        "description": f"One of: {_LEGAL_PRESET_LIST}.",
+                    },
+                    "instructions": {"type": "string"},
+                    "context_files": {"type": "array", "items": {"type": "string"}},
+                    "expected_publish_files": {"type": "array", "items": {"type": "string"}},
+                    "task_markdown": {"type": "string"},
+                },
+            },
+        },
+        "list_children": {
+            "description": "List child agents and their compact published status.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        "wait_children": {
+            "description": (
+                "Wait for child agents and return compact summaries, published file paths, and promoted artifact paths "
+                "when they finish. Use short waits by default and synthesize from published child files instead of waiting unnecessarily."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "child_ids": {"type": "array", "items": {"type": "string"}},
+                    "timeout_seconds": {"type": "integer"},
+                    "require_all": {"type": "boolean"},
+                },
+            },
+        },
+        "list_publish_files": {
+            "description": "List stable published files for an agent.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"agent_id": {"type": "string"}},
+            },
+        },
+        "promote_artifact": {
+            "description": "Promote a local artifact into the shared run object store.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "source_path": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+            },
+        },
+        "write_publish_file": {
+            "description": (
+                "Write a stable published file for parent or user consumption. "
+                "Use this early for publish/summary.md and publish/artifact_index.md when a task is long-running."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "file_name": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+            },
+        },
+        "write_scratch_file": {
+            "description": "Write a scratch working file inside the current agent workspace.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "file_name": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+            },
+        },
+        "set_status": {
+            "description": "Set the current agent status when it is ready to stop or block.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string"},
+                    "error": {"type": "string"},
+                },
+            },
+        },
+}
+
+
+def _normalize_preset_name(raw_preset: str) -> str:
+    return raw_preset.strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _agent_budget_snapshot(session: AgentSession) -> dict[str, int]:
+    records = latest_agent_records(session.run_root)
+    live_agents = [
+        record
+        for record in records.values()
+        if record.status in {"running", "waiting"}
+    ]
+    live_children = [
+        record
+        for record in records.values()
+        if record.parent_id == session.agent_id and record.status in {"running", "waiting"}
+    ]
+    return {
+        "created_agents": len(records),
+        "remaining_agent_slots": max(0, session.request.max_agents_per_run - len(records)),
+        "queued_agents": sum(1 for record in records.values() if record.status == "queued"),
+        "live_agents": len(live_agents),
+        "remaining_live_agent_slots": max(0, session.request.max_live_agents - len(live_agents)),
+        "live_children_for_parent": len(live_children),
+        "remaining_live_child_slots": max(
+            0,
+            session.request.max_live_children_per_parent - len(live_children),
+        ),
+    }
+
+
+def model_tool_specs(session: AgentSession) -> list[dict[str, Any]]:
+    tools: list[dict[str, Any]] = []
+    base = _tool_definitions()
+    for name in session.allowed_tools:
+        if name not in base:
+            continue
+        spec = base[name]
+        tools.append(
+            {
+                "name": name,
+                "description": spec["description"],
+                "input_schema": spec["input_schema"],
+            }
+        )
+
+    for spec in visible_skills_for_preset(preset=session.preset, available_skills=session.state.available_skills):
+        tools.append(
+            {
+                "name": spec.name,
+                "description": spec.description,
+                "input_schema": {
+                    "type": "object",
+                    "properties": _tool_schema_properties(spec.input_schema),
+                },
+            }
+        )
+    return tools
+
+
+def execute_agent_command(session: AgentSession, command: AgentCommand) -> dict[str, Any]:
+    if command.tool not in session.allowed_tools:
+        raise ValueError(f"Tool '{command.tool}' is not allowed for preset '{session.preset}'.")
+    handler = _HANDLERS.get(command.tool)
+    if handler is None:
+        raise ValueError(f"Unknown tool '{command.tool}'.")
+    result = handler(session, command.arguments)
+    _append_journal(
+        session,
+        {
+            "tool": command.tool,
+            "arguments": command.arguments,
+            "result": result,
+            "note": command.note,
+            "created_at": _now_iso(),
+        },
+    )
+    save_skill_state(session.state)
+    refresh_progress_view(session.run_root)
+    return result
+
+
+def execute_model_tool(session: AgentSession, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    if tool_name in _HANDLERS:
+        if tool_name not in session.allowed_tools:
+            raise ValueError(f"Tool '{tool_name}' is not allowed for preset '{session.preset}'.")
+        result = _HANDLERS[tool_name](session, arguments)
+    else:
+        visible_skills = {spec.name: spec for spec in visible_skills_for_preset(preset=session.preset, available_skills=session.state.available_skills)}
+        if tool_name not in visible_skills:
+            raise ValueError(f"Tool '{tool_name}' is not available for preset '{session.preset}'.")
+        result = _run_skill(session, tool_name, arguments)
+
+    journal_row = {
+        "tool": tool_name,
+        "arguments": arguments,
+        "result": result,
+        "created_at": _now_iso(),
+    }
+    _append_journal(session, journal_row)
+    append_tool_history(session.run_root, session.agent_id, journal_row)
+    save_skill_state(session.state)
+    refresh_progress_view(session.run_root)
+    return result
+
+
+def _append_journal(session: AgentSession, payload: dict[str, Any]) -> None:
+    journal_path = agent_workspace_paths(session.run_root, session.agent_id)["journal"]
+    with journal_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(payload, ensure_ascii=True) + "\n")
+
+
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _record_observation(session: AgentSession, source: str, summary: str) -> None:
+    session.state.observations.append(
+        Observation(
+            id=f"O{len(session.state.observations) + 1}",
+            source=source,
+            summary=summary,
+        )
+    )
+
+
+def _assign_evidence_ids(session: AgentSession, result: SkillResult) -> None:
+    next_index = len(session.state.evidence_ledger) + 1
+    for offset, item in enumerate(result.evidence):
+        if not item.id:
+            item.id = f"E{next_index + offset}"
+
+
+def _skill_output_root(session: AgentSession, skill_name: str) -> Path:
+    root = agent_workspace_paths(session.run_root, session.agent_id)["scratch_root"] / "skills"
+    root.mkdir(parents=True, exist_ok=True)
+    index = len(session.state.skill_history) + 1
+    dest = root / f"{index:03d}_{skill_name}"
+    dest.mkdir(parents=True, exist_ok=True)
+    return dest
+
+
+def _run_skill(session: AgentSession, skill_name: str, skill_args: dict[str, Any]) -> dict[str, Any]:
+    spec = session.registry_map.get(skill_name)
+    if spec is None or spec.executor is None:
+        raise ValueError(f"Unknown skill '{skill_name}'.")
+
+    result = spec.executor(dict(skill_args), session.state)
+    _assign_evidence_ids(session, result)
+    session.state.skill_history.append(result)
+    session.state.evidence_ledger.extend(result.evidence)
+    session.state.last_error = result.error
+    _record_observation(session, f"skill:{skill_name}", result.summary)
+
+    output_root = _skill_output_root(session, skill_name)
+    output_files: list[str] = []
+    if result.output_text:
+        output_path = output_root / "output.md"
+        write_text_atomic(output_path, result.output_text)
+        output_files.append(str(output_path))
+    summary_path = output_root / "summary.md"
+    write_text_atomic(summary_path, result.summary + "\n")
+    output_files.append(str(summary_path))
+    details_path = output_root / "details.json"
+    write_text_atomic(details_path, json_preview(result.details))
+    output_files.append(str(details_path))
+    evidence_path: str | None = None
+    if result.evidence:
+        evidence_file = output_root / "evidence.json"
+        write_text_atomic(
+            evidence_file,
+            json.dumps([item.model_dump(mode="json") for item in result.evidence], indent=2, ensure_ascii=True),
+        )
+        evidence_path = str(evidence_file)
+        output_files.append(evidence_path)
+    artifact_manifest_path: str | None = None
+    if result.artifacts:
+        artifact_manifest = output_root / "artifacts.txt"
+        write_text_atomic(artifact_manifest, "\n".join(result.artifacts) + "\n")
+        artifact_manifest_path = str(artifact_manifest)
+        output_files.append(artifact_manifest_path)
+
+    append_event(
+        session.run_root,
+        AgentEvent(
+            event_type="skill_executed",
+            agent_id=session.agent_id,
+            details={
+                "skill_name": skill_name,
+                "status": result.status,
+                "summary": result.summary,
+                "output_root": str(output_root),
+            },
+        ),
+    )
+    return {
+        "skill_name": skill_name,
+        "status": result.status,
+        "summary": result.summary,
+        "output_root": str(output_root),
+        "artifact_paths": list(result.artifacts),
+        "output_files": output_files,
+        "primary_artifact_path": result.artifacts[0] if result.artifacts else "",
+        "summary_path": str(summary_path),
+        "details_path": str(details_path),
+        "evidence_path": evidence_path or "",
+        "artifacts_manifest_path": artifact_manifest_path or "",
+        "artifact_count": len(result.artifacts),
+        "evidence_count": len(result.evidence),
+        "error": result.error,
+        "content": (
+            result.output_text
+            if skill_name in {"read_file", "read_web_pages", "condense_context"}
+            else ""
+        ),
+        "details": result.details,
+    }
+
+
+def _handle_call_skill(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
+    skill_name = str(arguments.get("skill_name") or arguments.get("name") or "").strip()
+    skill_args = arguments.get("arguments") or {}
+    if not skill_name:
+        raise ValueError("call_skill requires skill_name.")
+    return _run_skill(session, skill_name, skill_args)
+
+
+def _render_child_task_markdown(
+    task_name: str,
+    description: str,
+    instructions: str,
+    expected_publish_files: list[str],
+) -> str:
+    output_lines = [f"- `{name}`" for name in expected_publish_files if name.strip()]
+    if not output_lines:
+        output_lines = ["- Use the published file or files your parent asked for."]
+    return "\n".join(
+        [
+            f"# {task_name}",
+            "",
+            "## One-Line Goal",
+            description.strip(),
+            "",
+            "## Instructions",
+            instructions.strip() or description.strip(),
+            "",
+            "## Expected Published Outputs",
+            *output_lines,
+            "",
+            "## Success Criteria",
+            "- Publish early progress to `publish/summary.md` if the task is long-running.",
+            "- Publish the main child result to the file or files listed above.",
+            "- `publish/summary.md` and `publish/artifact_index.md` are recommended because they help the parent synthesize or recover quickly.",
+        ]
+    )
+
+
+def _handle_spawn_subagent(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
+    records = latest_agent_records(session.run_root)
+    if len(records) >= session.request.max_agents_per_run:
+        raise ValueError(
+            f"Run-wide agent budget exhausted: {len(records)}/{session.request.max_agents_per_run} agents already exist."
+        )
+
+    task_name = str(arguments.get("task_name") or "Child Task").strip()
+    description = str(arguments.get("description") or task_name).strip()
+    raw_preset = str(arguments.get("preset") or "research").strip()
+    preset = _normalize_preset_name(raw_preset)
+    if preset not in AGENT_PRESETS:
+        raise ValueError(
+            f"Unknown child preset '{raw_preset}'. Legal presets: {_LEGAL_PRESET_LIST}."
+        )
+    instructions = str(arguments.get("instructions") or "").strip()
+    context_files = [str(item) for item in arguments.get("context_files") or []]
+    expected_publish_files = [str(item).strip() for item in arguments.get("expected_publish_files") or [] if str(item).strip()]
+    agent_id = f"agent_{uuid4().hex[:8]}"
+    child_task = str(
+        arguments.get("task_markdown")
+        or _render_child_task_markdown(task_name, description, instructions, expected_publish_files)
+    )
+    child_registry = visible_skills_for_preset(
+        preset=preset,
+        available_skills=get_skills_for_packs(session.registry_map, session.request.available_skill_packs or ["core"]),
+    )
+    tools_markdown = render_tools_markdown(
+        preset=preset,
+        available_tools=default_tool_allowlist(preset),
+        available_skills=child_registry,
+    )
+
+    create_agent_workspace(
+        session.run_root,
+        agent_id=agent_id,
+        parent_id=session.agent_id,
+        preset=preset,
+        task_name=task_name,
+        description=description,
+        task_markdown=child_task,
+        tools_markdown=tools_markdown,
+        context_files=context_files,
+    )
+    append_event(
+        session.run_root,
+        AgentEvent(
+            event_type="spawn_requested",
+            agent_id=agent_id,
+            parent_id=session.agent_id,
+            details={"preset": preset, "description": description},
+        ),
+    )
+    return {
+        "agent_id": agent_id,
+        "preset": preset,
+        "description": description,
+        "status": "queued",
+        "summary_path": str(agent_workspace_paths(session.run_root, agent_id)["publish_summary"]),
+        "artifact_index_path": str(agent_workspace_paths(session.run_root, agent_id)["publish_index"]),
+        "final_path": str(agent_workspace_paths(session.run_root, agent_id)["publish_final"]),
+        "expected_publish_files": expected_publish_files,
+        "budget": _agent_budget_snapshot(session),
+    }
+
+
+def _child_rows(session: AgentSession) -> list[dict[str, Any]]:
+    promoted_by_agent: dict[str, list[dict[str, str]]] = {}
+    for row in load_object_manifest(session.run_root):
+        agent_id = str(row.get("agent_id") or "")
+        if not agent_id:
+            continue
+        promoted_by_agent.setdefault(agent_id, []).append(
+            {
+                "object_id": str(row.get("object_id") or ""),
+                "path": str(row.get("object_path") or ""),
+                "description": str(row.get("description") or ""),
+            }
+        )
+    rows: list[dict[str, Any]] = []
+    for record in latest_agent_records(session.run_root).values():
+        if record.parent_id != session.agent_id:
+            continue
+        paths = agent_workspace_paths(session.run_root, record.agent_id)
+        publish_files = _publish_file_rows(session.run_root, record.agent_id)
+        rows.append(
+            {
+                "agent_id": record.agent_id,
+                "preset": record.preset,
+                "status": record.status,
+                "description": record.description,
+                "summary_path": str(paths["publish_summary"]),
+                "artifact_index_path": str(paths["publish_index"]),
+                "final_path": str(paths["publish_final"]),
+                "has_summary": paths["publish_summary"].exists(),
+                "has_artifact_index": paths["publish_index"].exists(),
+                "has_final": paths["publish_final"].exists(),
+                "publish_files": publish_files,
+                "promoted_artifacts": promoted_by_agent.get(record.agent_id, []),
+                "summary_excerpt": _describe_file(paths["publish_summary"]),
+                "error": record.error or "",
+            }
+        )
+    return sorted(rows, key=lambda item: item["agent_id"])
+
+
+def _handle_list_children(session: AgentSession, _arguments: dict[str, Any]) -> dict[str, Any]:
+    rows = _child_rows(session)
+    return {"children": rows, "count": len(rows), "budget": _agent_budget_snapshot(session)}
+
+
+def _handle_wait_children(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
+    target_ids = {str(item) for item in arguments.get("child_ids") or []}
+    timeout_seconds = int(arguments.get("timeout_seconds", 30))
+    require_all = bool(arguments.get("require_all", True))
+    start = time.time()
+    write_status(session.run_root, session.agent_id, "waiting")
+    while True:
+        rows = _child_rows(session)
+        if target_ids:
+            rows = [row for row in rows if row["agent_id"] in target_ids]
+        terminal = [row for row in rows if row["status"] in TERMINAL_STATUSES]
+        if rows and ((require_all and len(terminal) == len(rows)) or (not require_all and terminal)):
+            write_status(session.run_root, session.agent_id, "running")
+            return {
+                "children": terminal if not require_all else rows,
+                "completed": True,
+                "budget": _agent_budget_snapshot(session),
+            }
+        if time.time() - start >= timeout_seconds:
+            write_status(session.run_root, session.agent_id, "running")
+            return {
+                "children": rows,
+                "completed": False,
+                "timed_out": True,
+                "budget": _agent_budget_snapshot(session),
+            }
+        time.sleep(1)
+
+
+def _describe_file(path: Path) -> str:
+    if not path.exists() or not path.is_file():
+        return ""
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line:
+            return line[:160]
+    return ""
+
+
+def _handle_list_publish_files(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
+    target_agent = str(arguments.get("agent_id") or session.agent_id).strip()
+    return {"agent_id": target_agent, "files": _publish_file_rows(session.run_root, target_agent)}
+
+
+def _publish_file_rows(run_root: str, agent_id: str) -> list[dict[str, str]]:
+    publish_root = agent_workspace_paths(run_root, agent_id)["publish_root"]
+    rows: list[dict[str, str]] = []
+    if publish_root.exists():
+        for path in sorted(publish_root.rglob("*")):
+            if not path.is_file():
+                continue
+            rows.append(
+                {
+                    "name": path.relative_to(publish_root).as_posix(),
+                    "path": str(path),
+                    "description": _describe_file(path),
+                }
+            )
+    return rows
+
+
+def _safe_relative_path(file_name: str) -> Path:
+    relative = Path(file_name)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("Illegal file path.")
+    return relative
+
+
+def _safe_rooted_relative_path(file_name: str, *, root_name: str) -> Path:
+    relative = _safe_relative_path(file_name)
+    parts = list(relative.parts)
+    if parts and parts[0] == root_name:
+        relative = Path(*parts[1:]) if len(parts) > 1 else Path()
+    if not relative.parts:
+        raise ValueError(f"Illegal file path inside {root_name}/.")
+    return relative
+
+
+def _handle_read_publish_file(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
+    target_agent = str(arguments.get("agent_id") or session.agent_id).strip()
+    file_name = str(arguments.get("file_name") or "summary.md").strip()
+    max_chars = int(arguments.get("max_chars", 4000))
+    relative = _safe_rooted_relative_path(file_name, root_name="publish")
+    path = agent_workspace_paths(session.run_root, target_agent)["publish_root"] / relative
+    text = read_text(path)
+    clipped = text[:max_chars]
+    if len(text) > max_chars:
+        clipped += f"\n\n[truncated at {max_chars} chars]"
+    return {"path": str(path), "content": clipped, "description": _describe_file(path)}
+
+
+def _handle_promote_artifact(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
+    source_path = str(arguments.get("source_path") or "").strip()
+    if not source_path:
+        raise ValueError("promote_artifact requires source_path.")
+    description = str(arguments.get("description") or Path(source_path).name).strip()
+    promoted = promote_object(
+        session.run_root,
+        source_path=source_path,
+        description=description,
+        agent_id=session.agent_id,
+    )
+    promoted["source_path"] = source_path
+    return promoted
+
+
+def _handle_write_publish_file(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
+    file_name = str(arguments.get("file_name") or "").strip()
+    content = str(arguments.get("content") or "")
+    if not file_name:
+        raise ValueError("write_publish_file requires file_name.")
+    relative = _safe_rooted_relative_path(file_name, root_name="publish")
+    path = agent_workspace_paths(session.run_root, session.agent_id)["publish_root"] / relative
+    write_text_atomic(path, content)
+    append_event(
+        session.run_root,
+        AgentEvent(
+            event_type="publish_updated",
+            agent_id=session.agent_id,
+            details={"path": str(path), "file_name": relative.as_posix()},
+        ),
+    )
+    return {"path": str(path), "description": _describe_file(path)}
+
+
+def _handle_write_scratch_file(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
+    file_name = str(arguments.get("file_name") or "").strip()
+    content = str(arguments.get("content") or "")
+    if not file_name:
+        raise ValueError("write_scratch_file requires file_name.")
+    relative = _safe_rooted_relative_path(file_name, root_name="scratch")
+    path = agent_workspace_paths(session.run_root, session.agent_id)["scratch_root"] / relative
+    write_text_atomic(path, content)
+    return {"path": str(path), "description": _describe_file(path)}
+
+
+def _handle_set_status(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
+    status = str(arguments.get("status") or "").strip()
+    if status not in {"queued", "running", "waiting", "done", "failed", "blocked"}:
+        raise ValueError(f"Illegal status '{status}'.")
+    write_status(session.run_root, session.agent_id, status)
+    error = str(arguments.get("error") or "").strip()
+    append_event(
+        session.run_root,
+        AgentEvent(
+            event_type="status_set",
+            agent_id=session.agent_id,
+            details={"status": status, "error": error},
+        ),
+    )
+    if error:
+        session.state.last_error = error
+    return {"status": status, "error": error}
+
+
+_HANDLERS = {
+    "call_skill": _handle_call_skill,
+    "spawn_subagent": _handle_spawn_subagent,
+    "spawn_agent": _handle_spawn_subagent,
+    "list_children": _handle_list_children,
+    "wait_children": _handle_wait_children,
+    "list_publish_files": _handle_list_publish_files,
+    "read_publish_file": _handle_read_publish_file,
+    "promote_artifact": _handle_promote_artifact,
+    "write_publish_file": _handle_write_publish_file,
+    "write_scratch_file": _handle_write_scratch_file,
+    "set_status": _handle_set_status,
+}

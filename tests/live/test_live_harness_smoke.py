@@ -1,81 +1,61 @@
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+from pathlib import Path
 
 import pytest
 
+from src.harness.artifacts import agent_workspace_paths, write_text_atomic, write_status
 from src.harness.runtime import run_harness
-from src.harness.types import ControllerDecision, HarnessRequest
-from src.shared.model_config import get_missing_provider_env_vars
-from src.shared import web_search
-from src.harness.skills import core as core_skills
+from src.harness.types import HarnessRequest
 
-pytestmark = [pytest.mark.live, pytest.mark.network]
+pytestmark = pytest.mark.live
 
 
-def _assert_live_model_env_ready() -> None:
-    missing = get_missing_provider_env_vars()
-    if missing:
-        formatted = ", ".join(f"{provider}: {env_req}" for provider, env_req in missing.items())
-        pytest.fail(
-            "Live harness test cannot run because required model-provider keys are missing: "
-            f"{formatted}"
-        )
+class _FakeProcess:
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self.returncode: int | None = None
+
+    def terminate(self) -> None:
+        if self.returncode is None:
+            self.returncode = -15
+
+    def kill(self) -> None:
+        if self.returncode is None:
+            self.returncode = -9
+
+    async def wait(self) -> int:
+        while self.returncode is None:
+            await asyncio.sleep(0.01)
+        return self.returncode
 
 
-def _configure_live_smoke_limits(monkeypatch: pytest.MonkeyPatch) -> None:
-    original_deep_search = web_search.deep_search
+def test_harness_smoke_with_injected_kernel_launcher(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
 
-    def _capped_deep_search(
-        queries: list[str],
-        urls_per_query: int = 3,
-        max_workers: int = 15,
-        max_chars_per_url: int = 8000,
-        search_delay: float = 0.3,
-        use_news: bool = False,
-        download_timeout_seconds: int = 12,
-        extraction_timeout_seconds: int = 12,
-    ) -> list[dict[str, str]]:
-        return original_deep_search(
-            queries=queries[:1],
-            urls_per_query=min(urls_per_query, 1),
-            max_workers=min(max_workers, 2),
-            max_chars_per_url=min(max_chars_per_url, 2500),
-            search_delay=max(search_delay, 0.2),
-            use_news=use_news,
-            download_timeout_seconds=download_timeout_seconds,
-            extraction_timeout_seconds=extraction_timeout_seconds,
-        )
+    async def _launcher(run_root: str, agent_id: str):
+        process = _FakeProcess(9001)
 
-    monkeypatch.setattr(web_search, "deep_search", _capped_deep_search)
-    monkeypatch.setattr(core_skills, "deep_search", _capped_deep_search)
+        async def _runner() -> None:
+            await asyncio.sleep(0.05)
+            paths = agent_workspace_paths(run_root, agent_id)
+            write_text_atomic(paths["publish_summary"], "root summary\n")
+            write_text_atomic(paths["publish_index"], "- final.md: Final response\n")
+            write_text_atomic(paths["publish_final"], "# Final\n\nKernel smoke output.\n")
+            write_status(run_root, agent_id, "done")
+            process.returncode = 0
 
-
-def test_live_harness_smoke_equity_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
-    _assert_live_model_env_ready()
-    _configure_live_smoke_limits(monkeypatch)
-
-    decisions = iter(
-        [
-            ControllerDecision(
-                action="call_skill",
-                rationale="Gather evidence",
-                skill_call={"name": "search_and_read", "arguments": {"queries": ["AAPL latest valuation risk"], "urls_per_query": 1}},
-            ),
-            ControllerDecision(action="draft", rationale="Write draft"),
-        ]
-    )
+        asyncio.create_task(_runner())
+        return process
 
     response = run_harness(
-        HarnessRequest(
-            user_prompt="Analyze AAPL valuation and risk using current evidence.",
-            selected_packs=["core", "equity"],
-            max_steps=4,
-        ),
-        controller_fn=lambda _state: next(decisions),
+        HarnessRequest(user_prompt="Analyze AAPL", run_id="live-smoke"),
+        launch_agent_process=_launcher,
     )
 
     assert response.status == "completed"
-    assert response.final_response.strip()
-    assert response.report_path
-    assert response.trace_path
+    assert Path(response.final_report_path or "").exists()

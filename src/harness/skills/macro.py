@@ -7,7 +7,7 @@ from typing import Any
 from src.agents.macro.tools.fred import fetch_macro_indicators
 from src.agents.macro.tools.world_bank import fetch_world_bank_indicators
 from src.harness.skills.common import artifact_evidence, make_result, safe_read
-from src.harness.types import HarnessState, SkillResult, SkillSpec
+from src.harness.types import HarnessState, SkillMetrics, SkillResult, SkillSpec
 
 
 def fetch_macro_indicators_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillResult:
@@ -29,7 +29,7 @@ def fetch_macro_indicators_skill(arguments: dict[str, Any], _state: HarnessState
             arguments,
             status="partial",
             summary=f"No macro-indicator artifact was produced for '{topic}'.",
-            structured_data={"topic": topic, "countries": list(countries), "metadata": metadata},
+            details={"topic": topic, "countries": list(countries), "metadata": metadata},
             error="Indicator source unavailable.",
         )
     text = safe_read(path, max_chars=5000)
@@ -38,7 +38,12 @@ def fetch_macro_indicators_skill(arguments: dict[str, Any], _state: HarnessState
         arguments,
         status="ok",
         summary=f"Fetched macro indicators for '{topic}'.",
-        structured_data={"topic": topic, "countries": list(countries), "metadata": metadata, "path": path},
+        details={"topic": topic, "countries": list(countries), "metadata": metadata, "path": path},
+        metrics=SkillMetrics(
+            evidence_count=1,
+            artifact_count=1,
+            sections_touched=["Macro Transmission", "Scenarios"],
+        ),
         output_text=text,
         artifacts=[path],
         evidence=[artifact_evidence("fetch_macro_indicators", f"Macro indicators for {topic}.", path, content=text, metadata=metadata)],
@@ -69,7 +74,7 @@ def fetch_world_bank_indicators_skill(arguments: dict[str, Any], _state: Harness
             arguments,
             status="partial",
             summary="World Bank indicators returned no artifact.",
-            structured_data={"countries": countries, "metadata": metadata},
+            details={"countries": countries, "metadata": metadata},
             error="World Bank source unavailable.",
         )
     text = safe_read(path, max_chars=5000)
@@ -78,7 +83,12 @@ def fetch_world_bank_indicators_skill(arguments: dict[str, Any], _state: Harness
         arguments,
         status="ok",
         summary=f"Fetched World Bank indicators for {', '.join(countries)}.",
-        structured_data={"countries": countries, "metadata": metadata, "path": path},
+        details={"countries": countries, "metadata": metadata, "path": path},
+        metrics=SkillMetrics(
+            evidence_count=1,
+            artifact_count=1,
+            sections_touched=["Macro Transmission", "Scenarios"],
+        ),
         output_text=text,
         artifacts=[path],
         evidence=[artifact_evidence("fetch_world_bank_indicators", f"World Bank indicators for {', '.join(countries)}.", path, content=text, metadata=metadata)],

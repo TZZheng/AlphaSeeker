@@ -133,9 +133,12 @@ At startup, AlphaSeeker checks whether the API keys required by your active mode
 |---|---|
 | `sf/` | `SILICONFLOW_API_KEY` |
 | `kimi-` | `KIMI_API_KEY` |
+| `minimax/` or `MiniMax-*` | `MINIMAX_API_KEY` |
 | `gpt-` or `o*` | `OPENAI_API_KEY` |
 | `gemini-` | `GOOGLE_API_KEY` |
 | `claude-` | `ANTHROPIC_API_KEY` |
+
+If you use MiniMax, the backend term `base URL` means the root HTTP endpoint your client sends API requests to. AlphaSeeker defaults to `https://api.minimaxi.com/v1`, and you can override it with `MINIMAX_BASE_URL` if you need a different endpoint.
 
 ### Route-specific data keys
 

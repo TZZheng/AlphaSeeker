@@ -6,7 +6,7 @@ import json
 import os
 from typing import Any
 
-from src.harness.types import EvidenceItem, SkillResult
+from src.harness.types import EvidenceItem, SkillMetrics, SkillResult
 
 
 def ensure_str_list(value: Any) -> list[str]:
@@ -85,21 +85,35 @@ def make_result(
     *,
     status: str,
     summary: str,
-    structured_data: dict[str, Any] | None = None,
+    details: dict[str, Any] | None = None,
+    metrics: SkillMetrics | dict[str, Any] | None = None,
     output_text: str | None = None,
     artifacts: list[str] | None = None,
     evidence: list[EvidenceItem] | None = None,
     error: str | None = None,
 ) -> SkillResult:
+    artifact_list = artifacts or []
+    evidence_list = evidence or []
+    if metrics is None:
+        metric_payload = SkillMetrics(
+            evidence_count=len(evidence_list),
+            artifact_count=len(artifact_list),
+            dated_evidence_count=sum(1 for item in evidence_list if item.metadata.get("date")),
+        )
+    elif isinstance(metrics, SkillMetrics):
+        metric_payload = metrics
+    else:
+        metric_payload = SkillMetrics.model_validate(metrics)
     return SkillResult(
         skill_name=skill_name,
         arguments=arguments,
         status=status,
         summary=summary,
-        structured_data=structured_data or {},
+        details=details or {},
+        metrics=metric_payload,
         output_text=output_text,
-        artifacts=artifacts or [],
-        evidence=evidence or [],
+        artifacts=artifact_list,
+        evidence=evidence_list,
         error=error,
     )
 

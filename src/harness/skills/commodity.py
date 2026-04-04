@@ -8,7 +8,7 @@ from src.agents.commodity.tools.cftc import fetch_cot_report
 from src.agents.commodity.tools.eia import fetch_eia_inventory
 from src.agents.commodity.tools.futures import fetch_futures_curve
 from src.harness.skills.common import artifact_evidence, make_result, safe_read
-from src.harness.types import HarnessState, SkillResult, SkillSpec
+from src.harness.types import HarnessState, SkillMetrics, SkillResult, SkillSpec
 
 
 def fetch_eia_inventory_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillResult:
@@ -29,7 +29,7 @@ def fetch_eia_inventory_skill(arguments: dict[str, Any], _state: HarnessState) -
             arguments,
             status="partial",
             summary=f"EIA has no artifact for asset '{asset}'.",
-            structured_data={"asset": asset, "metadata": metadata},
+            details={"asset": asset, "metadata": metadata},
             error="No EIA artifact generated.",
         )
     text = safe_read(path, max_chars=5000)
@@ -38,7 +38,12 @@ def fetch_eia_inventory_skill(arguments: dict[str, Any], _state: HarnessState) -
         arguments,
         status="ok",
         summary=f"Fetched EIA inventory data for {asset}.",
-        structured_data={"asset": asset, "metadata": metadata, "path": path},
+        details={"asset": asset, "metadata": metadata, "path": path},
+        metrics=SkillMetrics(
+            evidence_count=1,
+            artifact_count=1,
+            sections_touched=["Commodity Balance"],
+        ),
         output_text=text,
         artifacts=[path],
         evidence=[artifact_evidence("fetch_eia_inventory", f"EIA inventory data for {asset}.", path, content=text, metadata=metadata)],
@@ -64,7 +69,7 @@ def fetch_cot_report_skill(arguments: dict[str, Any], _state: HarnessState) -> S
             arguments,
             status="partial",
             summary=f"No COT artifact was generated for {asset}.",
-            structured_data={"asset": asset, "metadata": metadata},
+            details={"asset": asset, "metadata": metadata},
             error="No COT artifact generated.",
         )
     text = safe_read(path, max_chars=5000)
@@ -73,7 +78,12 @@ def fetch_cot_report_skill(arguments: dict[str, Any], _state: HarnessState) -> S
         arguments,
         status="ok",
         summary=f"Fetched CFTC COT positioning for {asset}.",
-        structured_data={"asset": asset, "metadata": metadata, "path": path},
+        details={"asset": asset, "metadata": metadata, "path": path},
+        metrics=SkillMetrics(
+            evidence_count=1,
+            artifact_count=1,
+            sections_touched=["Curve and Positioning", "Risks and Counterevidence"],
+        ),
         output_text=text,
         artifacts=[path],
         evidence=[artifact_evidence("fetch_cot_report", f"COT positioning for {asset}.", path, content=text, metadata=metadata)],
@@ -99,7 +109,7 @@ def fetch_futures_curve_skill(arguments: dict[str, Any], _state: HarnessState) -
             arguments,
             status="partial",
             summary=f"No futures-curve artifact was generated for {asset}.",
-            structured_data={"asset": asset, "metadata": metadata},
+            details={"asset": asset, "metadata": metadata},
             error="No futures-curve artifact generated.",
         )
     text = safe_read(path, max_chars=5000)
@@ -108,7 +118,12 @@ def fetch_futures_curve_skill(arguments: dict[str, Any], _state: HarnessState) -
         arguments,
         status="ok",
         summary=f"Fetched futures curve data for {asset}.",
-        structured_data={"asset": asset, "metadata": metadata, "path": path},
+        details={"asset": asset, "metadata": metadata, "path": path},
+        metrics=SkillMetrics(
+            evidence_count=1,
+            artifact_count=1,
+            sections_touched=["Curve and Positioning"],
+        ),
         output_text=text,
         artifacts=[path],
         evidence=[artifact_evidence("fetch_futures_curve", f"Futures curve for {asset}.", path, content=text, metadata=metadata)],

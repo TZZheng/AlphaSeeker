@@ -1,0 +1,441 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from src.harness.artifacts import (
+    agent_workspace_paths,
+    create_agent_workspace,
+    initialize_run_root,
+    update_agent_record,
+    write_status,
+    write_text_atomic,
+)
+from src.harness import executor as executor_module
+from src.harness.executor import create_or_load_session, execute_model_tool
+from src.harness.presets import default_tool_allowlist, render_root_task_markdown, render_tools_markdown, visible_skills_for_preset
+from src.harness.registry import build_skill_registry, get_skills_for_packs
+from src.harness.types import HarnessRequest, SkillMetrics, SkillResult, SkillSpec
+
+
+def test_wait_children_returns_compact_child_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    request = HarnessRequest(user_prompt="Delegate a short task", run_id="executor-wait")
+    run_root, root_agent_id = initialize_run_root(request)
+    registry = build_skill_registry()
+    create_agent_workspace(
+        run_root,
+        agent_id=root_agent_id,
+        parent_id="",
+        preset="orchestrator",
+        task_name="Root Task",
+        description="Delegate work.",
+        task_markdown=render_root_task_markdown(request.user_prompt),
+        tools_markdown=render_tools_markdown(
+            preset="orchestrator",
+            available_tools=default_tool_allowlist("orchestrator"),
+            available_skills=visible_skills_for_preset(
+                preset="orchestrator",
+                available_skills=get_skills_for_packs(registry, ["core", "equity"]),
+            ),
+        ),
+    )
+    create_agent_workspace(
+        run_root,
+        agent_id="agent_child",
+        parent_id=root_agent_id,
+        preset="writer",
+        task_name="Child Task",
+        description="Write a compact answer.",
+        task_markdown="# Child\n\nWrite the answer.\n",
+        tools_markdown=render_tools_markdown(
+            preset="writer",
+            available_tools=default_tool_allowlist("writer"),
+            available_skills=[],
+        ),
+    )
+    child_paths = agent_workspace_paths(run_root, "agent_child")
+    write_text_atomic(child_paths["publish_summary"], "Child summary line\n\nMore detail.\n")
+    write_text_atomic(child_paths["publish_index"], "- final.md: Child final\n")
+    write_text_atomic(child_paths["publish_final"], "# Child\n\nDone.\n")
+    write_status(run_root, "agent_child", "done")
+    update_agent_record(run_root, agent_id="agent_child", status="done")
+
+    session = create_or_load_session(
+        request=request,
+        run_root=str(run_root),
+        agent_id=root_agent_id,
+        preset="orchestrator",
+        registry_map=registry,
+    )
+
+    result = execute_model_tool(
+        session,
+        "wait_children",
+        {"child_ids": ["agent_child"], "timeout_seconds": 0, "require_all": True},
+    )
+
+    assert result["completed"] is True
+    child = result["children"][0]
+    assert child["agent_id"] == "agent_child"
+    assert child["summary_excerpt"] == "Child summary line"
+    assert child["final_path"].endswith("publish/final.md")
+    assert child["has_summary"] is True
+    assert child["has_artifact_index"] is True
+    assert child["has_final"] is True
+    assert child["publish_files"][0]["path"].endswith("publish/artifact_index.md")
+    assert "remaining_agent_seconds" not in result["budget"]
+    assert "remaining_agent_slots" in result["budget"]
+    assert "remaining_live_child_slots" in result["budget"]
+    assert "tool_history" not in child
+
+
+def test_spawn_subagent_rejects_unknown_preset_and_lists_legal_presets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    request = HarnessRequest(user_prompt="Delegate a task", run_id="executor-spawn")
+    run_root, root_agent_id = initialize_run_root(request)
+    registry = build_skill_registry()
+    create_agent_workspace(
+        run_root,
+        agent_id=root_agent_id,
+        parent_id="",
+        preset="orchestrator",
+        task_name="Root Task",
+        description="Delegate work.",
+        task_markdown=render_root_task_markdown(request.user_prompt),
+        tools_markdown=render_tools_markdown(
+            preset="orchestrator",
+            available_tools=default_tool_allowlist("orchestrator"),
+            available_skills=[],
+        ),
+    )
+    session = create_or_load_session(
+        request=request,
+        run_root=str(run_root),
+        agent_id=root_agent_id,
+        preset="orchestrator",
+        registry_map=registry,
+    )
+
+    with pytest.raises(ValueError, match="Legal presets: 'orchestrator', 'research', 'source_triage', 'writer', 'synthesizer', 'evaluator'"):
+        execute_model_tool(
+            session,
+            "spawn_subagent",
+            {"task_name": "child", "description": "Do work", "preset": "analysis"},
+        )
+
+
+def test_spawn_subagent_can_record_expected_publish_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    request = HarnessRequest(user_prompt="Delegate a task", run_id="executor-spawn-outputs")
+    run_root, root_agent_id = initialize_run_root(request)
+    registry = build_skill_registry()
+    create_agent_workspace(
+        run_root,
+        agent_id=root_agent_id,
+        parent_id="",
+        preset="orchestrator",
+        task_name="Root Task",
+        description="Delegate work.",
+        task_markdown=render_root_task_markdown(request.user_prompt),
+        tools_markdown=render_tools_markdown(
+            preset="orchestrator",
+            available_tools=default_tool_allowlist("orchestrator"),
+            available_skills=[],
+        ),
+    )
+    session = create_or_load_session(
+        request=request,
+        run_root=str(run_root),
+        agent_id=root_agent_id,
+        preset="orchestrator",
+        registry_map=registry,
+    )
+
+    result = execute_model_tool(
+        session,
+        "spawn_subagent",
+        {
+            "task_name": "child",
+            "description": "Do focused work",
+            "preset": "research",
+            "expected_publish_files": ["publish/financials_valuation.md"],
+        },
+    )
+
+    child_task = (agent_workspace_paths(run_root, result["agent_id"])["task"]).read_text(encoding="utf-8")
+
+    assert result["expected_publish_files"] == ["publish/financials_valuation.md"]
+    assert "## Expected Published Outputs" in child_task
+    assert "`publish/financials_valuation.md`" in child_task
+
+
+def test_skill_results_return_exact_artifact_and_output_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    request = HarnessRequest(user_prompt="Run a deterministic skill", run_id="executor-skill-paths")
+    run_root, root_agent_id = initialize_run_root(request)
+    registry = build_skill_registry()
+    create_agent_workspace(
+        run_root,
+        agent_id=root_agent_id,
+        parent_id="",
+        preset="research",
+        task_name="Root Task",
+        description="Run a skill.",
+        task_markdown=render_root_task_markdown(request.user_prompt),
+        tools_markdown=render_tools_markdown(
+            preset="research",
+            available_tools=default_tool_allowlist("research"),
+            available_skills=[],
+        ),
+    )
+    external_artifact = tmp_path / "external_artifact.txt"
+    external_artifact.write_text("artifact body\n", encoding="utf-8")
+
+    def _fake_skill(arguments: dict[str, object], _state) -> SkillResult:
+        return SkillResult(
+            skill_name="fake_skill",
+            arguments=dict(arguments),
+            status="ok",
+            summary="Fake skill completed.",
+            details={"kind": "fake"},
+            metrics=SkillMetrics(evidence_count=1, artifact_count=1),
+            output_text="Hello from fake skill.",
+            artifacts=[str(external_artifact)],
+        )
+
+    registry["fake_skill"] = SkillSpec(
+        name="fake_skill",
+        description="Fake skill for testing exact output paths.",
+        pack="core",
+        input_schema={},
+        produces_artifacts=True,
+        executor=_fake_skill,
+    )
+
+    session = create_or_load_session(
+        request=request,
+        run_root=str(run_root),
+        agent_id=root_agent_id,
+        preset="research",
+        registry_map=registry,
+    )
+
+    result = execute_model_tool(session, "fake_skill", {})
+
+    assert result["primary_artifact_path"] == str(external_artifact)
+    assert result["artifact_paths"] == [str(external_artifact)]
+    assert result["summary_path"].endswith("summary.md")
+    assert result["details_path"].endswith("details.json")
+    assert any(path.endswith("output.md") for path in result["output_files"])
+    assert any(path.endswith("summary.md") for path in result["output_files"])
+    assert any(path.endswith("details.json") for path in result["output_files"])
+
+
+def test_wait_children_uses_short_default_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    request = HarnessRequest(user_prompt="Wait briefly", run_id="executor-default-timeout")
+    run_root, root_agent_id = initialize_run_root(request)
+    registry = build_skill_registry()
+    create_agent_workspace(
+        run_root,
+        agent_id=root_agent_id,
+        parent_id="",
+        preset="orchestrator",
+        task_name="Root Task",
+        description="Delegate work.",
+        task_markdown=render_root_task_markdown(request.user_prompt),
+        tools_markdown=render_tools_markdown(
+            preset="orchestrator",
+            available_tools=default_tool_allowlist("orchestrator"),
+            available_skills=[],
+        ),
+    )
+    session = create_or_load_session(
+        request=request,
+        run_root=str(run_root),
+        agent_id=root_agent_id,
+        preset="orchestrator",
+        registry_map=registry,
+    )
+
+    clock = iter([0.0, 31.0])
+    monkeypatch.setattr(executor_module.time, "time", lambda: next(clock))
+    monkeypatch.setattr(executor_module.time, "sleep", lambda _seconds: None)
+
+    result = execute_model_tool(session, "wait_children", {})
+
+    assert result["completed"] is False
+    assert result["timed_out"] is True
+
+
+def test_publish_tools_normalize_publish_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    request = HarnessRequest(user_prompt="Publish a summary", run_id="executor-publish-prefix")
+    run_root, root_agent_id = initialize_run_root(request)
+    registry = build_skill_registry()
+    create_agent_workspace(
+        run_root,
+        agent_id=root_agent_id,
+        parent_id="",
+        preset="orchestrator",
+        task_name="Root Task",
+        description="Publish work.",
+        task_markdown=render_root_task_markdown(request.user_prompt),
+        tools_markdown=render_tools_markdown(
+            preset="orchestrator",
+            available_tools=default_tool_allowlist("orchestrator"),
+            available_skills=[],
+        ),
+    )
+    session = create_or_load_session(
+        request=request,
+        run_root=str(run_root),
+        agent_id=root_agent_id,
+        preset="orchestrator",
+        registry_map=registry,
+    )
+
+    write_result = execute_model_tool(
+        session,
+        "write_publish_file",
+        {"file_name": "publish/summary.md", "content": "Hello\n"},
+    )
+    read_result = execute_model_tool(
+        session,
+        "read_file",
+        {"path": write_result["path"]},
+    )
+
+    assert write_result["path"].endswith("/publish/summary.md")
+    assert "/publish/publish/" not in write_result["path"]
+    assert read_result["content"].startswith("Hello")
+
+
+def test_context_files_are_copied_for_read_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    request = HarnessRequest(user_prompt="Delegate with context", run_id="executor-context-copy")
+    run_root, root_agent_id = initialize_run_root(request)
+    registry = build_skill_registry()
+    create_agent_workspace(
+        run_root,
+        agent_id=root_agent_id,
+        parent_id="",
+        preset="orchestrator",
+        task_name="Root Task",
+        description="Delegate with context.",
+        task_markdown=render_root_task_markdown(request.user_prompt),
+        tools_markdown=render_tools_markdown(
+            preset="orchestrator",
+            available_tools=default_tool_allowlist("orchestrator"),
+            available_skills=visible_skills_for_preset(
+                preset="orchestrator",
+                available_skills=get_skills_for_packs(registry, ["core"]),
+            ),
+        ),
+    )
+    source_file = tmp_path / "source-note.md"
+    source_file.write_text("AlphaSeeker context note\n", encoding="utf-8")
+    session = create_or_load_session(
+        request=request,
+        run_root=str(run_root),
+        agent_id=root_agent_id,
+        preset="orchestrator",
+        registry_map=registry,
+    )
+
+    result = execute_model_tool(
+        session,
+        "spawn_subagent",
+        {
+            "task_name": "child",
+            "description": "Read passed context",
+            "preset": "research",
+            "context_files": [str(source_file)],
+        },
+    )
+
+    child_context_root = agent_workspace_paths(run_root, result["agent_id"])["context_root"]
+    copied = list(child_context_root.iterdir())
+
+    assert len(copied) == 1
+    assert copied[0].read_text(encoding="utf-8") == "AlphaSeeker context note\n"
+
+
+def test_search_in_files_returns_match_locations(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    request = HarnessRequest(user_prompt="Search local files", run_id="executor-search-files")
+    run_root, root_agent_id = initialize_run_root(request)
+    registry = build_skill_registry()
+    create_agent_workspace(
+        run_root,
+        agent_id=root_agent_id,
+        parent_id="",
+        preset="research",
+        task_name="Root Task",
+        description="Search files.",
+        task_markdown=render_root_task_markdown(request.user_prompt),
+        tools_markdown=render_tools_markdown(
+            preset="research",
+            available_tools=default_tool_allowlist("research"),
+            available_skills=visible_skills_for_preset(
+                preset="research",
+                available_skills=get_skills_for_packs(registry, ["core"]),
+            ),
+        ),
+    )
+    notes_dir = tmp_path / "notes"
+    notes_dir.mkdir()
+    hit_file = notes_dir / "memo.md"
+    hit_file.write_text("Apple valuation is sensitive to services mix.\n", encoding="utf-8")
+    miss_file = notes_dir / "other.md"
+    miss_file.write_text("Unrelated line.\n", encoding="utf-8")
+
+    session = create_or_load_session(
+        request=request,
+        run_root=str(run_root),
+        agent_id=root_agent_id,
+        preset="research",
+        registry_map=registry,
+    )
+
+    result = execute_model_tool(
+        session,
+        "search_in_files",
+        {
+            "pattern": "services mix",
+            "paths": [str(notes_dir)],
+            "max_results": 5,
+        },
+    )
+
+    assert result["status"] == "ok"
+    assert result["summary"].startswith("Found 1 match")
+    assert result["details_path"].endswith("details.json")
+    assert result["output_root"].endswith("search_in_files")
+    assert any(path.endswith("output.md") for path in result["output_files"])
