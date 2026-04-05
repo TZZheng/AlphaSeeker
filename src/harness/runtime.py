@@ -70,6 +70,8 @@ class SupervisorState:
     stop_requested: bool = False
     soft_stop_requested: bool = False
     soft_stop_started_at: float | None = None
+    root_last_reviewed_fingerprint: str = ""
+    root_finished_refining_at: float | None = None
 
 
 def _iso_to_epoch(value: str | None) -> float | None:
@@ -312,6 +314,12 @@ def _push_child_done_to_parent_queue(run_root: str, child_id: str, status: str, 
         f.write(json.dumps(event) + "\n")
 
 
+def _read_last_commented_fingerprint(run_root: str, agent_id: str) -> str:
+    """Read the last_commented_fingerprint from commenter's state."""
+    state = load_commenter_state(run_root, agent_id) or {}
+    return str(state.get("last_commented_fingerprint") or "")
+
+
 async def _monitor_agents(shared: SupervisorState) -> None:
     while not shared.stop_requested:
         now_epoch = time.time()
@@ -408,11 +416,46 @@ async def _monitor_agents(shared: SupervisorState) -> None:
                 terminal_error,
             )
 
+        # Handle root agent completion and refinement loop
         root_status = read_status(shared.run_root, shared.root_agent_id)
-        if root_status in TERMINAL_STATUSES and shared.root_agent_id not in shared.live:
-            shared.stop_reason = root_status
-            shared.stop_requested = True
-            break
+        if root_status == "refining" and shared.root_agent_id not in shared.live:
+            # Root finished but is waiting for commenter to produce new content
+            if shared.root_finished_refining_at is not None:
+                elapsed = now_epoch - shared.root_finished_refining_at
+                if elapsed >= COMMENTER_REFRESH_INTERVAL_SECONDS:
+                    current_fp = _read_last_commented_fingerprint(shared.run_root, shared.root_agent_id)
+                    if current_fp != shared.root_last_reviewed_fingerprint:
+                        # New comments — re-launch root for another pass
+                        shared.root_last_reviewed_fingerprint = current_fp
+                        write_status(shared.run_root, shared.root_agent_id, "queued")
+                        process = await shared.launcher(shared.run_root, shared.root_agent_id)
+                        shared.live[shared.root_agent_id] = ManagedProcess(
+                            agent_id=shared.root_agent_id,
+                            process=process,
+                            launched_at_epoch=now_epoch,
+                        )
+                        write_status(shared.run_root, shared.root_agent_id, "running")
+                        update_agent_record(
+                            shared.run_root,
+                            agent_id=shared.root_agent_id,
+                            status="running",
+                            pid=process.pid,
+                            started_at=datetime.now(timezone.utc).isoformat(),
+                        )
+                        shared.root_finished_refining_at = None
+                    # else: no new comments yet, keep waiting
+        elif root_status in TERMINAL_STATUSES and shared.root_agent_id not in shared.live:
+            if root_status == "done" and shared.request.continuous_refinement:
+                # Root finished a pass — enter refinement wait state
+                fp = _read_last_commented_fingerprint(shared.run_root, shared.root_agent_id)
+                shared.root_last_reviewed_fingerprint = fp
+                shared.root_finished_refining_at = now_epoch
+                write_status(shared.run_root, shared.root_agent_id, "refining")
+                # Do NOT stop — wait for commenter to produce new comments
+            else:
+                shared.stop_reason = root_status
+                shared.stop_requested = True
+                break
 
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 

@@ -287,7 +287,7 @@ class SkillSpec(BaseModel):
 
 
 AGENT_PRESETS = ("orchestrator", "research", "source_triage", "writer", "synthesizer", "evaluator")
-AGENT_STATUSES = ("queued", "running", "waiting", "done", "failed", "blocked", "stale", "cancelled")
+AGENT_STATUSES = ("queued", "running", "waiting", "done", "failed", "blocked", "stale", "cancelled", "refining")
 AGENT_TRANSPORTS = ("auto", "minimax_anthropic", "minimax_openai", "text_json")
 
 
@@ -312,7 +312,7 @@ class AgentRecord(BaseModel):
     workspace_path: str
     task_name: str
     description: str
-    status: Literal["queued", "running", "waiting", "done", "failed", "blocked", "stale", "cancelled"] = "queued"
+    status: Literal["queued", "running", "waiting", "done", "failed", "blocked", "stale", "cancelled", "refining"] = "queued"
     created_at: str = Field(default_factory=_utc_now_iso)
     updated_at: str = Field(default_factory=_utc_now_iso)
     pid: int | None = None
@@ -351,6 +351,7 @@ class HarnessRequest(BaseModel):
     per_agent_wall_clock_seconds: int = 1800
     stale_heartbeat_seconds: int = 45
     available_skill_packs: list[str] | None = None
+    continuous_refinement: bool = False
     resume_from_run_root: str | None = None
 
     @field_validator("available_skill_packs")
