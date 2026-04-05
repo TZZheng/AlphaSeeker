@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.agents.macro.tools.fred import fetch_macro_indicators
-from src.agents.macro.tools.world_bank import fetch_world_bank_indicators
+from src.tools.macro.fred import fetch_macro_indicators
+from src.tools.macro.world_bank import fetch_world_bank_indicators
 from src.harness.skills.common import artifact_evidence, make_result, safe_read
 from src.harness.types import HarnessState, SkillMetrics, SkillResult, SkillSpec
 

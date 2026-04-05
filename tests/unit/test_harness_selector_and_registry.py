@@ -5,31 +5,8 @@ from datetime import datetime
 import pytest
 
 from src.harness.registry import build_skill_registry, get_skills_for_packs
-from src.harness.selector import select_packs
-from src.supervisor.router import AgentTask, ClassificationResult
 
 pytestmark = pytest.mark.unit
-
-
-def test_select_packs_uses_supervisor_classifier() -> None:
-    classification = ClassificationResult(
-        primary_intent="equity",
-        tasks=[
-            AgentTask(agent_type="equity", ticker="AAPL"),
-            AgentTask(agent_type="macro", topic="US rates"),
-        ],
-        reasoning="cross-domain",
-    )
-
-    packs = select_packs("Analyze AAPL with macro context", classify_fn=lambda _prompt: classification)
-
-    assert packs == ["core", "equity", "macro"]
-
-
-def test_select_packs_falls_back_to_all_domains() -> None:
-    packs = select_packs("Fallback", classify_fn=lambda _prompt: (_ for _ in ()).throw(RuntimeError("boom")))
-
-    assert packs == ["core", "equity", "macro", "commodity"]
 
 
 def test_registry_exposes_core_and_domain_skills() -> None:

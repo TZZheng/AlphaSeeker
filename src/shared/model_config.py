@@ -8,8 +8,8 @@ Users can override any model via:
 
 Example:
     from src.shared.model_config import get_model
-    MODEL_PLAN = get_model("equity", "plan")       # → "sf/Qwen/Qwen3-14B"
-    MODEL_SECTION = get_model("equity", "section")  # → "kimi-k2.5"
+    MODEL_AGENT = get_model("harness", "agent")       # → "minimax/MiniMax-M2.7"
+    MODEL_CONDENSE = get_model("harness", "condense")  # → "kimi-k2.5"
 """
 
 import os
@@ -24,40 +24,9 @@ import yaml
 # ---------------------------------------------------------------------------
 
 _DEFAULTS: Dict[str, Dict[str, str]] = {
-    "supervisor": {
-        "classify": "sf/Qwen/Qwen3.5-4B",
-        "synthesize": "kimi-k2.5",
-    },
     "harness": {
         "agent": "kimi-k2.5",
         "condense": "sf/Qwen/Qwen3-8B",
-    },
-    "equity": {
-        "plan": "sf/Qwen/Qwen3-14B",
-        "condense": "sf/Qwen/Qwen3-14B",
-        "followup": "sf/Qwen/Qwen3-14B",
-        "map": "sf/Qwen/Qwen3-14B",
-        "reduce": "sf/Qwen/Qwen3-14B",
-        "section": "kimi-k2.5",
-        "summary": "kimi-k2.5",
-    },
-    "macro": {
-        "plan": "sf/Qwen/Qwen3-14B",
-        "condense": "sf/Qwen/Qwen3-14B",
-        "followup": "sf/Qwen/Qwen3-14B",
-        "map": "sf/Qwen/Qwen3-14B",
-        "reduce": "sf/Qwen/Qwen3-14B",
-        "section": "kimi-k2.5",
-        "summary": "kimi-k2.5",
-    },
-    "commodity": {
-        "plan": "sf/Qwen/Qwen3-14B",
-        "condense": "sf/Qwen/Qwen3-14B",
-        "followup": "sf/Qwen/Qwen3-14B",
-        "map": "sf/Qwen/Qwen3-14B",
-        "reduce": "sf/Qwen/Qwen3-14B",
-        "section": "kimi-k2.5",
-        "summary": "kimi-k2.5",
     },
 }
 

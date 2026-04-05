@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.agents.commodity.tools.cftc import fetch_cot_report
-from src.agents.commodity.tools.eia import fetch_eia_inventory
-from src.agents.commodity.tools.futures import fetch_futures_curve
+from src.tools.commodity.cftc import fetch_cot_report
+from src.tools.commodity.eia import fetch_eia_inventory
+from src.tools.commodity.futures import fetch_futures_curve
 from src.harness.skills.common import artifact_evidence, make_result, safe_read
 from src.harness.types import HarnessState, SkillMetrics, SkillResult, SkillSpec
 

@@ -4,18 +4,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.agents.equity.tools.company_profile import fetch_company_profile
-from src.agents.equity.tools.earnings_calls import research_earnings_call
-from src.agents.equity.tools.financials import fetch_financial_metrics
-from src.agents.equity.tools.insider_trading import fetch_insider_activity
-from src.agents.equity.tools.market_data import fetch_historical_data
-from src.agents.equity.tools.peers import (
+from src.tools.equity.company_profile import fetch_company_profile
+from src.tools.equity.earnings_calls import research_earnings_call
+from src.tools.equity.financials import fetch_financial_metrics
+from src.tools.equity.insider_trading import fetch_insider_activity
+from src.tools.equity.market_data import fetch_historical_data
+from src.tools.equity.peers import (
     evaluate_candidates,
     extract_peers_from_text,
     fetch_peer_metrics,
 )
-from src.agents.equity.tools.sec_filings import search_and_read_filings
-from src.agents.equity.tools.visualization import plot_price_history
+from src.tools.equity.sec_filings import search_and_read_filings
+from src.tools.equity.visualization import plot_price_history
 from src.harness.skills.common import artifact_evidence, json_preview, make_result, note_evidence, safe_read, url_evidence
 from src.harness.types import HarnessState, SkillMetrics, SkillResult, SkillSpec
 

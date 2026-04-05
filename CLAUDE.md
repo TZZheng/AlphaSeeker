@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-AlphaSeeker is a multi-agent quantitative research system for equity, macro, and commodity analysis. A supervisor-led architecture routes user prompts to domain-specific specialist agents, which gather real data through code and external APIs, then synthesizes their outputs into a single coherent report.
+AlphaSeeker is a multi-agent quantitative research system for equity, macro, and commodity analysis. A root orchestrator agent routes user prompts to domain-specific child agents, which gather real data through code and external APIs, then synthesize their outputs into a single coherent report.
 
 ## Commands
 
@@ -22,57 +22,66 @@ uv run pytest -m "not live"
 uv run pytest -m "live"
 
 # Run a single test file or function
-uv run pytest tests/unit/test_model_config.py
-uv run pytest tests/unit/test_model_config.py::test_function_name -v
+uv run pytest tests/unit/test_harness_types_and_verifier.py
+uv run pytest tests/unit/test_harness_types_and_verifier.py::test_function_name -v
 
 # Run AlphaSeeker CLI
-uv run python main.py
+uv run python main.py "Analyze AAPL"
+uv run python main.py  # interactive mode
 ```
 
 ## Architecture
 
-### Supervisor-Led Multi-Agent Flow
+### Harness Runtime
+
+Harness is a file-based async multi-agent runtime. The root agent runs as a subprocess supervised by an async kernel. The LLM decides when to spawn child agents, which skills to call, and when to publish results. File-based handoff between agents provides transparency and recoverability.
 
 ```
-User Prompt → Supervisor (classify intent) → Intent Router
-    → [Equity Agent] ─┐
-    → [Macro Agent]  ─┼─→ (parallel via LangGraph Send API)
-    → [Commodity Agent] ┘
-    → Synthesizer → Final Response
+User Prompt → Root Orchestrator Agent (subprocess)
+    → spawns child agents (research, writer, synthesizer, etc.)
+    → child agents call deterministic skill tools (fetch_market_data, fetch_futures_curve, etc.)
+    → publish/ files → parent reads → synthesizes final report
 ```
 
-The **supervisor graph** (`src/supervisor/graph.py`) is a LangGraph StateGraph that:
-1. Classifies user intent via LLM
-2. Routes to appropriate sub-agents in parallel using the `Send` API
-3. Synthesizes results from all agents
+Key components:
+- `src/harness/runtime.py` — async supervisor kernel, launches agent workers, watches heartbeats
+- `src/harness/agent_worker.py` — long-lived worker process for root and child agents
+- `src/harness/executor.py` — file-first agent tools: `spawn_subagent`, `list_children`, `bash`, `write_file`, `edit_file`
+- `src/harness/transport.py` — MiniMax Anthropic/OpenAI transport adapters with transcript replay
+- `src/harness/commenter.py` — paired commenter sidecar that reads agent workspace and injects advisory comments
+- `src/harness/skills/` — deterministic skill library reused as tools (equity, macro, commodity, core)
 
-Each **sub-agent** is itself a LangGraph application:
-- **Equity** (`src/agents/equity/graph.py`): yfinance, SEC filings, web search
-- **Macro** (`src/agents/macro/`): FRED, World Bank data
-- **Commodity** (`src/agents/commodity/`): EIA, CFTC, futures data
+### Skill Packs
+
+Agents use skill packs to access domain-specific tools:
+- **core** — `search_in_files`, `get_current_datetime`, `search_web`, `read_web_pages`, `condense_context`, `read_file`, `retrieve_sources`
+- **equity** — `fetch_market_data`, `plot_price_history`, `fetch_company_profile`, `fetch_financials`, `search_sec_filings`, `fetch_insider_activity`, `research_earnings_call`, `analyze_peers`
+- **macro** — `fetch_macro_indicators`, `fetch_world_bank_indicators`
+- **commodity** — `fetch_eia_inventory`, `fetch_cot_report`, `fetch_futures_curve`
 
 ### Shared Layer
 
 - `src/shared/model_config.py`: Provider-agnostic model selection with `ALPHASEEKER_MODEL_<AGENT>_<ROLE>` env var overrides
 - `src/shared/llm_manager.py`: LLM invocation abstraction
-- `src/shared/web_search.py`: Web research capability
-- `src/shared/node_contracts.py`: Result validation for graph nodes
+- `src/shared/web_search.py`: Web research capability (DDG + trafilatura)
+- `src/shared/report_filename.py`: Report filename building
 
-### Harness Runtime
+### Tool Library
 
-An alternative execution mode (`--runtime harness`) with its own executor, agent worker, and transport layer in `src/harness/`.
+`src/tools/` contains domain-specific data-fetching tools used by harness skills:
+- `src/tools/equity/` — market data, financials, SEC filings, earnings calls, insider trading, peers, visualization
+- `src/tools/macro/` — FRED, World Bank indicators
+- `src/tools/commodity/` — EIA, CFTC COT, futures curve
 
 ### Model Configuration
 
-Models are defined in `config/models.yaml` by agent and role. Provider prefixes: `sf/` (SiliconFlow), `kimi-`, `minimax/`, `gpt-`, `gemini-`, `claude-`. Each requires a corresponding API key env var.
+Models are defined in `config/models.yaml` by role. Provider prefixes: `sf/` (SiliconFlow), `kimi-`, `minimax/`, `gpt-`, `gemini-`, `claude-`. Each requires a corresponding API key env var.
 
 ### Runtime Outputs
 
-- `data/` — fetched datasets and debug artifacts
-- `reports/` — generated Markdown reports
-- `charts/` — generated chart images
-
-These directories are git-ignored.
+- `data/harness_runs/<run_id>/` — all run artifacts, agent workspaces, transcripts, progress
+- `reports/` — generated Markdown reports (legacy, git-ignored)
+- `charts/` — generated chart images (git-ignored)
 
 ## Testing
 
@@ -81,10 +90,9 @@ Pytest markers: `unit` (deterministic, no network), `component` (mocked dependen
 ## File Organization
 
 ```
-src/agents/{equity,macro,commodity}/   # Domain sub-agents (each is a LangGraph app)
-src/supervisor/                         # Supervisor orchestration layer
+src/tools/                               # Shared data-fetching tool library
+src/harness/                            # Harness runtime (main/only execution mode)
 src/shared/                             # Shared utilities (LLM, model config, web search)
-src/harness/                            # Alternative runtime harness system
 src/utils/                              # General utilities
 tests/{unit,component,live}/             # Three-tier test structure
 ```

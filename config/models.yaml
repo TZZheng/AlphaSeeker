@@ -1,9 +1,9 @@
 # AlphaSeeker Model Configuration
 #
-# Each agent defines its own model roles. Users can override any model
+# Harness uses two model roles. Users can override any model
 # by editing this file or setting environment variables.
 #
-# Format: AGENT.ROLE = "provider/model-name"
+# Format: harness.ROLE = "provider/model-name"
 #
 # Supported provider prefixes:
 #   - "sf/*"       → SiliconFlow (e.g. "sf/Qwen/Qwen3-14B")
@@ -13,55 +13,12 @@
 #   - "gpt-*"      → OpenAI (e.g. "gpt-4o")
 #   - "claude-*"   → Anthropic (e.g. "claude-sonnet-4-20250514")
 #
-# Environment variable override: ALPHASEEKER_MODEL_<AGENT>_<ROLE>
-#   Example: ALPHASEEKER_MODEL_EQUITY_SECTION="gpt-4o"
+# Environment variable override: ALPHASEEKER_MODEL_HARNESS_<ROLE>
+#   Example: ALPHASEEKER_MODEL_HARNESS_AGENT="gpt-4o"
 
 # ---------------------------------------------------------------------------
-# Supervisor Agent
-# ---------------------------------------------------------------------------
-supervisor:
-  classify: "minimax/MiniMax-M2.7"
-  synthesize: "minimax/MiniMax-M2.7"
-
-# ---------------------------------------------------------------------------
-# Dynamic Harness
+# Harness Runtime
 # ---------------------------------------------------------------------------
 harness:
   agent: "minimax/MiniMax-M2.7"
   condense: "minimax/MiniMax-M2.7"
-
-# ---------------------------------------------------------------------------
-# Equity Research Sub-Agent
-# ---------------------------------------------------------------------------
-equity:
-  plan: "minimax/MiniMax-M2.7"
-  condense: "minimax/MiniMax-M2.7"
-  followup: "minimax/MiniMax-M2.7"
-  map: "minimax/MiniMax-M2.7"
-  reduce: "minimax/MiniMax-M2.7"
-  section: "minimax/MiniMax-M2.7"
-  summary: "minimax/MiniMax-M2.7"
-
-# ---------------------------------------------------------------------------
-# Macro & Nation Sub-Agent
-# ---------------------------------------------------------------------------
-macro:
-  plan: "minimax/MiniMax-M2.7"
-  condense: "minimax/MiniMax-M2.7"
-  followup: "minimax/MiniMax-M2.7"
-  map: "minimax/MiniMax-M2.7"
-  reduce: "minimax/MiniMax-M2.7"
-  section: "minimax/MiniMax-M2.7"
-  summary: "minimax/MiniMax-M2.7"
-
-# ---------------------------------------------------------------------------
-# Commodity Sub-Agent
-# ---------------------------------------------------------------------------
-commodity:
-  plan: "minimax/MiniMax-M2.7"
-  condense: "minimax/MiniMax-M2.7"
-  followup: "minimax/MiniMax-M2.7"
-  map: "minimax/MiniMax-M2.7"
-  reduce: "minimax/MiniMax-M2.7"
-  section: "minimax/MiniMax-M2.7"
-  summary: "minimax/MiniMax-M2.7"
