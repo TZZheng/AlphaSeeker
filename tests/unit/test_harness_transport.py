@@ -77,6 +77,84 @@ class _FakeAnthropicMessages:
         self.calls.append(dict(kwargs))
         return _FakeAnthropicResponse()
 
+    def stream(self, **kwargs: object) -> "_FakeMessageStream":
+        self.calls.append(dict(kwargs))
+        return _FakeMessageStream()
+
+
+class _FakeMessageStream:
+    """Fake streaming message iterator matching the Anthropic messages.stream() API."""
+
+    def __init__(self) -> None:
+        self._events = self._build_events()
+
+    def _build_events(self) -> list[object]:
+        """Build a minimal event sequence that produces a tool_use stop_reason."""
+        import types
+
+        events = []
+        # thinking block start
+        events.append(types.SimpleNamespace(type="content_block_start", name="thinking", index=0))
+        # tool_use block start - name="tool_use" (block type), actual tool name is in input.name
+        events.append(types.SimpleNamespace(type="content_block_start", name="tool_use", index=1, id="call_1", input=types.SimpleNamespace(name="search_web", query="test")))
+        # tool input delta - accumulates into current_tool_input._raw
+        delta = types.SimpleNamespace(type="input_json_delta", input_json='{"name":"search_web","query":"test"}')
+        events.append(types.SimpleNamespace(type="content_block_delta", delta=delta, index=2))
+        # tool_use block stop
+        events.append(types.SimpleNamespace(type="content_block_stop", name="tool_use", index=1))
+        # thinking block stop
+        events.append(types.SimpleNamespace(type="content_block_stop", name="thinking", index=0))
+        # message stop
+        events.append(types.SimpleNamespace(type="message_stop", stop_reason="tool_use", index=3))
+        return events
+
+    def __enter__(self) -> "_FakeMessageStream":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        pass
+
+    def __iter__(self) -> "_FakeMessageStream":
+        return self
+
+    def __next__(self) -> object:
+        if self._events:
+            return self._events.pop(0)
+        raise StopIteration
+
+    def get_last_message(self) -> dict[str, object]:
+        return {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "Plan the next step."},
+                {"type": "tool_use", "id": "call_1", "name": "search_web", "input": {"query": "test"}},
+            ],
+            "stop_reason": "tool_use",
+        }
+
+    def get_final_message(self) -> object:
+        """Return a mock message with content blocks for final extraction."""
+        import types
+
+        class _FakeContentBlock:
+            def __init__(self, block_type: str, **kwargs: object) -> None:
+                self.type = block_type
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+
+        return types.SimpleNamespace(
+            id="msg_1",
+            type="message",
+            role="assistant",
+            content=[
+                _FakeContentBlock("thinking", thinking="Plan the next step."),
+                _FakeContentBlock("tool_use", id="call_1", name="search_web", input={"query": "test"}),
+            ],
+            stop_reason="tool_use",
+        )
+
 
 class _FakeAnthropicClient:
     def __init__(self) -> None:
