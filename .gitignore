@@ -220,3 +220,5 @@ charts/
 
 # Local Codex workspace rules (do not publish)
 .agent/
+.claude/
+CLAUDE.md
