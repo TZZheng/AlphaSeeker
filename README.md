@@ -5,13 +5,11 @@
 ![uv](https://img.shields.io/badge/package%20manager-uv-5C6AC4)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-Multi-agent quantitative research for equities, macro, and commodities.
+**Multi-agent quantitative research — from question to comprehensive investment memo.**
 
-AlphaSeeker takes a financial question, routes it to the right specialist agents, gathers real data through code, and returns a single synthesized report. The project is built for research workflows where you want more than a generic chatbot answer: you want domain routing, saved artifacts, charts, and a clearer trail of how the answer was produced.
+AlphaSeeker is a file-based async multi-agent runtime. Give it a financial question — it spawns specialist agents, fetches real market data, builds charts, and synthesizes everything into a single well-structured report. The entire process is traceable: every agent's workspace, every data fetch, every model call is written to disk.
 
-![AAPL Research Snapshot](docs/examples/assets/aapl_equity_one_pager.png)
-
-> This image is a curated visual summary built from [the AAPL one-pager](docs/examples/aapl_equity_one_pager.html), not the raw generated Markdown report. The original saved report is [AAPL_analysis_report.md](docs/examples/AAPL_analysis_report.md).
+No black boxes. No hallucinated numbers. The research pipeline that actually shows its work.
 
 ## Table of Contents
 
@@ -32,65 +30,62 @@ AlphaSeeker takes a financial question, routes it to the right specialist agents
 
 ## Overview
 
-AlphaSeeker uses a supervisor-led architecture:
+AlphaSeeker runs a **root orchestrator agent** as a supervised subprocess. The orchestrator decides — based on the prompt — when to delegate to child agents, which skill tools to call, and when the report is ready to publish.
 
-- The **supervisor** is the control layer. It reads the user prompt, decides which specialist should run, and combines the results.
-- Each **sub-agent** is a domain-specific workflow for equity, macro, or commodity research.
-- A final **synthesis** step merges one or more specialist outputs into a single answer.
+Child agents are **deterministic research workers**: they don't guess at numbers, they fetch them from live data sources (market data, SEC filings, FRED, EIA, CFTC). The orchestrator synthesizes their outputs into a final memo.
 
-In practical terms:
+Key design choices:
 
-- `Analyze AAPL from valuation and risk perspective` should route to the equity agent.
-- `US macro outlook for the next 12 months` should route to the macro agent.
-- `How do higher rates affect JPM and bank margins?` can require both macro and equity work, then a final integrated answer.
+- **File-based handoff** — agents communicate by writing and reading files, not in-memory state. You can inspect every intermediate result.
+- **Subprocess isolation** — a crashed or stalled child agent cannot block the pipeline.
+- **Skill packs** — deterministic tools organized by domain: core (search, file, time), equity, macro, commodity.
+- **Commenter sidecar** — a paired reviewer reads each agent's workspace and injects advisory notes back into the next turn.
 
 ## Why AlphaSeeker
 
-| Typical finance chatbot | AlphaSeeker |
+| Typical finance research | AlphaSeeker |
 |---|---|
-| One model answers everything | A supervisor routes work to domain-specific agents |
-| Often relies on model memory | Pulls data through code and external data sources |
-| Hard to inspect what happened | Saves reports, charts, and intermediate artifacts locally |
-| Usually returns one flat response | Can combine multiple specialist reports into one final synthesis |
-
-What makes the project interesting:
-
-- **Cross-domain routing**: A single prompt can trigger multiple agents when the question spans company, macro, and commodity dimensions.
-- **Deterministic data collection**: "Deterministic" here means key numbers are fetched by code from APIs or filings, instead of being invented by the model.
-- **Provider-flexible model setup**: Model assignments are configurable by agent and by role, so you can trade off speed, quality, and cost.
-- **Local-first artifacts**: Reports, charts, and fetched data are written to local folders for inspection and reuse.
+| Relies on a single model's training data | Fetches live market data, SEC filings, EIA, FRED |
+| You can't see how the answer was built | Every step is written to disk — inspect it all |
+| One flat response | Multi-agent parallel research synthesized into one memo |
+| Model can hallucinate numbers | Deterministic tools pull facts from external APIs |
+| Fragile on slow I/O | Subprocess isolation — one slow tool doesn't block the pipeline |
 
 ## What It Can Do
 
-| Domain | Core workflow | Data sources and tools | Typical output |
-|---|---|---|---|
-| Equity | Company analysis, valuation framing, risk review, peer context | `yfinance`, SEC filings, web search, report generation, charting | Markdown initiation report plus charts |
-| Macro | Country and policy analysis, growth/inflation/rates context | FRED, World Bank, web research | Markdown macro brief |
-| Commodity | Supply-demand analysis, positioning, futures curve interpretation | EIA, CFTC, futures data, web research | Markdown commodity report |
+| Domain | Skill tools | Typical output |
+|---|---|---|
+| Equity | Market data, company profile, financials, SEC filings, insider activity, peer analysis, earnings calls | Equity research memo with valuation, risk factors, peer context |
+| Macro | FRED indicators, World Bank cross-country data | Macro brief covering growth, inflation, rates |
+| Commodity | EIA inventory, CFTC COT positioning, futures curve | Commodity report with supply-demand analysis |
+| Core | Web search, file read/write, context condensation, datetime | Used by all domains |
+
+The orchestrator decides which combination of skills to invoke based on the prompt — no manual routing required.
 
 ## How a Query Flows
 
-```mermaid
-graph TD
-    U["User Prompt"] --> S["Supervisor"]
-    S --> R{"Intent Router"}
-    R --> E["Equity Agent"]
-    R --> M["Macro Agent"]
-    R --> C["Commodity Agent"]
-    E --> Y["Synthesizer"]
-    M --> Y
-    C --> Y
-    Y --> O["Final Response"]
+```
+User Prompt
+    │
+    ▼
+Root Orchestrator Agent (subprocess)
+    │  LLM decides: delegate? which skills? when done?
+    ├─► spawns child agents (research, writer, synthesizer...)
+    │       │
+    │       ▼
+    │   Skill Tools (deterministic — fetch real data)
+    │       │  market data, SEC filings, FRED, EIA...
+    │       ▼
+    │   publish/  ← agent writes results here
+    │
+    ▼
+Root reads child publish/ files → synthesizes final memo
+    │
+    ▼
+Final Report + full run trace on disk
 ```
 
-High-level flow:
-
-1. The supervisor classifies the prompt.
-2. It creates one or more agent tasks.
-3. Matching agents run, in parallel when needed.
-4. The final synthesizer returns one response to the user.
-
-If you are coming from systems or backend work: the shared "state" in this workflow is just the structured working memory passed from step to step.
+Every agent turn, every tool call, every fetched file is written to `data/harness_runs/<run_id>/`. You can replay the entire research process.
 
 ## Quickstart
 
@@ -140,9 +135,9 @@ At startup, AlphaSeeker checks whether the API keys required by your active mode
 
 If you use MiniMax, the backend term `base URL` means the root HTTP endpoint your client sends API requests to. AlphaSeeker defaults to `https://api.minimaxi.com/v1`, and you can override it with `MINIMAX_BASE_URL` if you need a different endpoint.
 
-### Route-specific data keys
+### Data source keys
 
-These are only needed when the corresponding route uses them:
+These are only required when the skills they power are invoked:
 
 - `FRED_API_KEY` for macro indicator fetches
 - `EIA_API_KEY` for commodity inventory fetches
@@ -159,10 +154,10 @@ Model selection follows this priority:
 Example:
 
 ```bash
-export ALPHASEEKER_MODEL_EQUITY_SECTION="kimi-k2.5"
+export ALPHASEEKER_MODEL_HARNESS_AGENT="kimi-k2.5"
 ```
 
-If you are not used to the term "role" here: it means a specific job inside an agent pipeline, such as planning, summarization, or final section writing.
+The harness runtime currently uses two model roles: `agent` (the orchestrator and child agents) and `condense` (context compression).
 
 ## Example Prompts
 
@@ -174,46 +169,45 @@ If you are not used to the term "role" here: it means a specific job inside an a
 
 ## Example Outputs
 
-Recommended first examples:
+These were all generated by the harness runtime:
 
-- [AAPL one-page showcase](docs/examples/aapl_equity_one_pager.md)
-- [AAPL curated case study](docs/examples/aapl_equity_case_study.md)
-- [AAPL full generated report](docs/examples/AAPL_analysis_report.md)
+- [AAPL one-page showcase](docs/examples/aapl_equity_one_pager.md) — concise equity brief with charts
+- [AAPL curated case study](docs/examples/aapl_equity_case_study.md) — detailed walkthrough
+- [AAPL full generated report](docs/examples/AAPL_analysis_report.md) — complete output with full trace
 
-Runtime outputs are written to local folders and intentionally git-ignored where appropriate:
-
-- `data/` for fetched datasets and debug artifacts
-- `reports/` for generated Markdown reports
-- `charts/` for generated chart images
+Every run also writes its complete workspace to `data/harness_runs/<run_id>/` — you can replay exactly what the model saw and did.
 
 ## Project Structure
 
 ```text
 AlphaSeeker/
-├── main.py
+├── main.py                      # CLI entry point
 ├── config/
-│   └── models.yaml
-├── docs/
-│   └── equity_agent.md
+│   └── models.yaml              # Model assignments by role
 ├── src/
-│   ├── agents/
-│   │   ├── equity/
-│   │   ├── macro/
-│   │   └── commodity/
-│   ├── shared/
-│   └── supervisor/
-├── tests/
-│   ├── unit/
-│   ├── component/
-│   └── live/
-├── charts/
-├── data/
-├── reports/
-├── CONTRIBUTING.md
-├── SECURITY.md
-├── TODO.md
-├── pyproject.toml
-└── uv.lock
+│   ├── harness/                 # Runtime: orchestrator, workers, skills
+│   │   ├── runtime.py           # Async supervisor kernel
+│   │   ├── agent_worker.py      # Long-lived worker process
+│   │   ├── executor.py          # File-first tools (spawn, bash, read/write)
+│   │   ├── transport.py         # MiniMax / OpenAI API adapters
+│   │   ├── commenter.py         # Paired reviewer sidecar
+│   │   └── skills/              # Deterministic skill adapters
+│   │       ├── core.py          # search_in_files, read_file, condense...
+│   │       ├── equity.py        # fetch_market_data, fetch_financials...
+│   │       ├── macro.py         # fetch_macro_indicators...
+│   │       └── commodity.py     # fetch_eia_inventory, fetch_cot_report...
+│   ├── tools/                   # Shared data-fetching library
+│   │   ├── equity/             # yfinance, SEC, peers, visualization
+│   │   ├── macro/              # FRED, World Bank
+│   │   └── commodity/          # EIA, CFTC COT, futures curve
+│   └── shared/                  # LLM manager, model config, web search
+├── data/harness_runs/          # Every run's full workspace (git-ignored)
+├── reports/                     # Final generated memos (git-ignored)
+├── charts/                      # Generated chart images (git-ignored)
+└── tests/
+    ├── unit/                   # Deterministic logic
+    ├── component/              # Multi-function flows
+    └── live/                  # Real API runs
 ```
 
 ## Testing
@@ -243,14 +237,14 @@ If you are not used to the word "suite": it just means a grouped set of tests.
 
 ## Current Limits
 
-- The main user interface is currently the terminal, not a web app.
-- The equity path is the most documented route today; macro and commodity docs are still lighter.
-- Sample output curation can be improved. The repo already contains real reports, but the visual showcase layer is still minimal.
-- As with any LLM-based system, generated analysis should be reviewed before being used for investment decisions.
+- Terminal-only interface — no web UI.
+- Live data sources (market data, SEC, FRED, EIA) require valid API keys.
+- Generated analysis should be reviewed by a human before use in investment decisions.
 
 ## Additional Reading
 
-- [Equity sub-agent deep dive](docs/equity_agent.md)
+- [Harness runtime deep dive](src/harness/README.md) — architecture, workspace protocol, public interface
+- [Harness task model](src/harness/TASK.md) — how tasks, artifacts, and skill state work
 - [Roadmap and next milestones](TODO.md)
 - [Contribution guide](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
