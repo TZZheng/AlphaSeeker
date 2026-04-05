@@ -12,19 +12,8 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-
-      - name: Sync dependencies
-        run: uv sync --frozen
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
 
       - name: Compile check
         run: uv run python -m compileall -q src main.py
@@ -36,19 +25,8 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-
-      - name: Sync dependencies
-        run: uv sync --frozen
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
 
       - name: Compile check
         run: uv run python -m compileall -q src main.py

@@ -1,0 +1,18 @@
+name: Setup Python + uv
+description: Set up Python 3.11, install uv with dependency cache, and sync deps.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - uses: astral-sh/setup-uv@v4
+      with:
+        enable-cache: true
+        cache-dependency-glob: "uv.lock"
+
+    - name: Sync dependencies
+      run: uv sync --frozen
+      shell: bash

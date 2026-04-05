@@ -1,45 +1,71 @@
-# AlphaSeeker
+<p align="center">
+  <img src="docs/examples/assets/AlphaSeeker.png" alt="AlphaSeeker — Multi-Agent Research Terminal" width="720"/>
+</p>
 
-[![CI](https://github.com/TZZheng/AlphaSeeker/actions/workflows/ci.yml/badge.svg)](https://github.com/TZZheng/AlphaSeeker/actions/workflows/ci.yml)
-![Python](https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white)
-![uv](https://img.shields.io/badge/package%20manager-uv-5C6AC4)
-![License](https://img.shields.io/badge/license-MIT-green)
+<p align="center">
+  <a href="https://github.com/TZZheng/AlphaSeeker/actions/workflows/ci.yml">
+    <img src="https://github.com/TZZheng/AlphaSeeker/actions/workflows/ci.yml/badge.svg" alt="CI"/>
+  </a>
+  <img src="https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white" alt="Python"/>
+  <img src="https://img.shields.io/badge/package%20manager-uv-5C6AC4" alt="uv"/>
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="License"/>
+</p>
+
+# AlphaSeeker
 
 **Multi-agent quantitative research — from question to comprehensive investment memo.**
 
-AlphaSeeker is a file-based async multi-agent runtime. Give it a financial question — it spawns specialist agents, fetches real market data, builds charts, and synthesizes everything into a single well-structured report. The entire process is traceable: every agent's workspace, every data fetch, every model call is written to disk.
+AlphaSeeker is a file-based async multi-agent runtime. Give it a financial question — it spawns specialist agents, fetches real market data, builds charts, and synthesizes everything into a single well-structured report. The entire process is traceable: every agent workspace, every data fetch, every model call is written to disk.
 
-No black boxes. No hallucinated numbers. The research pipeline that actually shows its work.
+No black boxes. No hallucinated numbers. Research that actually shows its work.
 
-## Table of Contents
+---
 
-- [Overview](#overview)
-- [Why AlphaSeeker](#why-alphaseeker)
-- [What It Can Do](#what-it-can-do)
-- [How a Query Flows](#how-a-query-flows)
-- [Quickstart](#quickstart)
-- [Configuration](#configuration)
-- [Example Prompts](#example-prompts)
-- [Example Outputs](#example-outputs)
-- [Project Structure](#project-structure)
-- [Testing](#testing)
-- [Current Limits](#current-limits)
-- [Additional Reading](#additional-reading)
-- [Contributing](#contributing)
-- [License](#license)
+## What It Produces
 
-## Overview
+Here is a real output from a single prompt: *"Write an investment memo on XOM."*
 
-AlphaSeeker runs a **root orchestrator agent** as a supervised subprocess. The orchestrator decides — based on the prompt — when to delegate to child agents, which skill tools to call, and when the report is ready to publish.
+> **ExxonMobil is an exceptional company operating at the top of the global oil industry. Its asset portfolio — anchored by the Permian Basin, Guyana, and world-scale refining — is structurally advantaged, its balance sheet is fortress-quality, and its shareholder return commitment is unmatched among integrated majors. Yet the stock at approximately $160–162 per share presents a challenging near-term risk/reward.**
+>
+> **Investment verdict:** Hold/Underweight at current levels. A pullback to $130–140 would offer a materially better entry. Q1 2026 earnings (May 1, 2026) are a critical near-term catalyst.
 
-Child agents are **deterministic research workers**: they don't guess at numbers, they fetch them from live data sources (market data, SEC filings, FRED, EIA, CFTC). The orchestrator synthesizes their outputs into a final memo.
+The full memo covers: executive summary and verdict, FY2025 financials (revenue, FCF, ROCE), valuation (EV/EBITDA, P/E, FCF yield, analyst consensus), balance sheet quality, shareholder return analysis, crude oil supply/demand balance, WTI futures curve structure, U.S. macro backdrop, and bull/bear cases with 12-month risk/reward.
+
+**[Read the full XOM memo →](docs/examples/assets/xom_investment_memo.md)**
+
+---
+
+## How It Works
+
+```
+User Prompt
+    │
+    ▼
+Root Orchestrator Agent (subprocess)
+    │  LLM decides: delegate? which skills? when done?
+    ├─► spawns child agents (research, writer, synthesizer...)
+    │       │
+    │       ▼
+    │   Skill Tools  ←  deterministic, no hallucination
+    │       │  market data · SEC filings · FRED · EIA · CFTC
+    │       ▼
+    │   publish/  ← agent writes results here
+    │
+    ▼
+Root reads child publish/ → synthesizes final memo
+    │
+    ▼
+Final Report + full run trace on disk
+```
 
 Key design choices:
 
-- **File-based handoff** — agents communicate by writing and reading files, not in-memory state. You can inspect every intermediate result.
+- **File-based handoff** — agents communicate by writing and reading files, not in-memory state. Every intermediate result is inspectable.
 - **Subprocess isolation** — a crashed or stalled child agent cannot block the pipeline.
-- **Skill packs** — deterministic tools organized by domain: core (search, file, time), equity, macro, commodity.
-- **Commenter sidecar** — a paired reviewer reads each agent's workspace and injects advisory notes back into the next turn.
+- **Skill packs** — deterministic tools organized by domain: core, equity, macro, commodity.
+- **Commenter sidecar** — a paired reviewer reads each agent's workspace and injects advisory notes into the next turn.
+
+---
 
 ## Why AlphaSeeker
 
@@ -51,80 +77,59 @@ Key design choices:
 | Model can hallucinate numbers | Deterministic tools pull facts from external APIs |
 | Fragile on slow I/O | Subprocess isolation — one slow tool doesn't block the pipeline |
 
-## What It Can Do
+---
+
+## What It Can Research
 
 | Domain | Skill tools | Typical output |
 |---|---|---|
-| Equity | Market data, company profile, financials, SEC filings, insider activity, peer analysis, earnings calls | Equity research memo with valuation, risk factors, peer context |
-| Macro | FRED indicators, World Bank cross-country data | Macro brief covering growth, inflation, rates |
-| Commodity | EIA inventory, CFTC COT positioning, futures curve | Commodity report with supply-demand analysis |
-| Core | Web search, file read/write, context condensation, datetime | Used by all domains |
+| **Equity** | Market data, company profile, financials, SEC filings, insider activity, peer analysis, earnings calls | Equity research memo with valuation, risk factors, peer context |
+| **Macro** | FRED indicators, World Bank cross-country data | Macro brief covering growth, inflation, rates |
+| **Commodity** | EIA inventory, CFTC COT positioning, futures curve | Commodity report with supply-demand analysis |
+| **Core** | Web search, file read/write, context condensation, datetime | Used by all domains |
 
-The orchestrator decides which combination of skills to invoke based on the prompt — no manual routing required.
+The orchestrator decides which combination to invoke — no manual routing required.
 
-## How a Query Flows
+**Example prompts:**
 
 ```
-User Prompt
-    │
-    ▼
-Root Orchestrator Agent (subprocess)
-    │  LLM decides: delegate? which skills? when done?
-    ├─► spawns child agents (research, writer, synthesizer...)
-    │       │
-    │       ▼
-    │   Skill Tools (deterministic — fetch real data)
-    │       │  market data, SEC filings, FRED, EIA...
-    │       ▼
-    │   publish/  ← agent writes results here
-    │
-    ▼
-Root reads child publish/ files → synthesizes final memo
-    │
-    ▼
-Final Report + full run trace on disk
+Analyze AAPL from valuation and risk perspective
+US macro outlook for the next 12 months
+Crude oil supply-demand and futures curve outlook
+How do higher rates affect JPM and bank margins?
+How would a weaker dollar affect gold miners and the gold price?
 ```
 
-Every agent turn, every tool call, every fetched file is written to `data/harness_runs/<run_id>/`. You can replay the entire research process.
+---
 
 ## Quickstart
 
-### 1. Prerequisites
-
-- Python 3.11+
-- [uv](https://docs.astral.sh/uv/)
-
-### 2. Install dependencies
+**Prerequisites:** Python 3.11+, [uv](https://docs.astral.sh/uv/)
 
 ```bash
+# 1. Install dependencies
 uv sync
-```
 
-### 3. Configure environment variables
-
-```bash
+# 2. Configure API keys
 cp .env.example .env
-```
+# Edit .env and fill in the keys for the providers you use
 
-Fill only the keys required by the model providers and data sources you actually use.
+# 3. Run
+uv run python main.py "Write an investment memo on XOM"
 
-### 4. Run AlphaSeeker
-
-```bash
+# Or interactive mode
 uv run python main.py
 ```
 
-You will be prompted for a research question in the terminal.
+---
 
 ## Configuration
 
 ### Model providers
 
-Model assignments live in `config/models.yaml` and can be overridden with environment variables.
+Model assignments live in `config/models.yaml`. Each provider requires a corresponding API key:
 
-At startup, AlphaSeeker checks whether the API keys required by your active model choices are present.
-
-| Provider model prefix | Required env var |
+| Provider prefix | Required env var |
 |---|---|
 | `sf/` | `SILICONFLOW_API_KEY` |
 | `kimi-` | `KIMI_API_KEY` |
@@ -133,49 +138,28 @@ At startup, AlphaSeeker checks whether the API keys required by your active mode
 | `gemini-` | `GOOGLE_API_KEY` |
 | `claude-` | `ANTHROPIC_API_KEY` |
 
-If you use MiniMax, the backend term `base URL` means the root HTTP endpoint your client sends API requests to. AlphaSeeker defaults to `https://api.minimaxi.com/v1`, and you can override it with `MINIMAX_BASE_URL` if you need a different endpoint.
+MiniMax endpoint defaults to `https://api.minimaxi.com/v1`. Override with `MINIMAX_BASE_URL` if needed.
 
 ### Data source keys
 
-These are only required when the skills they power are invoked:
+Only required when the corresponding skills are invoked:
 
-- `FRED_API_KEY` for macro indicator fetches
-- `EIA_API_KEY` for commodity inventory fetches
-- `FMP_API_KEY` for insider-trading data
+| Key | Used for |
+|---|---|
+| `FRED_API_KEY` | Macro indicator fetches |
+| `EIA_API_KEY` | Commodity inventory fetches |
+| `FMP_API_KEY` | Insider-trading data |
 
-### Model override order
-
-Model selection follows this priority:
-
-1. `ALPHASEEKER_MODEL_<AGENT>_<ROLE>` environment variable override
-2. `config/models.yaml`
-3. Fallback defaults in `src/shared/model_config.py`
-
-Example:
+### Model override
 
 ```bash
-export ALPHASEEKER_MODEL_HARNESS_AGENT="kimi-k2.5"
+# Override any model role via env var
+export ALPHASEEKER_MODEL_HARNESS_AGENT="claude-opus-4-5"
 ```
 
-The harness runtime currently uses two model roles: `agent` (the orchestrator and child agents) and `condense` (context compression).
+Priority: env var → `config/models.yaml` → fallback defaults in `src/shared/model_config.py`.
 
-## Example Prompts
-
-- `Analyze AAPL from valuation and risk perspective`
-- `US macro outlook for the next 12 months`
-- `Crude oil supply-demand and futures curve outlook`
-- `How do higher rates affect JPM and bank margins?`
-- `How would a weaker dollar affect gold miners and the gold price?`
-
-## Example Outputs
-
-These were all generated by the harness runtime:
-
-- [XOM cross-domain investment memo](docs/examples/assets/xom_investment_memo.md) — 409-line memo produced from a single prompt: valuation, balance sheet, shareholder returns, crude oil supply/demand, futures curve, U.S. macro backdrop, bull/bear cases, and 12-month risk/reward
-- [AAPL one-page showcase](docs/examples/aapl_equity_one_pager.md) — concise equity brief with charts
-- [AAPL curated case study](docs/examples/aapl_equity_case_study.md) — detailed walkthrough
-
-Every run also writes its complete workspace to `data/harness_runs/<run_id>/` — you can replay exactly what the model saw and did.
+---
 
 ## Project Structure
 
@@ -192,66 +176,48 @@ AlphaSeeker/
 │   │   ├── transport.py         # MiniMax / OpenAI API adapters
 │   │   ├── commenter.py         # Paired reviewer sidecar
 │   │   └── skills/              # Deterministic skill adapters
-│   │       ├── core.py          # search_in_files, read_file, condense...
-│   │       ├── equity.py        # fetch_market_data, fetch_financials...
-│   │       ├── macro.py         # fetch_macro_indicators...
-│   │       └── commodity.py     # fetch_eia_inventory, fetch_cot_report...
+│   │       ├── core.py          # search_in_files, read_file, condense…
+│   │       ├── equity.py        # fetch_market_data, fetch_financials…
+│   │       ├── macro.py         # fetch_macro_indicators…
+│   │       └── commodity.py     # fetch_eia_inventory, fetch_cot_report…
 │   ├── tools/                   # Shared data-fetching library
-│   │   ├── equity/             # yfinance, SEC, peers, visualization
-│   │   ├── macro/              # FRED, World Bank
-│   │   └── commodity/          # EIA, CFTC COT, futures curve
+│   │   ├── equity/              # yfinance, SEC, peers, visualization
+│   │   ├── macro/               # FRED, World Bank
+│   │   └── commodity/           # EIA, CFTC COT, futures curve
 │   └── shared/                  # LLM manager, model config, web search
-├── data/harness_runs/          # Every run's full workspace (git-ignored)
-├── reports/                     # Final generated memos (git-ignored)
-├── charts/                      # Generated chart images (git-ignored)
+├── data/harness_runs/           # Every run's full workspace (git-ignored)
 └── tests/
-    ├── unit/                   # Deterministic logic
-    ├── component/              # Multi-function flows
-    └── live/                  # Real API runs
+    ├── unit/                    # Deterministic logic
+    ├── component/               # Multi-function flows with mocked deps
+    └── live/                    # Real API runs
 ```
+
+---
 
 ## Testing
 
-AlphaSeeker uses a layered pytest setup:
-
-- `unit` tests for deterministic logic
-- `component` tests for multi-function flows with mocked dependencies
-- `live` tests for full runs against real providers
-
-Run the local quality gate:
-
 ```bash
+# Compile check + offline tests
 uv run python -m compileall -q src main.py
 uv run pytest -m "not live"
-```
 
-Run the live suite:
-
-```bash
+# Full live suite (requires API keys)
 uv run pytest -m "live"
 ```
 
-GitHub Actions runs the offline suite on pushes and pull requests, and supports live test runs through manual dispatch.
+GitHub Actions runs the offline suite on every push and pull request.
 
-If you are not used to the word "suite": it just means a grouped set of tests.
+---
 
-## Current Limits
-
-- Terminal-only interface — no web UI.
-- Live data sources (market data, SEC, FRED, EIA) require valid API keys.
-- Generated analysis should be reviewed by a human before use in investment decisions.
-
-## Additional Reading
+## Further Reading
 
 - [Harness runtime deep dive](src/harness/README.md) — architecture, workspace protocol, public interface
 - [Harness task model](src/harness/TASK.md) — how tasks, artifacts, and skill state work
-- [Roadmap and next milestones](TODO.md)
-- [Contribution guide](CONTRIBUTING.md)
+- [Roadmap](TODO.md)
+- [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+---
 
 ## License
 

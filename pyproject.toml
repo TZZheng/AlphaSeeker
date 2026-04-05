@@ -21,9 +21,12 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "pytest>=8.4.2",
     "requests>=2.32.5",
+    "rich>=13.0.0",
     "tabulate>=0.9.0",
     "tenacity>=9.1.2",
+    "textual>=0.80.0",
     "trafilatura>=2.0.0",
+    "typer>=0.15.0",
     "yfinance>=0.2.50",
 ]
 
@@ -35,4 +38,9 @@ markers = [
     "component: multi-function/component tests with mocked dependencies",
     "live: live integration tests using real model/API providers",
     "network: tests that require external network",
+]
+
+[dependency-groups]
+dev = [
+    "textual-dev>=1.8.0",
 ]
