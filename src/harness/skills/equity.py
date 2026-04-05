@@ -4,20 +4,20 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.agents.equity.tools.company_profile import fetch_company_profile
-from src.agents.equity.tools.earnings_calls import research_earnings_call
-from src.agents.equity.tools.financials import fetch_financial_metrics
-from src.agents.equity.tools.insider_trading import fetch_insider_activity
-from src.agents.equity.tools.market_data import fetch_historical_data
-from src.agents.equity.tools.peers import (
+from src.tools.equity.company_profile import fetch_company_profile
+from src.tools.equity.earnings_calls import research_earnings_call
+from src.tools.equity.financials import fetch_financial_metrics
+from src.tools.equity.insider_trading import fetch_insider_activity
+from src.tools.equity.market_data import fetch_historical_data
+from src.tools.equity.peers import (
     evaluate_candidates,
     extract_peers_from_text,
     fetch_peer_metrics,
 )
-from src.agents.equity.tools.sec_filings import search_and_read_filings
-from src.agents.equity.tools.visualization import plot_price_history
+from src.tools.equity.sec_filings import search_and_read_filings
+from src.tools.equity.visualization import plot_price_history
 from src.harness.skills.common import artifact_evidence, json_preview, make_result, note_evidence, safe_read, url_evidence
-from src.harness.types import HarnessState, SkillResult, SkillSpec
+from src.harness.types import HarnessState, SkillMetrics, SkillResult, SkillSpec
 
 
 def _recent_evidence_text(state: HarnessState, limit: int = 8) -> str:
@@ -42,7 +42,12 @@ def fetch_market_data_skill(arguments: dict[str, Any], _state: HarnessState) -> 
         arguments,
         status="ok",
         summary=f"Fetched {period} historical market data for {ticker}.",
-        structured_data={"ticker": ticker, "period": period, "path": path},
+        details={"ticker": ticker, "period": period, "path": path},
+        metrics=SkillMetrics(
+            evidence_count=1,
+            artifact_count=1,
+            sections_touched=["Valuation and Scenarios"],
+        ),
         output_text=path,
         artifacts=[path],
         evidence=[artifact_evidence("fetch_market_data", f"Historical market data for {ticker}.", path)],
@@ -67,7 +72,8 @@ def plot_price_history_skill(arguments: dict[str, Any], _state: HarnessState) ->
         arguments,
         status="ok",
         summary=f"Generated a price chart for {ticker}.",
-        structured_data={"ticker": ticker, "chart_path": chart_path, "data_path": data_path},
+        details={"ticker": ticker, "chart_path": chart_path, "data_path": data_path},
+        metrics=SkillMetrics(evidence_count=1, artifact_count=1, sections_touched=["Valuation and Scenarios"]),
         output_text=chart_path,
         artifacts=[chart_path],
         evidence=[artifact_evidence("plot_price_history", f"Price chart for {ticker}.", chart_path)],
@@ -92,7 +98,12 @@ def fetch_company_profile_skill(arguments: dict[str, Any], _state: HarnessState)
         arguments,
         status="ok",
         summary=f"Fetched company profile data for {ticker}.",
-        structured_data={"ticker": ticker, "metadata": metadata, "path": path},
+        details={"ticker": ticker, "metadata": metadata, "path": path},
+        metrics=SkillMetrics(
+            evidence_count=1,
+            artifact_count=1,
+            sections_touched=["Equity Overview"],
+        ),
         output_text=text,
         artifacts=[path],
         evidence=[artifact_evidence("fetch_company_profile", f"Company profile for {ticker}.", path, content=text, metadata=metadata)],
@@ -117,7 +128,12 @@ def fetch_financials_skill(arguments: dict[str, Any], _state: HarnessState) -> S
         arguments,
         status="ok",
         summary=f"Fetched financial metrics for {ticker}.",
-        structured_data={"ticker": ticker, "metadata": metadata, "path": path},
+        details={"ticker": ticker, "metadata": metadata, "path": path},
+        metrics=SkillMetrics(
+            evidence_count=1,
+            artifact_count=1,
+            sections_touched=["Key Findings", "Valuation and Scenarios"],
+        ),
         output_text=text,
         artifacts=[path],
         evidence=[artifact_evidence("fetch_financials", f"Financial metrics for {ticker}.", path, content=text, metadata=metadata)],
@@ -139,8 +155,37 @@ def search_sec_filings_skill(arguments: dict[str, Any], _state: HarnessState) ->
             error="Missing company_name.",
         )
 
+    resolved_company_name = company_name
+    if ticker and (resolved_company_name.upper() == ticker or len(resolved_company_name) <= 5):
+        profile_metadata: dict[str, Any] = {}
+        for item in reversed(_state.evidence_ledger):
+            if item.skill_name != "fetch_company_profile":
+                continue
+            item_ticker = str(item.metadata.get("symbol") or item.metadata.get("ticker") or "").upper()
+            if item_ticker and item_ticker != ticker:
+                continue
+            if isinstance(item.metadata, dict):
+                profile_metadata = item.metadata
+                break
+        if not profile_metadata:
+            try:
+                _, fetched_metadata = fetch_company_profile(ticker)
+            except Exception:
+                fetched_metadata = {}
+            if isinstance(fetched_metadata, dict):
+                profile_metadata = fetched_metadata
+        candidate = (
+            profile_metadata.get("company_name")
+            or profile_metadata.get("longName")
+            or profile_metadata.get("shortName")
+            or profile_metadata.get("displayName")
+            or profile_metadata.get("name")
+        )
+        if isinstance(candidate, str) and candidate.strip():
+            resolved_company_name = candidate.strip()
+
     results = search_and_read_filings(
-        company_name=company_name,
+        company_name=resolved_company_name,
         ticker=ticker,
         form_types=form_types,
         max_filings=max_filings,
@@ -152,7 +197,7 @@ def search_sec_filings_skill(arguments: dict[str, Any], _state: HarnessState) ->
             f"{item.get('form_type', 'SEC filing')} filed {item.get('filing_date', '')}",
             item.get("url", ""),
             content=item.get("text", ""),
-            metadata={"company_name": company_name, "ticker": ticker},
+            metadata={"company_name": resolved_company_name, "ticker": ticker},
         )
         for item in results
     ]
@@ -160,12 +205,21 @@ def search_sec_filings_skill(arguments: dict[str, Any], _state: HarnessState) ->
         f"### {item.get('form_type', '')} {item.get('filing_date', '')}\n{item.get('url', '')}\n\n{item.get('text', '')}"
         for item in results
     )
+    display_company_name = resolved_company_name.rstrip(".")
+
     return make_result(
         "search_sec_filings",
         arguments,
         status="ok",
-        summary=f"Read {len(results)} SEC filing(s) for {company_name}.",
-        structured_data={"company_name": company_name, "ticker": ticker, "results": results},
+        summary=f"Read {len(results)} SEC filing(s) for {display_company_name}.",
+        details={"company_name": resolved_company_name, "ticker": ticker, "results": results},
+        metrics=SkillMetrics(
+            evidence_count=len(evidence),
+            urls_read=len(results),
+            dated_evidence_count=sum(1 for item in results if item.get("filing_date")),
+            filings_found=len(results),
+            sections_touched=["Equity Overview", "Valuation and Scenarios"],
+        ),
         output_text=output_text,
         evidence=evidence,
     )
@@ -189,7 +243,7 @@ def fetch_insider_activity_skill(arguments: dict[str, Any], _state: HarnessState
             arguments,
             status="partial",
             summary=f"No insider-activity artifact was produced for {ticker}.",
-            structured_data={"ticker": ticker, "metadata": metadata},
+            details={"ticker": ticker, "metadata": metadata},
             error="Insider activity source unavailable or empty.",
         )
     text = safe_read(path, max_chars=4000)
@@ -198,7 +252,12 @@ def fetch_insider_activity_skill(arguments: dict[str, Any], _state: HarnessState
         arguments,
         status="ok",
         summary=f"Fetched insider trading activity for {ticker}.",
-        structured_data={"ticker": ticker, "metadata": metadata, "path": path},
+        details={"ticker": ticker, "metadata": metadata, "path": path},
+        metrics=SkillMetrics(
+            evidence_count=1,
+            artifact_count=1,
+            sections_touched=["Risks and Counterevidence"],
+        ),
         output_text=text,
         artifacts=[path],
         evidence=[artifact_evidence("fetch_insider_activity", f"Insider trading activity for {ticker}.", path, content=text, metadata=metadata)],
@@ -223,7 +282,11 @@ def research_earnings_call_skill(arguments: dict[str, Any], _state: HarnessState
         arguments,
         status="ok" if not metadata.get("error") else "partial",
         summary=f"Collected earnings-call research for {ticker}.",
-        structured_data={"ticker": ticker, "company_name": company_name, "metadata": metadata},
+        details={"ticker": ticker, "company_name": company_name, "metadata": metadata},
+        metrics=SkillMetrics(
+            evidence_count=1,
+            sections_touched=["Equity Overview", "Key Findings", "Risks and Counterevidence"],
+        ),
         output_text=text,
         evidence=[note_evidence("research_earnings_call", f"Earnings call notes for {ticker}.", content=text, metadata=metadata)],
         error=metadata.get("error"),
@@ -262,7 +325,13 @@ def analyze_peers_skill(arguments: dict[str, Any], state: HarnessState) -> Skill
         arguments,
         status="ok",
         summary=f"Generated peer analysis for {ticker} with {sum(len(v) for v in categorized.values())} categorized peers.",
-        structured_data={"ticker": ticker, "candidates": candidates, "categorized": categorized, "metadata": metadata},
+        details={"ticker": ticker, "candidates": candidates, "categorized": categorized, "metadata": metadata},
+        metrics=SkillMetrics(
+            evidence_count=1,
+            artifact_count=1,
+            sections_touched=["Peer and Competitive Pressure", "Risks and Counterevidence"],
+            extra={"peer_count": sum(len(v) for v in categorized.values())},
+        ),
         output_text=text or json_preview(categorized),
         artifacts=[path],
         evidence=[artifact_evidence("analyze_peers", f"Peer analysis for {ticker}.", path, content=text, metadata={"categorized": categorized, "metadata": metadata})],
