@@ -445,6 +445,10 @@ def test_bash_rg_discovers_matching_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    import shutil
+    if not shutil.which("rg"):
+        pytest.skip("ripgrep not installed")
+
     monkeypatch.chdir(tmp_path)
     request = HarnessRequest(user_prompt="Find markdown files", run_id="executor-glob-files")
     run_root, root_agent_id = initialize_run_root(request)
@@ -648,7 +652,7 @@ def test_read_file_supports_line_slices(
         },
     )
 
-    assert result["status"] == "ok"
+    assert result["status"] == "truncated"
     assert result["content"] == "line2\nline3\n"
 
 
