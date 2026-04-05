@@ -85,7 +85,12 @@ def _iso_to_epoch(value: str | None) -> float | None:
 
 
 async def _default_launch_agent_process(run_root: str, agent_id: str) -> asyncio.subprocess.Process:
-    return await asyncio.create_subprocess_exec(
+    # Redirect subprocess stdout/stderr to a per-agent log file so that
+    # print/warning output from agent workers doesn't corrupt the TUI.
+    log_path = Path(run_root) / "agents" / agent_id / "scratch" / "worker.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_fh = open(str(log_path), "a", encoding="utf-8")
+    proc = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",
         "src.harness.agent_worker",
@@ -94,7 +99,11 @@ async def _default_launch_agent_process(run_root: str, agent_id: str) -> asyncio
         "--agent-id",
         agent_id,
         cwd=str(Path.cwd()),
+        stdout=log_fh,
+        stderr=log_fh,
     )
+    log_fh.close()  # Parent closes its reference; child still has the fd
+    return proc
 
 
 def _resolve_request(request: HarnessRequest) -> HarnessRequest:
@@ -320,10 +329,19 @@ def _read_last_commented_fingerprint(run_root: str, agent_id: str) -> str:
     return str(state.get("last_commented_fingerprint") or "")
 
 
+STOP_REQUESTED_FILE = "stop_requested"
+
+
 async def _monitor_agents(shared: SupervisorState) -> None:
     while not shared.stop_requested:
         now_epoch = time.time()
         elapsed = now_epoch - shared.run_started_at
+
+        # Check for an externally-written stop-request sentinel (e.g. from the TUI).
+        stop_file = Path(shared.run_root) / STOP_REQUESTED_FILE
+        if stop_file.exists() and not shared.soft_stop_requested:
+            elapsed = shared.request.wall_clock_budget_seconds  # trigger soft-stop block below
+
         if elapsed >= shared.request.wall_clock_budget_seconds and not shared.soft_stop_requested:
             shared.soft_stop_requested = True
             shared.soft_stop_started_at = now_epoch
@@ -333,7 +351,7 @@ async def _monitor_agents(shared: SupervisorState) -> None:
                     event_type="run_soft_stop_requested",
                     agent_id=shared.root_agent_id,
                     details={
-                        "reason": "wall_clock_budget_reached",
+                        "reason": "wall_clock_budget_reached" if not stop_file.exists() else "user_requested_stop",
                         "grace_seconds": SOFT_STOP_GRACE_SECONDS,
                     },
                 ),

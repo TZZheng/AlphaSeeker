@@ -201,7 +201,9 @@ class RateLimitWrapper:
             reraise=True
         ):
             with attempt:
-                return self.model.invoke(*args, **kwargs)
+                result = self.model.invoke(*args, **kwargs)
+                _notify_observer(self.current_model_name, args, result)
+                return result
         raise RuntimeError("Retry loop exited without invoking model")
 
     def _retry_stream(self, *args: Any, **kwargs: Any) -> Any:
@@ -214,7 +216,8 @@ class RateLimitWrapper:
             reraise=True
         ):
             with attempt:
-                return self.model.stream(*args, **kwargs)
+                result = self.model.stream(*args, **kwargs)
+                return result
         raise RuntimeError("Retry loop exited without invoking model")
 
     def with_structured_output(self, *args, **kwargs):
@@ -241,6 +244,34 @@ class RateLimitWrapper:
         """Proxy other attribute access to the underlying model."""
         return getattr(self.model, name)
 
+
+
+# ---------------------------------------------------------------------------
+# Global LLM observer hook (for TUI logging / thinking capture)
+# ---------------------------------------------------------------------------
+_llm_observer: Callable[[str, Any, Any, Any], None] | None = None
+"""Optional global callback invoked on every LLM invoke call.
+
+Args:
+    model_name: The model identifier string.
+    prompt: The input prompt/messages passed to the model.
+    response: The raw model response object.
+    thinking: Any thinking block content if available (None otherwise).
+"""
+
+
+def set_llm_observer(callback: Callable[[str, Any, Any, Any], None] | None) -> None:
+    """Register or clear the global LLM observer callback."""
+    global _llm_observer
+    _llm_observer = callback
+
+
+def _notify_observer(model_name: str, prompt: Any, response: Any, thinking: Any = None) -> None:
+    if _llm_observer is not None:
+        try:
+            _llm_observer(model_name, prompt, response, thinking)
+        except Exception:
+            pass  # Observer must not affect LLM calls
 
 
 # ---------------------------------------------------------------------------
