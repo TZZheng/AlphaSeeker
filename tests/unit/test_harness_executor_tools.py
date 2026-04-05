@@ -19,81 +19,6 @@ from src.harness.registry import build_skill_registry, get_skills_for_packs
 from src.harness.types import HarnessRequest, SkillMetrics, SkillResult, SkillSpec
 
 
-def test_wait_children_returns_compact_child_summary(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    request = HarnessRequest(user_prompt="Delegate a short task", run_id="executor-wait")
-    run_root, root_agent_id = initialize_run_root(request)
-    registry = build_skill_registry()
-    create_agent_workspace(
-        run_root,
-        agent_id=root_agent_id,
-        parent_id="",
-        preset="orchestrator",
-        task_name="Root Task",
-        description="Delegate work.",
-        task_markdown=render_root_task_markdown(request.user_prompt),
-        tools_markdown=render_tools_markdown(
-            preset="orchestrator",
-            available_tools=default_tool_allowlist("orchestrator"),
-            available_skills=visible_skills_for_preset(
-                preset="orchestrator",
-                available_skills=get_skills_for_packs(registry, ["core", "equity"]),
-            ),
-        ),
-    )
-    create_agent_workspace(
-        run_root,
-        agent_id="agent_child",
-        parent_id=root_agent_id,
-        preset="writer",
-        task_name="Child Task",
-        description="Write a compact answer.",
-        task_markdown="# Child\n\nWrite the answer.\n",
-        tools_markdown=render_tools_markdown(
-            preset="writer",
-            available_tools=default_tool_allowlist("writer"),
-            available_skills=[],
-        ),
-    )
-    child_paths = agent_workspace_paths(run_root, "agent_child")
-    write_text_atomic(child_paths["publish_summary"], "Child summary line\n\nMore detail.\n")
-    write_text_atomic(child_paths["publish_index"], "- final.md: Child final\n")
-    write_text_atomic(child_paths["publish_final"], "# Child\n\nDone.\n")
-    write_status(run_root, "agent_child", "done")
-    update_agent_record(run_root, agent_id="agent_child", status="done")
-
-    session = create_or_load_session(
-        request=request,
-        run_root=str(run_root),
-        agent_id=root_agent_id,
-        preset="orchestrator",
-        registry_map=registry,
-    )
-
-    result = execute_model_tool(
-        session,
-        "wait_children",
-        {"child_ids": ["agent_child"], "timeout_seconds": 0, "require_all": True},
-    )
-
-    assert result["completed"] is True
-    child = result["children"][0]
-    assert child["agent_id"] == "agent_child"
-    assert child["summary_excerpt"] == "Child summary line"
-    assert child["final_path"].endswith("publish/final.md")
-    assert child["has_summary"] is True
-    assert child["has_artifact_index"] is True
-    assert child["has_final"] is True
-    assert child["publish_files"][0]["path"].endswith("publish/artifact_index.md")
-    assert "remaining_agent_seconds" not in result["budget"]
-    assert "remaining_agent_slots" in result["budget"]
-    assert "remaining_live_child_slots" in result["budget"]
-    assert "tool_history" not in child
-
-
 def test_spawn_subagent_rejects_unknown_preset_and_lists_legal_presets(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -243,46 +168,6 @@ def test_skill_results_return_exact_artifact_and_output_paths(
     assert any(path.endswith("output.md") for path in result["output_files"])
     assert any(path.endswith("summary.md") for path in result["output_files"])
     assert any(path.endswith("details.json") for path in result["output_files"])
-
-
-def test_wait_children_uses_short_default_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    request = HarnessRequest(user_prompt="Wait briefly", run_id="executor-default-timeout")
-    run_root, root_agent_id = initialize_run_root(request)
-    registry = build_skill_registry()
-    create_agent_workspace(
-        run_root,
-        agent_id=root_agent_id,
-        parent_id="",
-        preset="orchestrator",
-        task_name="Root Task",
-        description="Delegate work.",
-        task_markdown=render_root_task_markdown(request.user_prompt),
-        tools_markdown=render_tools_markdown(
-            preset="orchestrator",
-            available_tools=default_tool_allowlist("orchestrator"),
-            available_skills=[],
-        ),
-    )
-    session = create_or_load_session(
-        request=request,
-        run_root=str(run_root),
-        agent_id=root_agent_id,
-        preset="orchestrator",
-        registry_map=registry,
-    )
-
-    clock = iter([0.0, 31.0])
-    monkeypatch.setattr(executor_module.time, "time", lambda: next(clock))
-    monkeypatch.setattr(executor_module.time, "sleep", lambda _seconds: None)
-
-    result = execute_model_tool(session, "wait_children", {})
-
-    assert result["completed"] is False
-    assert result["timed_out"] is True
 
 
 def test_publish_tools_normalize_publish_prefix(

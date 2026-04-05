@@ -21,6 +21,7 @@ from src.harness.artifacts import (
     load_skill_state,
     load_object_manifest,
     promote_object,
+    read_jsonl,
     read_status,
     read_text,
     refresh_progress_view,
@@ -46,7 +47,6 @@ from src.harness.types import (
 TOOL_NAMES = [
     "spawn_subagent",
     "list_children",
-    "wait_children",
     "list_publish_files",
     "promote_artifact",
     "bash",
@@ -166,19 +166,8 @@ def _tool_definitions() -> dict[str, dict[str, Any]]:
             },
         },
         "list_children": {
-            "description": "List child agents with status and published-file summaries.",
+            "description": "List all child agents with status. Drains the events queue so callers know which children just finished. Use in a loop: drain, do useful work, repeat until running_count=0.",
             "input_schema": {"type": "object", "properties": {}},
-        },
-        "wait_children": {
-            "description": "Wait for child agents and return their current status and published outputs.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "child_ids": {"type": "array", "items": {"type": "string"}},
-                    "timeout_seconds": {"type": "integer"},
-                    "require_all": {"type": "boolean"},
-                },
-            },
         },
         "list_publish_files": {
             "description": "List published files for an agent.",
@@ -612,37 +601,39 @@ def _child_rows(session: AgentSession) -> list[dict[str, Any]]:
 
 
 def _handle_list_children(session: AgentSession, _arguments: dict[str, Any]) -> dict[str, Any]:
-    rows = _child_rows(session)
-    return {"children": rows, "count": len(rows), "budget": _agent_budget_snapshot(session)}
+    # 1. Drain the events queue
+    queue_path = agent_workspace_paths(session.run_root, session.agent_id)["events_queue"]
+    queued_events = read_jsonl(queue_path)
+    write_text_atomic(queue_path, "")  # clear queue
 
+    # 2. Get all children from registry
+    all_children = _child_rows(session)
 
-def _handle_wait_children(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
-    target_ids = {str(item) for item in arguments.get("child_ids") or []}
-    timeout_seconds = int(arguments.get("timeout_seconds", 30))
-    require_all = bool(arguments.get("require_all", True))
-    start = time.time()
-    write_status(session.run_root, session.agent_id, "waiting")
-    while True:
-        rows = _child_rows(session)
-        if target_ids:
-            rows = [row for row in rows if row["agent_id"] in target_ids]
-        terminal = [row for row in rows if row["status"] in TERMINAL_STATUSES]
-        if rows and ((require_all and len(terminal) == len(rows)) or (not require_all and terminal)):
-            write_status(session.run_root, session.agent_id, "running")
-            return {
-                "children": terminal if not require_all else rows,
-                "completed": True,
-                "budget": _agent_budget_snapshot(session),
-            }
-        if time.time() - start >= timeout_seconds:
-            write_status(session.run_root, session.agent_id, "running")
-            return {
-                "children": rows,
-                "completed": False,
-                "timed_out": True,
-                "budget": _agent_budget_snapshot(session),
-            }
-        time.sleep(1)
+    # 3. Build result: completed (from queue) + running
+    completed = []
+    for event in queued_events:
+        child_id = event["child_id"]
+        row = next((r for r in all_children if r["agent_id"] == child_id), None)
+        if row:
+            completed.append({**row, "just_completed": True})
+        else:
+            # Child already removed from registry, use event data directly
+            completed.append({
+                "agent_id": child_id,
+                "status": event["status"],
+                "error": event.get("error", ""),
+                "just_completed": True,
+            })
+
+    running = [r for r in all_children if r["status"] not in TERMINAL_STATUSES]
+
+    return {
+        "children": completed + running,
+        "completed_count": len(completed),
+        "running_count": len(running),
+        "queue_depth": 0,
+        "budget": _agent_budget_snapshot(session),
+    }
 
 
 def _describe_file(path: Path) -> str:
@@ -1065,7 +1056,6 @@ _HANDLERS = {
     "spawn_subagent": _handle_spawn_subagent,
     "spawn_agent": _handle_spawn_subagent,
     "list_children": _handle_list_children,
-    "wait_children": _handle_wait_children,
     "list_publish_files": _handle_list_publish_files,
     "promote_artifact": _handle_promote_artifact,
     "bash": _handle_bash,

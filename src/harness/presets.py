@@ -11,7 +11,6 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
     "orchestrator": [
         "spawn_subagent",
         "list_children",
-        "wait_children",
         "list_publish_files",
         "bash",
         "write_file",
@@ -21,7 +20,6 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
     "research": [
         "spawn_subagent",
         "list_children",
-        "wait_children",
         "list_publish_files",
         "promote_artifact",
         "bash",
@@ -41,7 +39,6 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
     "writer": [
         "spawn_subagent",
         "list_children",
-        "wait_children",
         "list_publish_files",
         "bash",
         "write_file",
@@ -51,7 +48,6 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
     "synthesizer": [
         "spawn_subagent",
         "list_children",
-        "wait_children",
         "list_publish_files",
         "bash",
         "write_file",
@@ -61,7 +57,6 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
     "evaluator": [
         "spawn_subagent",
         "list_children",
-        "wait_children",
         "list_publish_files",
         "bash",
         "write_file",

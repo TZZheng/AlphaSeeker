@@ -172,6 +172,7 @@ def agent_workspace_paths(run_root: str | Path, agent_id: str) -> dict[str, Path
         "heartbeat": state / "heartbeat.txt",
         "pid": state / "pid.txt",
         "parent": state / "parent.txt",
+        "events_queue": state / "events_queue.jsonl",
         "preset": state / "preset.txt",
         "context_root": context_root,
     }

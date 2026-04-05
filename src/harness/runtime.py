@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import os
@@ -22,12 +23,14 @@ from src.harness.artifacts import (
     load_commenter_state,
     load_request,
     read_heartbeat,
+    read_jsonl,
     read_status,
     refresh_progress_view,
     save_commenter_state,
     stale_agents,
     update_agent_record,
     write_status,
+    write_text_atomic,
 )
 from src.harness.commenter import (
     COMMENTER_REFRESH_INTERVAL_SECONDS,
@@ -284,6 +287,31 @@ async def _launch_queued_agents(shared: SupervisorState) -> None:
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
+def _push_child_done_to_parent_queue(run_root: str, child_id: str, status: str, error: str = "") -> None:
+    """Append a child_done event to each living parent's events queue."""
+    records = latest_agent_records(run_root)
+    child_record = records.get(child_id)
+    if not child_record or not child_record.parent_id:
+        return
+    parent_id = child_record.parent_id
+    # Skip if parent is already terminal
+    parent_status = read_status(run_root, parent_id)
+    if parent_status in TERMINAL_STATUSES:
+        return
+    # Append to parent's queue
+    parent_paths = agent_workspace_paths(run_root, parent_id)
+    queue_path = parent_paths["events_queue"]
+    event = {
+        "type": "child_done",
+        "child_id": child_id,
+        "status": status,
+        "error": error,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    with open(queue_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(event) + "\n")
+
+
 async def _monitor_agents(shared: SupervisorState) -> None:
     while not shared.stop_requested:
         now_epoch = time.time()
@@ -333,6 +361,13 @@ async def _monitor_agents(shared: SupervisorState) -> None:
                         details={"heartbeat": read_heartbeat(shared.run_root, stale_id)},
                     ),
                 )
+                await asyncio.to_thread(
+                    _push_child_done_to_parent_queue,
+                    shared.run_root,
+                    stale_id,
+                    "stale",
+                    "Heartbeat stale.",
+                )
                 managed = shared.live.pop(stale_id, None)
                 if managed is not None:
                     await _terminate_process(managed)
@@ -352,6 +387,11 @@ async def _monitor_agents(shared: SupervisorState) -> None:
                     finished_at=datetime.now(timezone.utc).isoformat(),
                     error=f"Worker exited with code {process.returncode}.",
                 )
+                terminal_status = "failed"
+                terminal_error = f"Worker exited with code {process.returncode}."
+            else:
+                terminal_status = current_status
+                terminal_error = ""
             append_event(
                 shared.run_root,
                 AgentEvent(
@@ -359,6 +399,13 @@ async def _monitor_agents(shared: SupervisorState) -> None:
                     agent_id=agent_id,
                     details={"returncode": process.returncode},
                 ),
+            )
+            await asyncio.to_thread(
+                _push_child_done_to_parent_queue,
+                shared.run_root,
+                agent_id,
+                terminal_status,
+                terminal_error,
             )
 
         root_status = read_status(shared.run_root, shared.root_agent_id)
