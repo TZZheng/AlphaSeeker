@@ -138,6 +138,8 @@ Model assignments live in `config/models.yaml`. Each provider requires a corresp
 | `gemini-` | `GOOGLE_API_KEY` |
 | `claude-` | `ANTHROPIC_API_KEY` |
 
+**Recommended: MiniMax.** In our testing MiniMax (M2.7) delivers the best research quality — strong multi-step reasoning, generous context window, and competitive cost. Set `MINIMAX_API_KEY` and the defaults in `config/models.yaml` will use it out of the box.
+
 MiniMax endpoint defaults to `https://api.minimaxi.com/v1`. Override with `MINIMAX_BASE_URL` if needed.
 
 ### Data source keys
