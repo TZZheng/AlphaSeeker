@@ -295,7 +295,14 @@ class DashboardScreen(Screen):
                 if entry.get("kind") != "assistant_response":
                     continue
                 turn_idx = entry.get("turn_index", "?")
-                for block in entry.get("message", {}).get("content", []):
+                content = entry.get("message", {}).get("content") or []
+                # OpenAI transport stores content as a plain string; treat it as a text block.
+                if isinstance(content, str):
+                    content = [{"type": "text", "text": content}] if content.strip() else []
+                added_text = False
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
                     btype = block.get("type", "")
                     if btype == "text":
                         text = block.get("text", "")
@@ -303,16 +310,27 @@ class DashboardScreen(Screen):
                             llm_buf.append(
                                 f"[dim cyan]{agent_id}[/dim cyan] "
                                 f"[dim]turn {turn_idx}[/dim]\n"
-                                f"  {_summarize(text, 400)}"
+                                f"  {_summarize(text, 1000)}"
                             )
+                            added_text = True
                     elif btype == "thinking":
                         thinking = block.get("thinking", "")
                         if thinking and thinking.strip():
                             thinking_buf.append(
                                 f"[dim magenta]{agent_id}[/dim magenta] "
                                 f"[dim]turn {turn_idx}[/dim]\n"
-                                f"  {_summarize(thinking, 600)}"
+                                f"  {_summarize(thinking, 1000)}"
                             )
+                # OpenAI models return content=None on tool-call turns; show tool names instead.
+                if not added_text:
+                    tool_calls = entry.get("decision", {}).get("tool_calls", [])
+                    if tool_calls:
+                        calls_str = ", ".join(tc.get("name", "?") for tc in tool_calls)
+                        llm_buf.append(
+                            f"[dim cyan]{agent_id}[/dim cyan] "
+                            f"[dim]turn {turn_idx}[/dim]\n"
+                            f"  [dim]→ {calls_str}[/dim]"
+                        )
 
     def _agents_to_display(self, entries_map: dict[str, list[str]]) -> list[str]:
         """Return agent IDs to show given current selection.

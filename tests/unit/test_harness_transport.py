@@ -183,11 +183,15 @@ def _create_agent_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     return Path(run_root), agent_id
 
 
-def test_auto_transport_prefers_anthropic_for_minimax(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auto_transport_routing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MINIMAX_BASE_URL", raising=False)
 
     assert resolve_agent_transport("auto", "minimax/MiniMax-M2.7") == "minimax_anthropic"
-    assert resolve_agent_transport("auto", "gpt-4o") == "text_json"
+    assert resolve_agent_transport("auto", "claude-sonnet-4-6") == "anthropic"
+    assert resolve_agent_transport("auto", "gpt-4o") == "openai"
+    assert resolve_agent_transport("auto", "o3-mini") == "openai"
+    assert resolve_agent_transport("auto", "o4-mini") == "openai"
+    assert resolve_agent_transport("auto", "sf/Qwen2.5-72B") == "text_json"
 
 
 def test_minimax_default_base_urls_match_official_docs(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -93,14 +93,19 @@ def _invoke_text_response(
     system_prompt: str,
     user_prompt: str,
 ) -> str:
-    if transport_name == "minimax_anthropic":
-        client = anthropic.Anthropic(
-            base_url=minimax_anthropic_base_url(),
-            api_key=os.environ["MINIMAX_API_KEY"],
-        )
+    if transport_name in {"minimax_anthropic", "anthropic"}:
+        if transport_name == "anthropic":
+            client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+            model = model_name
+        else:
+            client = anthropic.Anthropic(
+                base_url=minimax_anthropic_base_url(),
+                api_key=os.environ["MINIMAX_API_KEY"],
+            )
+            model = normalize_minimax_model_name(model_name)
         for max_tokens in (768, 1536):
             response = client.messages.create(
-                model=normalize_minimax_model_name(model_name),
+                model=model,
                 max_tokens=max_tokens,
                 system=system_prompt,
                 messages=[{"role": "user", "content": [{"type": "text", "text": user_prompt}]}],
@@ -114,13 +119,18 @@ def _invoke_text_response(
             if text:
                 return text
         return ""
-    if transport_name == "minimax_openai":
-        client = OpenAI(
-            base_url=minimax_openai_base_url(),
-            api_key=os.environ["MINIMAX_API_KEY"],
-        )
+    if transport_name in {"minimax_openai", "openai"}:
+        if transport_name == "openai":
+            client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+            model = model_name
+        else:
+            client = OpenAI(
+                base_url=minimax_openai_base_url(),
+                api_key=os.environ["MINIMAX_API_KEY"],
+            )
+            model = normalize_minimax_model_name(model_name)
         response = client.chat.completions.create(
-            model=normalize_minimax_model_name(model_name),
+            model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
