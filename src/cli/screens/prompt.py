@@ -17,6 +17,7 @@ from textual.widgets import (
 )
 
 from src.cli.backends.harness_backend import HarnessBackend
+from src.cli.screens.dashboard import DashboardScreen
 from src.cli.screens.effort import REASONING_LEVELS
 from src.harness.types import HarnessRequest
 
@@ -182,4 +183,7 @@ class PromptScreen(Screen):
         self.app._skill_packs = packs
         self.app._query = query
 
-        self.app.push_screen("dashboard")
+        # Push DashboardScreen directly (not by string name) to avoid Textual
+        # reusing a prior instance that has _started=True — which would skip
+        # on_mount init and leave the new backend unpolled.
+        self.app.push_screen(DashboardScreen())
