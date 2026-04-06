@@ -60,14 +60,14 @@ class DashboardScreen(Screen):
     }
 
     #left-pane {
-        width: 40%;
+        width: 1fr;
         min-width: 35;
         border-right: solid $primary 30%;
         padding: 0 1;
     }
 
     #right-pane {
-        width: 60%;
+        width: 1fr;
         padding: 0 1;
     }
 
