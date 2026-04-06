@@ -126,7 +126,7 @@ class ModelSelectScreen(Screen):
     """
 
     BINDINGS = [
-        Binding("escape", "app.pop_screen", "Back", show=False),
+        Binding("escape", "app.exit", "Quit", show=False),
     ]
 
     def __init__(self, prefill_query: str | None = None):

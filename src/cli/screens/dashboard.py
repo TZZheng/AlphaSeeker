@@ -27,7 +27,10 @@ from src.cli.theme import STATUS_COLORS
 
 
 TERMINAL_STATUSES = {"done", "failed", "blocked", "stale", "cancelled"}
-VERBOSITY_LEVELS = ["quiet", "normal", "verbose"]
+_LAYOUT_MODES = ["split", "focus", "status"]
+# split: both panes visible (default)
+# focus: right pane full-width (left pane hidden)
+# status: left pane full-width (right pane hidden)
 
 # String column keys used with update_cell
 _COL_STATUS = "status"
@@ -103,19 +106,16 @@ class DashboardScreen(Screen):
     """
 
     BINDINGS = [
-        Binding("a", "toggle_agents", "Agents", show=True),
-        Binding("l", "toggle_llm", "LLM", show=True),
-        Binding("t", "toggle_thinking", "Think", show=True),
-        Binding("r", "toggle_results", "Results", show=True),
-        Binding("v", "cycle_verbosity", "Verbosity", show=True),
+        Binding("l", "show_llm", "LLM", show=True),
+        Binding("t", "show_thinking", "Think", show=True),
+        Binding("r", "show_results", "Results", show=True),
+        Binding("v", "cycle_layout", "Layout", show=True),
         Binding("q", "stop_research", "Stop", show=True),
     ]
 
     def __init__(self):
         super().__init__()
-        self._verbosity_index = 1
-        self._show_agents = True
-        self._show_results = True
+        self._layout_index = 0  # index into _LAYOUT_MODES
         self._poll_lock = threading.Lock()
         self._last_snapshot: DashboardSnapshot | None = None
         self._started = False
@@ -227,20 +227,19 @@ class DashboardScreen(Screen):
                 table.update_cell(agent_id, _COL_ELAPSED, elapsed_text, update_width=False)
 
         # -- Header bar --------------------------------------------------------
-        verb = VERBOSITY_LEVELS[self._verbosity_index]
+        layout = _LAYOUT_MODES[self._layout_index]
         filter_hint = f"  ●  Filter: {self._selected_agent}" if self._selected_agent else ""
         self.query_one("#header-bar", Static).update(
             f"AlphaSeeker ● [green]{snapshot.status}[/green]  ●  "
             f"Elapsed: {snapshot.elapsed_seconds:.0f}s  ●  "
             f"Evidence: {snapshot.evidence_count}  ●  "
             f"Agents: {active_count} active  ●  "
-            f"Verbosity: {verb}"
+            f"Layout: {layout}  [dim](v cycle · l/t/r tabs)[/dim]"
             f"{filter_hint}"
         )
 
         # -- Partial results ---------------------------------------------------
-        if self._show_results and verb != "quiet":
-            self._update_partial_results(snapshot)
+        self._update_partial_results(snapshot)
 
         # -- Scan transcripts → memory buffers (always) -----------------------
         self._scan_transcripts()
@@ -462,31 +461,45 @@ class DashboardScreen(Screen):
 
     # ── Keybinding actions ────────────────────────────────────────────────────
 
-    def action_toggle_agents(self) -> None:
-        self._show_agents = not self._show_agents
-        self.query_one("#left-pane", Vertical).display = self._show_agents
-        self.app.notify(f"Agents: {'ON' if self._show_agents else 'OFF'}", timeout=1)
+    def _set_layout(self, layout: str) -> None:
+        """Apply a named layout mode by showing/hiding panes."""
+        left = self.query_one("#left-pane", Vertical)
+        right = self.query_one("#right-pane", Vertical)
+        if layout == "split":
+            left.display = True
+            right.display = True
+        elif layout == "focus":
+            left.display = False
+            right.display = True
+        elif layout == "status":
+            left.display = True
+            right.display = False
+        self._layout_index = _LAYOUT_MODES.index(layout)
 
-    def action_toggle_llm(self) -> None:
+    def action_show_llm(self) -> None:
+        """Switch to LLM tab; ensure right pane is visible."""
+        if not self.query_one("#right-pane", Vertical).display:
+            self._set_layout("split")
         self.query_one("#output-tabs", TabbedContent).active = "tab-llm"
 
-    def action_toggle_thinking(self) -> None:
+    def action_show_thinking(self) -> None:
+        """Switch to Thinking tab; ensure right pane is visible."""
+        if not self.query_one("#right-pane", Vertical).display:
+            self._set_layout("split")
         self.query_one("#output-tabs", TabbedContent).active = "tab-thinking"
 
-    def action_toggle_results(self) -> None:
-        self._show_results = not self._show_results
-        self.query_one("#partial-results", RichLog).display = self._show_results
-        self.query_one("#results-title", Static).display = self._show_results
-        self.app.notify(f"Results: {'ON' if self._show_results else 'OFF'}", timeout=1)
+    def action_show_results(self) -> None:
+        """Switch to Results tab; ensure right pane is visible."""
+        if not self.query_one("#right-pane", Vertical).display:
+            self._set_layout("split")
+        self.query_one("#output-tabs", TabbedContent).active = "tab-results"
 
-    def action_cycle_verbosity(self) -> None:
-        self._verbosity_index = (self._verbosity_index + 1) % 3
-        level = VERBOSITY_LEVELS[self._verbosity_index]
-        self.app.notify(f"Verbosity: {level}", timeout=2)
-        quiet = level == "quiet"
-        self.query_one("#partial-results", RichLog).display = not quiet and self._show_results
-        self.query_one("#results-title", Static).display = not quiet and self._show_results
-        self.query_one("#right-pane", Vertical).display = not quiet
+    def action_cycle_layout(self) -> None:
+        """Cycle: split → focus → status → split."""
+        self._layout_index = (self._layout_index + 1) % len(_LAYOUT_MODES)
+        layout = _LAYOUT_MODES[self._layout_index]
+        self._set_layout(layout)
+        self.app.notify(f"Layout: {layout}", timeout=1)
 
     def action_stop_research(self) -> None:
         if hasattr(self, "_backend"):
