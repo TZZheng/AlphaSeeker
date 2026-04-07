@@ -535,6 +535,13 @@ def read_file_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillRes
         )
 
     file_path = Path(path).expanduser()
+    if not file_path.is_absolute() and _state.workspace_path:
+        # Resolve relative paths against the agent workspace so that
+        # read_file("publish/final.md") finds the same file that
+        # write_file("publish/final.md") wrote.
+        workspace_candidate = Path(_state.workspace_path) / file_path
+        if workspace_candidate.exists():
+            file_path = workspace_candidate
     if not file_path.exists() or not file_path.is_file():
         return make_result(
             "read_file",

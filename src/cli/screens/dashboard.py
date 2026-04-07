@@ -142,6 +142,9 @@ class DashboardScreen(Screen):
         # Results tab: last-seen mtime per published file
         self._results_shown: dict[str, float] = {}
 
+        # Commenter scanning state — entries merge into _llm_entries
+        self._commenter_cursors: dict[str, int] = {}
+
     def compose(self) -> ComposeResult:
         yield Static("AlphaSeeker ● Starting…", id="header-bar")
         with Horizontal(id="main-area"):
@@ -243,6 +246,7 @@ class DashboardScreen(Screen):
 
         # -- Scan transcripts → memory buffers (always) -----------------------
         self._scan_transcripts()
+        self._scan_commenter_comments()
 
         # -- Apply filter if selection changed; otherwise append new entries ----
         # Compare what is currently displayed (_*_display_filter) against
@@ -294,6 +298,8 @@ class DashboardScreen(Screen):
                 if entry.get("kind") != "assistant_response":
                     continue
                 turn_idx = entry.get("turn_index", "?")
+                ts = entry.get("created_at", "")[:19]
+                ts_part = f"  {ts}" if ts else ""
                 content = entry.get("message", {}).get("content") or []
                 # OpenAI transport stores content as a plain string; treat it as a text block.
                 if isinstance(content, str):
@@ -308,7 +314,7 @@ class DashboardScreen(Screen):
                         if text and text.strip():
                             llm_buf.append(
                                 f"[dim cyan]{agent_id}[/dim cyan] "
-                                f"[dim]turn {turn_idx}[/dim]\n"
+                                f"[dim]turn {turn_idx}{ts_part}[/dim]\n"
                                 f"  {_summarize(text, 1000)}"
                             )
                             added_text = True
@@ -317,7 +323,7 @@ class DashboardScreen(Screen):
                         if thinking and thinking.strip():
                             thinking_buf.append(
                                 f"[dim magenta]{agent_id}[/dim magenta] "
-                                f"[dim]turn {turn_idx}[/dim]\n"
+                                f"[dim]turn {turn_idx}{ts_part}[/dim]\n"
                                 f"  {_summarize(thinking, 1000)}"
                             )
                 # OpenAI models return content=None on tool-call turns; show tool names instead.
@@ -327,9 +333,44 @@ class DashboardScreen(Screen):
                         calls_str = ", ".join(tc.get("name", "?") for tc in tool_calls)
                         llm_buf.append(
                             f"[dim cyan]{agent_id}[/dim cyan] "
-                            f"[dim]turn {turn_idx}[/dim]\n"
+                            f"[dim]turn {turn_idx}{ts_part}[/dim]\n"
                             f"  [dim]→ {calls_str}[/dim]"
                         )
+
+    def _scan_commenter_comments(self) -> None:
+        """Read new commenter sparks and merge them into the LLM log buffers."""
+        if not self._run_root:
+            return
+        agents_dir = Path(self._run_root) / "agents"
+        if not agents_dir.exists():
+            return
+        for agent_dir in sorted(agents_dir.iterdir()):
+            if not agent_dir.is_dir():
+                continue
+            agent_id = agent_dir.name
+            comments_path = agent_dir / "scratch" / "commenter" / "comments.jsonl"
+            if not comments_path.exists():
+                continue
+            try:
+                all_entries = read_jsonl(comments_path)
+            except Exception:
+                continue
+            cursor = self._commenter_cursors.get(agent_id, 0)
+            new_entries = all_entries[cursor:]
+            if not new_entries:
+                continue
+            self._commenter_cursors[agent_id] = len(all_entries)
+            llm_buf = self._llm_entries.setdefault(agent_id, [])
+            for entry in new_entries:
+                content = entry.get("content", "").strip()
+                if not content:
+                    continue
+                ts = entry.get("generated_at", "")[:19]
+                llm_buf.append(
+                    f"[dim yellow]{agent_id}[/dim yellow] "
+                    f"[dim]{ts} · commenter[/dim]\n"
+                    f"  [italic]{_summarize(content, 500)}[/italic]"
+                )
 
     def _agents_to_display(self, entries_map: dict[str, list[str]]) -> list[str]:
         """Return agent IDs to show given current selection.
@@ -450,6 +491,7 @@ class DashboardScreen(Screen):
         if hasattr(self, "_poll_timer"):
             self._poll_timer.stop()
         self._scan_transcripts()
+        self._scan_commenter_comments()
         self._append_new_llm_entries()
         self._append_new_thinking_entries()
         self._update_results_tab()

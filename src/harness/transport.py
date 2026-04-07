@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -281,6 +282,7 @@ class BaseAgentTransport:
             {
                 "kind": "assistant_response",
                 "turn_index": turn_index,
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "message": assistant_message,
                 "raw_response": response_payload,
                 "artifact_path": artifact_path,
