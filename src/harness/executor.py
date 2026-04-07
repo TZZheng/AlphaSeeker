@@ -631,7 +631,6 @@ def _handle_list_children(session: AgentSession, _arguments: dict[str, Any]) -> 
         "children": completed + running,
         "completed_count": len(completed),
         "running_count": len(running),
-        "queue_depth": 0,
         "budget": _agent_budget_snapshot(session),
     }
 
