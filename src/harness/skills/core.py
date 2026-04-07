@@ -9,7 +9,7 @@ import subprocess
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from src.harness.artifacts import sync_reduction_artifacts
+from src.harness.artifacts import sync_reduction_artifacts, write_json_atomic
 from src.harness.retrieval import (
     build_query_buckets,
     build_read_queue,
@@ -34,7 +34,6 @@ from src.shared.web_search import read_urls_parallel, search_news, search_web
 
 
 DEFAULT_SEARCH_MAX_RESULTS = 8
-DEFAULT_NEWS_MAX_RESULTS = 8
 DEFAULT_READ_WEB_MAX_URLS = 6
 DEFAULT_MAX_CHARS_PER_URL = 12000
 DEFAULT_CONDENSE_MAX_CHARS = 6000
@@ -294,7 +293,19 @@ def get_current_datetime_skill(arguments: dict[str, Any], _state: HarnessState) 
     )
 
 
-def search_web_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillResult:
+def _write_search_results(state: HarnessState, results: list[dict[str, Any]], prefix: str) -> str:
+    """Write search/news results to a JSON artifact. Returns the artifact path."""
+    import time
+
+    slug = prefix[:40].replace("/", "_").replace(" ", "_")
+    filename = f"{slug}_{int(time.time() * 1000)}.json"
+    path = Path(state.workspace_path) / "scratch" / "search" / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json_atomic(str(path), results)
+    return str(path)
+
+
+def search_web_skill(arguments: dict[str, Any], state: HarnessState) -> SkillResult:
     query = str(arguments.get("query") or "").strip()
     max_results = int(arguments.get("max_results", DEFAULT_SEARCH_MAX_RESULTS))
     if not query:
@@ -307,6 +318,7 @@ def search_web_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillRe
         )
 
     results = search_web(query, max_results=max_results)
+    results_path = _write_search_results(state, results, query)
     evidence = [
         url_evidence(
             "search_web",
@@ -322,53 +334,19 @@ def search_web_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillRe
         arguments,
         status="ok",
         summary=f"Found {len(results)} web results for '{query}'.",
-        details={"query": query, "results": results},
+        details={
+            "query": query,
+            "type": "web",
+            "results_path": results_path,
+            "count": len(results),
+        },
         metrics=SkillMetrics(
             evidence_count=len(evidence),
             urls_discovered=len(results),
             dated_evidence_count=sum(1 for item in results if item.get("date")),
         ),
-        output_text=json_preview(results),
-        evidence=evidence,
-    )
-
-
-def search_news_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillResult:
-    query = str(arguments.get("query") or "").strip()
-    max_results = int(arguments.get("max_results", DEFAULT_NEWS_MAX_RESULTS))
-    if not query:
-        return make_result(
-            "search_news",
-            arguments,
-            status="failed",
-            summary="search_news requires a non-empty query.",
-            error="Missing query.",
-        )
-
-    results = search_news(query, max_results=max_results)
-    evidence = [
-        url_evidence(
-            "search_news",
-            item.get("title", query),
-            item.get("href", ""),
-            content=item.get("body", ""),
-            metadata={"query": query, "date": item.get("date", ""), "source": item.get("source", "")},
-        )
-        for item in results
-    ]
-    return make_result(
-        "search_news",
-        arguments,
-        status="ok",
-        summary=f"Found {len(results)} news results for '{query}'.",
-        details={"query": query, "results": results},
-        metrics=SkillMetrics(
-            evidence_count=len(evidence),
-            urls_discovered=len(results),
-            fresh_evidence_count=len(results),
-            dated_evidence_count=sum(1 for item in results if item.get("date")),
-        ),
-        output_text=json_preview(results),
+        output_text=results_path,
+        artifacts=[results_path],
         evidence=evidence,
     )
 
@@ -418,6 +396,12 @@ def read_web_pages_skill(arguments: dict[str, Any], _state: HarnessState) -> Ski
             )
         )
 
+    # Strip raw text from details — content is already in output.md and evidence items.
+    pages_for_details = [
+        {"url": p["url"], "chars": p["chars"]}
+        for p in pages
+    ]
+
     return make_result(
         "read_web_pages",
         arguments,
@@ -425,8 +409,7 @@ def read_web_pages_skill(arguments: dict[str, Any], _state: HarnessState) -> Ski
         summary=f"Read {len(pages)} web page(s) from {len(selected_urls)} requested URL(s).",
         details={
             "requested_urls": selected_urls,
-            "pages": pages,
-            "max_chars_per_url": max_chars_per_url,
+            "pages": pages_for_details
         },
         metrics=SkillMetrics(
             evidence_count=len(evidence),
@@ -803,17 +786,10 @@ CORE_SKILLS = [
     ),
     SkillSpec(
         name="search_web",
-        description="Discover web URLs and snippets for a query.",
+        description="Discover web URLs and snippets for a query. Use type='news' for news results.",
         pack="core",
-        input_schema={"query": "string", "max_results": "integer"},
+        input_schema={"query": "string", "max_results": "integer", "type": "string"},
         executor=search_web_skill,
-    ),
-    SkillSpec(
-        name="search_news",
-        description="Discover recent news URLs and snippets for a query.",
-        pack="core",
-        input_schema={"query": "string", "max_results": "integer"},
-        executor=search_news_skill,
     ),
     SkillSpec(
         name="read_web_pages",

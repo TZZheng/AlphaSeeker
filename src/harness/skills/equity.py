@@ -207,12 +207,19 @@ def search_sec_filings_skill(arguments: dict[str, Any], _state: HarnessState) ->
     )
     display_company_name = resolved_company_name.rstrip(".")
 
+    # Strip raw filing text from details — content is already in output.md and evidence items.
+    results_for_details = [
+        {"form_type": r.get("form_type"), "filing_date": r.get("filing_date"),
+         "company": r.get("company"), "url": r.get("url")}
+        for r in results
+    ]
+
     return make_result(
         "search_sec_filings",
         arguments,
         status="ok",
         summary=f"Read {len(results)} SEC filing(s) for {display_company_name}.",
-        details={"company_name": resolved_company_name, "ticker": ticker, "results": results},
+        details={"company_name": resolved_company_name, "ticker": ticker, "results": results_for_details},
         metrics=SkillMetrics(
             evidence_count=len(evidence),
             urls_read=len(results),
