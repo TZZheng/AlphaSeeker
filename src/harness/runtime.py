@@ -545,10 +545,13 @@ async def _monitor_commenters(shared: SupervisorState) -> None:
                 or 0.0
             )
             last_commented = str(state.get("last_commented_fingerprint") or "")
+            # Skip if agent hasn't been running for at least 30 seconds
+            agent_started_at = _iso_to_epoch(record.started_at or "") or 0.0
             if (
                 fingerprint
                 and fingerprint != last_commented
                 and now_epoch - last_attempted_at >= COMMENTER_REFRESH_INTERVAL_SECONDS
+                and now_epoch - agent_started_at >= COMMENTER_REFRESH_INTERVAL_SECONDS
             ):
                 state["last_attempted_at"] = datetime.now(timezone.utc).isoformat()
                 save_commenter_state(shared.run_root, agent_id, state)

@@ -328,7 +328,14 @@ class DashboardScreen(Screen):
                             )
                 # OpenAI models return content=None on tool-call turns; show tool names instead.
                 if not added_text:
+                    # Try decision.tool_calls first (OpenAI-style transports)
                     tool_calls = entry.get("decision", {}).get("tool_calls", [])
+                    if not tool_calls:
+                        # Fall back to message.content tool_use blocks (MiniMax transport)
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "tool_use":
+                                name = block.get("name", "?")
+                                tool_calls.append({"name": name})
                     if tool_calls:
                         calls_str = ", ".join(tc.get("name", "?") for tc in tool_calls)
                         llm_buf.append(
