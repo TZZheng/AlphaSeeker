@@ -610,6 +610,23 @@ def _execute_commenter_tool_call(
     }
 
 
+def _summarize_tool_call(tool_name: str, arguments: dict[str, Any], result: dict[str, Any]) -> str:
+    """Lightweight summary of a commenter tool call for message history (not the trace)."""
+    if tool_name == "read_file":
+        path = arguments.get("path", "?")
+        output_text = result.get("output_text") or ""
+        char_count = len(output_text)
+        return f"read {path}: {char_count} chars"
+    if tool_name == "search_in_files":
+        pattern = arguments.get("pattern", "?")
+        paths = arguments.get("paths", [])
+        output_text = result.get("output_text") or ""
+        # Count lines in output as a rough match count
+        match_count = output_text.count("\n") + 1 if output_text.strip() else 0
+        return f"searched '{pattern}' in {len(paths)} files: ~{match_count} matches"
+    return f"{tool_name}: done"
+
+
 def _build_review_prompt(
     *,
     run_root: str,
@@ -712,7 +729,8 @@ def _run_commenter_dialog(
             if not tool_calls:
                 return final_text, trace
             messages.append({"role": "assistant", "content": [_serialize_payload(block) for block in response.content]})
-            tool_results = [
+            # Full results → trace (for auditing). Lightweight summaries → messages (for context).
+            full_results = [
                 {
                     "type": "tool_result",
                     "tool_use_id": call["call_id"],
@@ -730,8 +748,20 @@ def _run_commenter_dialog(
                 }
                 for call in tool_calls
             ]
-            trace[-1]["tool_results"] = tool_results
-            messages.append({"role": "user", "content": tool_results})
+            trace[-1]["tool_results"] = full_results
+            summary_results = [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": call["call_id"],
+                    "content": _summarize_tool_call(
+                        call["name"],
+                        call["arguments"],
+                        json.loads(full_results[i]["content"]),
+                    ),
+                }
+                for i, call in enumerate(tool_calls)
+            ]
+            messages.append({"role": "user", "content": summary_results})
         return final_text, trace
     client = OpenAI(
         base_url=minimax_openai_base_url(),
@@ -792,7 +822,7 @@ def _run_commenter_dialog(
         if not tool_calls:
             return final_text, trace
         messages.append({"role": "assistant", **_serialize_payload(choice.message)})
-        tool_results: list[dict[str, Any]] = []
+        full_results: list[dict[str, Any]] = []
         for call in tool_calls:
             result = _execute_commenter_tool_call(
                 run_root=run_root,
@@ -802,15 +832,24 @@ def _run_commenter_dialog(
                 tool_name=call["name"],
                 arguments=call["arguments"],
             )
-            tool_results.append(
+            full_results.append(
                 {
                     "role": "tool",
                     "tool_call_id": call["call_id"],
                     "content": json.dumps(result, ensure_ascii=True),
                 }
             )
-        trace[-1]["tool_results"] = tool_results
-        messages.extend(tool_results)
+        trace[-1]["tool_results"] = full_results
+        # Lightweight summaries for messages to keep context bounded
+        summary_results = [
+            {
+                "role": "tool",
+                "tool_call_id": call["call_id"],
+                "content": _summarize_tool_call(call["name"], call["arguments"], json.loads(full_results[i]["content"])),
+            }
+            for i, call in enumerate(tool_calls)
+        ]
+        messages.extend(summary_results)
     return final_text, trace
 
 
