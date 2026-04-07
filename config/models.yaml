@@ -20,5 +20,5 @@
 # Harness Runtime
 # ---------------------------------------------------------------------------
 harness:
-  agent: "minimax/MiniMax-M2.7"
-  condense: "minimax/MiniMax-M2.7"
+  agent: "minimax/Minimax-M2.7-highspeed"
+  condense: "minimax/Minimax-M2.7-highspeed"

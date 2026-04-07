@@ -19,8 +19,8 @@ from src.cli.theme import get_banner
 _PROVIDER_CONFIG: dict[str, dict[str, Any]] = {
     "MINIMAX_API_KEY": {
         "label": "MiniMax",
-        "default_model": "minimax/MiniMax-M2.7",
-        "models": ["minimax/MiniMax-M2.7", "minimax/MiniMax-M2.1"],
+        "default_model": "minimax/Minimax-M2.7-highspeed",
+        "models": ["minimax/Minimax-M2.7-highspeed", "minimax/MiniMax-M2.7", "minimax/MiniMax-M2.1"],
     },
     "OPENAI_API_KEY": {
         "label": "OpenAI",
