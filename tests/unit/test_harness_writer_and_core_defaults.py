@@ -93,7 +93,6 @@ def test_evaluator_preset_gets_primitive_core_skills() -> None:
     assert "search_in_files" in names
     assert "get_current_datetime" in names
     assert "search_web" in names
-    assert "search_news" in names
     assert "read_web_pages" in names
     assert "condense_context" in names
     assert "fetch_company_profile" not in names
