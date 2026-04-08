@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 import re
 import threading
-import time
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -375,7 +374,6 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
 
     try:
         while True:
-            turn_start_time = time.time()
             status = read_status(run_root, agent_id)
             if status in TERMINAL_STATUSES:
                 break
@@ -512,10 +510,6 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
                             "result": result,
                         }
                     )
-                # Turn pacing: ensure each turn takes at least 15s of wall-clock time
-                turn_elapsed = time.time() - turn_start_time
-                if turn_elapsed < 15:
-                    time.sleep(15 - turn_elapsed)
                 if transport is not None and tool_results:
                     transport.append_tool_results(tool_results)
                 consecutive_errors = 0
