@@ -13,7 +13,7 @@ from src.harness.artifacts import (
 )
 from src.harness.presets import default_tool_allowlist, render_root_task_markdown, render_tools_markdown
 from src.harness.registry import build_skill_registry, get_skills_for_packs
-from src.harness.transport import BaseAgentTransport, MiniMaxAnthropicTransport
+from src.harness.transport import BaseAgentTransport, MiniMaxAnthropicTransport, OpenAINativeTransport
 from src.harness.transport import (
     minimax_openai_base_url,
     minimax_anthropic_base_url,
@@ -161,6 +161,29 @@ class _FakeAnthropicClient:
         self.messages = _FakeAnthropicMessages()
 
 
+class _FakeOpenAICompletions:
+    def create(self, **_kwargs: object) -> object:
+        class _FakeChoice:
+            finish_reason = "stop"
+
+            class message:
+                content = "done"
+                tool_calls: list[object] = []
+
+        class _FakeResponse:
+            choices = [_FakeChoice()]
+
+        return _FakeResponse()
+
+
+class _FakeOpenAIClient:
+    def __init__(self) -> None:
+        class _FakeChat:
+            completions = _FakeOpenAICompletions()
+
+        self.chat = _FakeChat()
+
+
 def _create_agent_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, str]:
     monkeypatch.chdir(tmp_path)
     request = HarnessRequest(user_prompt="Analyze XOM", run_id="transport-test")
@@ -287,3 +310,136 @@ def test_anthropic_transport_logs_full_turn_request_and_decision(
     assert Path(response_entry["artifact_path"]).exists()
     response_payload = read_json(response_entry["artifact_path"])
     assert response_payload["decision"]["stop_reason"] == "tool_use"
+
+
+def test_anthropic_transport_replay_strips_thinking_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+    fake_client = _FakeAnthropicClient()
+    monkeypatch.setenv("MINIMAX_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "src.harness.transport.anthropic.Anthropic",
+        lambda **_: fake_client,
+    )
+    transport = MiniMaxAnthropicTransport(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name="minimax/MiniMax-M2.7",
+        system_prompt="System v1",
+    )
+
+    transport.ensure_initialized("Initial prompt")
+    append_transcript_entry(
+        run_root,
+        agent_id,
+        {
+            "kind": "assistant_response",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "Hidden reasoning."},
+                    {"type": "text", "text": "Visible answer."},
+                    {"type": "tool_use", "id": "call_old", "name": "search_web", "input": {"query": "prior"}},
+                ],
+            },
+        },
+    )
+
+    transport.execute_turn([])
+
+    entries = load_transcript_entries(run_root, agent_id)
+    request_entry = next(entry for entry in entries if entry["kind"] == "model_request")
+    messages = read_json(request_entry["artifact_path"])["request"]["messages"]
+    assistant_message = next(message for message in messages if message["role"] == "assistant")
+
+    assert assistant_message["content"] == [
+        {"type": "text", "text": "Visible answer."},
+        {"type": "tool_use", "id": "call_old", "name": "search_web", "input": {"query": "prior"}},
+    ]
+    assert not any(block.get("type") == "thinking" for block in assistant_message["content"])
+
+
+def test_anthropic_transport_skips_assistant_messages_with_only_thinking(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+    fake_client = _FakeAnthropicClient()
+    monkeypatch.setenv("MINIMAX_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "src.harness.transport.anthropic.Anthropic",
+        lambda **_: fake_client,
+    )
+    transport = MiniMaxAnthropicTransport(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name="minimax/MiniMax-M2.7",
+        system_prompt="System v1",
+    )
+
+    transport.ensure_initialized("Initial prompt")
+    append_transcript_entry(
+        run_root,
+        agent_id,
+        {
+            "kind": "assistant_response",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "Hidden reasoning only."},
+                ],
+            },
+        },
+    )
+
+    transport.execute_turn([])
+
+    entries = load_transcript_entries(run_root, agent_id)
+    request_entry = next(entry for entry in entries if entry["kind"] == "model_request")
+    messages = read_json(request_entry["artifact_path"])["request"]["messages"]
+
+    assert all(message["role"] != "assistant" for message in messages)
+
+
+def test_openai_transport_replay_strips_reasoning_content(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "src.harness.transport.OpenAI",
+        lambda **_: _FakeOpenAIClient(),
+    )
+    transport = OpenAINativeTransport(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name="gpt-4o",
+        system_prompt="System v1",
+    )
+
+    transport.ensure_initialized("Initial prompt")
+    append_transcript_entry(
+        run_root,
+        agent_id,
+        {
+            "kind": "assistant_response",
+            "message": {
+                "role": "assistant",
+                "content": "Visible answer.",
+                "reasoning_content": "Hidden reasoning.",
+            },
+        },
+    )
+
+    transport.execute_turn([])
+
+    entries = load_transcript_entries(run_root, agent_id)
+    request_entry = next(entry for entry in entries if entry["kind"] == "model_request")
+    messages = read_json(request_entry["artifact_path"])["request"]["messages"]
+    assistant_message = next(message for message in messages if message["role"] == "assistant")
+
+    assert assistant_message["content"] == "Visible answer."
+    assert "reasoning_content" not in assistant_message

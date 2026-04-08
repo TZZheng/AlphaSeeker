@@ -19,6 +19,42 @@ from src.harness.registry import build_skill_registry, get_skills_for_packs
 from src.harness.types import HarnessRequest, SkillMetrics, SkillResult, SkillSpec
 
 
+def _create_basic_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    run_id: str,
+    user_prompt: str,
+    preset: str = "orchestrator",
+):
+    monkeypatch.chdir(tmp_path)
+    request = HarnessRequest(user_prompt=user_prompt, run_id=run_id)
+    run_root, root_agent_id = initialize_run_root(request)
+    registry = build_skill_registry()
+    create_agent_workspace(
+        run_root,
+        agent_id=root_agent_id,
+        parent_id="",
+        preset=preset,
+        task_name="Root Task",
+        description=user_prompt,
+        task_markdown=render_root_task_markdown(request.user_prompt),
+        tools_markdown=render_tools_markdown(
+            preset=preset,
+            available_tools=default_tool_allowlist(preset),
+            available_skills=[],
+        ),
+    )
+    session = create_or_load_session(
+        request=request,
+        run_root=str(run_root),
+        agent_id=root_agent_id,
+        preset=preset,
+        registry_map=registry,
+    )
+    return run_root, root_agent_id, session
+
+
 def test_spawn_subagent_rejects_unknown_preset_and_lists_legal_presets(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -214,6 +250,73 @@ def test_publish_tools_normalize_publish_prefix(
     assert write_result["path"].endswith("/publish/summary.md")
     assert "/publish/publish/" not in write_result["path"]
     assert read_result["content"].startswith("Hello")
+
+
+def test_write_file_schema_requires_path_and_content() -> None:
+    schema = executor_module._tool_definitions()["write_file"]["input_schema"]
+
+    assert schema["required"] == ["path", "content"]
+
+
+def test_write_file_rejects_missing_publish_content(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _, _, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-write-file-missing-content",
+        user_prompt="Publish a final memo",
+    )
+
+    with pytest.raises(ValueError, match="write_file requires content"):
+        execute_model_tool(
+            session,
+            "write_file",
+            {"path": "publish/final.md"},
+        )
+
+
+def test_write_file_rejects_empty_publish_content(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _, _, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-write-file-empty-publish",
+        user_prompt="Publish a final memo",
+    )
+
+    with pytest.raises(ValueError, match="non-empty content for publish paths"):
+        execute_model_tool(
+            session,
+            "write_file",
+            {"path": "publish/final.md", "content": ""},
+        )
+
+
+def test_write_file_allows_empty_scratch_content(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-write-file-empty-scratch",
+        user_prompt="Clear a scratch note",
+    )
+
+    result = execute_model_tool(
+        session,
+        "write_file",
+        {"path": "scratch/notes.md", "content": ""},
+    )
+
+    note_path = agent_workspace_paths(run_root, root_agent_id)["scratch_root"] / "notes.md"
+
+    assert result["path"] == str(note_path)
+    assert note_path.read_text(encoding="utf-8") == ""
 
 
 def test_context_files_are_copied_for_read_file(

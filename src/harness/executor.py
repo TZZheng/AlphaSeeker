@@ -206,6 +206,7 @@ def _tool_definitions() -> dict[str, dict[str, Any]]:
                     "path": {"type": "string"},
                     "content": {"type": "string"},
                 },
+                "required": ["path", "content"],
             },
         },
         "edit_file": {
@@ -937,10 +938,14 @@ def _handle_promote_artifact(session: AgentSession, arguments: dict[str, Any]) -
 
 def _handle_write_file(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
     raw_path = str(arguments.get("path") or "").strip()
-    content = str(arguments.get("content") or "")
     if not raw_path:
         raise ValueError("write_file requires path.")
+    if "content" not in arguments or arguments.get("content") is None:
+        raise ValueError("write_file requires content.")
+    content = str(arguments["content"])
     path, root_name, relative = _resolve_workspace_file_path(session, raw_path, must_exist=False)
+    if root_name == "publish" and not content.strip():
+        raise ValueError("write_file requires non-empty content for publish paths.")
     write_text_atomic(path, content)
     event_type = "publish_updated" if root_name == "publish" else "scratch_updated"
     append_event(

@@ -115,11 +115,49 @@ def _serialize_payload(payload: Any) -> Any:
 
 
 def _transcript_messages(run_root: str, agent_id: str) -> list[dict[str, Any]]:
-    return [
-        entry["message"]
-        for entry in load_transcript_entries(run_root, agent_id)
-        if isinstance(entry, dict) and isinstance(entry.get("message"), dict)
-    ]
+    messages: list[dict[str, Any]] = []
+    for entry in load_transcript_entries(run_root, agent_id):
+        if not isinstance(entry, dict):
+            continue
+        raw_message = entry.get("message")
+        if not isinstance(raw_message, dict):
+            continue
+        message = _sanitize_replay_message(raw_message)
+        if message is not None:
+            messages.append(message)
+    return messages
+
+
+def _sanitize_replay_message(message: dict[str, Any]) -> dict[str, Any] | None:
+    role = str(message.get("role") or "")
+    sanitized = dict(message)
+    if role != "assistant":
+        return sanitized
+
+    for key in ("reasoning_content", "reasoning", "reasoning_details"):
+        sanitized.pop(key, None)
+
+    content = sanitized.get("content")
+    if isinstance(content, list):
+        filtered: list[Any] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "thinking":
+                continue
+            filtered.append(item)
+        sanitized["content"] = filtered
+
+    has_tool_calls = bool(sanitized.get("tool_calls")) or bool(sanitized.get("function_call"))
+    content = sanitized.get("content")
+    if isinstance(content, list):
+        if not content and not has_tool_calls:
+            return None
+    elif content is None:
+        if not has_tool_calls:
+            return None
+    elif isinstance(content, str):
+        if not content and not has_tool_calls:
+            return None
+    return sanitized
 
 
 class BaseAgentTransport:
