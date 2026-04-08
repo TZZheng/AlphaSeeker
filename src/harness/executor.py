@@ -846,6 +846,18 @@ def _handle_bash(session: AgentSession, arguments: dict[str, Any]) -> dict[str, 
         # Handled inline without subprocess
         seconds = float(argv[1]) if len(argv) > 1 else 30
         time.sleep(seconds)
+        append_event(
+            session.run_root,
+            AgentEvent(
+                event_type="bash_executed",
+                agent_id=session.agent_id,
+                details={
+                    "argv": argv,
+                    "cwd": str(cwd),
+                    "returncode": 0,
+                },
+            ),
+        )
         return {
             "ok": True,
             "argv": argv,
@@ -871,7 +883,7 @@ def _handle_bash(session: AgentSession, arguments: dict[str, Any]) -> dict[str, 
             env={**os.environ, "PWD": str(cwd)},
         )
     except FileNotFoundError:
-        return {
+        result = {
             "ok": False,
             "argv": argv,
             "cwd": str(cwd),
@@ -883,7 +895,7 @@ def _handle_bash(session: AgentSession, arguments: dict[str, Any]) -> dict[str, 
             "summary": f"Command '{command_name}' is not available.",
         }
     except subprocess.TimeoutExpired:
-        return {
+        result = {
             "ok": False,
             "argv": argv,
             "cwd": str(cwd),
@@ -894,8 +906,20 @@ def _handle_bash(session: AgentSession, arguments: dict[str, Any]) -> dict[str, 
             "content": "",
             "summary": f"Command timed out after {timeout_seconds} seconds.",
         }
-    stdout = _truncate_shell_output(completed.stdout, max_chars=max_output_chars)
-    stderr = _truncate_shell_output(completed.stderr, max_chars=max_output_chars)
+    else:
+        stdout = _truncate_shell_output(completed.stdout, max_chars=max_output_chars)
+        stderr = _truncate_shell_output(completed.stderr, max_chars=max_output_chars)
+        result = {
+            "ok": completed.returncode == 0,
+            "argv": argv,
+            "cwd": str(cwd),
+            "project_root": str(project_root),
+            "returncode": completed.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+            "content": stdout,
+            "summary": f"Command exited with code {completed.returncode}.",
+        }
     append_event(
         session.run_root,
         AgentEvent(
@@ -904,21 +928,11 @@ def _handle_bash(session: AgentSession, arguments: dict[str, Any]) -> dict[str, 
             details={
                 "argv": argv,
                 "cwd": str(cwd),
-                "returncode": completed.returncode,
+                "returncode": int(result["returncode"]),
             },
         ),
     )
-    return {
-        "ok": completed.returncode == 0,
-        "argv": argv,
-        "cwd": str(cwd),
-        "project_root": str(project_root),
-        "returncode": completed.returncode,
-        "stdout": stdout,
-        "stderr": stderr,
-        "content": stdout,
-        "summary": f"Command exited with code {completed.returncode}.",
-    }
+    return result
 
 
 def _handle_promote_artifact(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
