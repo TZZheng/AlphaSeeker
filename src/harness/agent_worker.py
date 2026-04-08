@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 import os
 from pathlib import Path
 import re
 import threading
+import time
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -23,6 +25,7 @@ from src.harness.artifacts import (
     read_text,
     remaining_agent_seconds,
     save_skill_state,
+    unread_commenter_comments,
     write_heartbeat,
     write_pid,
     write_status,
@@ -38,6 +41,8 @@ from src.harness.transport import create_transport, resolve_agent_transport
 
 MAX_CONSECUTIVE_ERRORS = 4
 MAX_IDLE_RETRIES = 2
+TURN_MAX_PROMPT_GAP_SECONDS = 60.0
+TURN_PACING_POLL_SECONDS = 1.0
 
 
 def _content_to_text(content: object) -> str:
@@ -321,6 +326,84 @@ def _heartbeat_loop(run_root: str, agent_id: str, stop_event: threading.Event) -
         stop_event.wait(10.0)
 
 
+def _iso_to_epoch(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _child_has_new_material_since(run_root: str, record, *, since_epoch: float) -> bool:
+    paths = agent_workspace_paths(run_root, record.agent_id)
+    has_publish_files = False
+    publish_root = paths["publish_root"]
+    if publish_root.exists():
+        for path in publish_root.rglob("*"):
+            if not path.is_file():
+                continue
+            has_publish_files = True
+            try:
+                if path.stat().st_mtime > since_epoch:
+                    return True
+            except OSError:
+                continue
+
+    status = read_status(run_root, record.agent_id)
+    created_epoch = _iso_to_epoch(getattr(record, "created_at", None))
+    if created_epoch is not None and created_epoch > since_epoch and status == "queued" and not has_publish_files:
+        return False
+    try:
+        return paths["status"].stat().st_mtime > since_epoch
+    except OSError:
+        return False
+
+
+def _has_new_commenter_material_since(run_root: str, agent_id: str, *, since_epoch: float) -> bool:
+    unread, _total = unread_commenter_comments(run_root, agent_id)
+    for row in unread:
+        generated_epoch = _iso_to_epoch(str(row.get("generated_at") or ""))
+        if generated_epoch is not None and generated_epoch > since_epoch:
+            return True
+    return False
+
+
+def _has_new_external_material_since(run_root: str, agent_id: str, *, since_epoch: float) -> bool:
+    for record in latest_agent_records(run_root).values():
+        if record.parent_id != agent_id:
+            continue
+        if _child_has_new_material_since(run_root, record, since_epoch=since_epoch):
+            return True
+    return _has_new_commenter_material_since(run_root, agent_id, since_epoch=since_epoch)
+
+
+def _wait_for_next_turn_window(
+    run_root: str,
+    agent_id: str,
+    *,
+    request,
+    previous_turn_started_monotonic: float,
+    previous_turn_started_epoch: float,
+    runtime_control_was_active: bool,
+) -> tuple[bool, bool]:
+    max_ready_at = previous_turn_started_monotonic + TURN_MAX_PROMPT_GAP_SECONDS
+    while True:
+        if read_status(run_root, agent_id) in TERMINAL_STATUSES:
+            return False, runtime_control_was_active
+        now = time.monotonic()
+        runtime_control_active = runtime_control_was_active or remaining_agent_seconds(request, run_root, agent_id) <= 0
+        if now >= max_ready_at:
+            return True, runtime_control_active
+        if runtime_control_active != runtime_control_was_active:
+            return True, runtime_control_active
+        if _has_new_external_material_since(run_root, agent_id, since_epoch=previous_turn_started_epoch):
+            return True, runtime_control_active
+        sleep_seconds = min(TURN_PACING_POLL_SECONDS, max(0.0, max_ready_at - now))
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
+
+
 def run_agent_worker(run_root: str, agent_id: str) -> int:
     request = load_request(run_root)
     record = latest_agent_records(run_root).get(agent_id)
@@ -371,12 +454,28 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
     previous_error: str | None = None
     soft_finalize_requested = False
     runtime_control_persisted = False
+    last_turn_started_monotonic: float | None = None
+    last_turn_started_epoch: float | None = None
+    last_runtime_control_active = False
 
     try:
         while True:
             status = read_status(run_root, agent_id)
             if status in TERMINAL_STATUSES:
                 break
+            if last_turn_started_monotonic is not None and last_turn_started_epoch is not None:
+                should_continue, last_runtime_control_active = _wait_for_next_turn_window(
+                    run_root,
+                    agent_id,
+                    request=request,
+                    previous_turn_started_monotonic=last_turn_started_monotonic,
+                    previous_turn_started_epoch=last_turn_started_epoch,
+                    runtime_control_was_active=last_runtime_control_active,
+                )
+                if not should_continue:
+                    break
+                if read_status(run_root, agent_id) in TERMINAL_STATUSES:
+                    break
             remaining_agent = remaining_agent_seconds(request, run_root, agent_id)
             runtime_control: str | None = None
             if remaining_agent <= 0:
@@ -392,11 +491,15 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
                         ),
                     )
                     soft_finalize_requested = True
+            runtime_control_active = soft_finalize_requested or remaining_agent <= 0
 
             try:
                 system_prompt = _current_system_prompt(session, transport_name=transport_name)
                 comment_feed, injected_comment_count = build_comment_feed_message(run_root, agent_id)
                 if transport_name == "text_json":
+                    last_turn_started_monotonic = time.monotonic()
+                    last_turn_started_epoch = time.time()
+                    last_runtime_control_active = runtime_control_active
                     response = llm.invoke(
                         [
                             SystemMessage(content=system_prompt),
@@ -447,6 +550,9 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
                         transport.append_user_text(message)
 
                 transport.update_system_prompt(system_prompt)
+                last_turn_started_monotonic = time.monotonic()
+                last_turn_started_epoch = time.time()
+                last_runtime_control_active = runtime_control_active
                 turn = transport.execute_turn(model_tool_specs(session))
                 if injected_comment_count:
                     mark_commenter_comments_read(run_root, agent_id, injected_comment_count)

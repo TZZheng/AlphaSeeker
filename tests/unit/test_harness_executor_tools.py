@@ -8,6 +8,8 @@ from src.harness.artifacts import (
     agent_workspace_paths,
     create_agent_workspace,
     initialize_run_root,
+    read_jsonl,
+    registry_paths,
     update_agent_record,
     write_status,
     write_text_atomic,
@@ -592,6 +594,36 @@ def test_bash_rejects_paths_outside_project_root(
                 "argv": ["cp", str(outside), str(agent_workspace_paths(run_root, root_agent_id)["scratch_root"] / "copy.txt")],
             },
         )
+
+
+def test_bash_sleep_records_standard_bash_event(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, _root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-bash-sleep",
+        user_prompt="Sleep briefly",
+        preset="research",
+    )
+
+    result = execute_model_tool(
+        session,
+        "bash",
+        {"argv": ["sleep", "0"]},
+    )
+    events = read_jsonl(registry_paths(run_root)["events_registry"])
+    bash_events = [event for event in events if event.get("event_type") == "bash_executed"]
+
+    assert result["ok"] is True
+    assert result["summary"] == "Slept for 0.0 second(s)."
+    assert bash_events
+    assert bash_events[-1]["details"] == {
+        "argv": ["sleep", "0"],
+        "cwd": str(tmp_path),
+        "returncode": 0,
+    }
 
 
 def test_read_file_supports_line_slices(

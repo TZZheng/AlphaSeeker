@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import os
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,7 @@ from src.harness.artifacts import (
     initialize_run_root,
     load_commenter_comments,
     mark_commenter_comments_read,
+    read_status,
     unread_commenter_comments,
     write_status,
     write_text_atomic,
@@ -314,3 +317,265 @@ def test_worker_leaves_comments_unread_when_model_call_fails(
 
     assert result == 1
     assert rows[0]["read"] is False
+
+
+def _iso_from_epoch(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+class _FakeClock:
+    def __init__(self, start: float = 1_800_000_000.0) -> None:
+        self.now = start
+        self._actions: list[object] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def time(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+        for action in list(self._actions):
+            action(self.now)
+
+    def add_action(self, action) -> None:
+        self._actions.append(action)
+
+
+class _SequencedTransport:
+    def __init__(self, turns: list[ModelTurnResult], clock: _FakeClock) -> None:
+        self._turns = list(turns)
+        self._clock = clock
+        self.call_times: list[float] = []
+        self.user_messages: list[str] = []
+
+    def ensure_initialized(self, _initial_user_prompt: str) -> None:
+        return None
+
+    def update_system_prompt(self, _system_prompt: str) -> None:
+        return None
+
+    def append_user_text(self, text: str) -> None:
+        self.user_messages.append(text)
+
+    def execute_turn(self, _tool_specs: list[dict[str, object]]) -> ModelTurnResult:
+        self.call_times.append(self._clock.monotonic())
+        if not self._turns:
+            raise AssertionError("No more fake turns configured.")
+        return self._turns.pop(0)
+
+    def append_tool_results(self, _tool_results: list[dict[str, object]]) -> None:
+        return None
+
+
+def _scratch_write_turn() -> ModelTurnResult:
+    return ModelTurnResult(
+        tool_calls=[
+            ModelToolCall(
+                call_id="call_work",
+                name="write_file",
+                arguments={"path": "scratch/notes.md", "content": "working\n"},
+            )
+        ],
+        text_blocks=["work locally"],
+        stop_reason="tool_use",
+    )
+
+
+def _finish_turn() -> ModelTurnResult:
+    return ModelTurnResult(
+        tool_calls=[
+            ModelToolCall(
+                call_id="call_summary",
+                name="write_file",
+                arguments={"path": "publish/summary.md", "content": "# Summary\n"},
+            ),
+            ModelToolCall(
+                call_id="call_index",
+                name="write_file",
+                arguments={"path": "publish/artifact_index.md", "content": "# Artifact Index\n"},
+            ),
+            ModelToolCall(
+                call_id="call_final",
+                name="write_file",
+                arguments={"path": "publish/final.md", "content": "# Final\n\nDone.\n"},
+            ),
+            ModelToolCall(call_id="call_done", name="set_status", arguments={"status": "done"}),
+        ],
+        text_blocks=["finish now"],
+        stop_reason="tool_use",
+    )
+
+
+def _sleep_turn(seconds: str) -> ModelTurnResult:
+    return ModelTurnResult(
+        tool_calls=[
+            ModelToolCall(
+                call_id="call_sleep",
+                name="bash",
+                arguments={"argv": ["sleep", seconds]},
+            )
+        ],
+        text_blocks=[f"sleep {seconds}"],
+        stop_reason="tool_use",
+    )
+
+
+def _install_fake_worker_timing(monkeypatch: pytest.MonkeyPatch, clock: _FakeClock) -> None:
+    monkeypatch.setattr(agent_worker_module.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(agent_worker_module.time, "time", clock.time)
+    monkeypatch.setattr(agent_worker_module.time, "sleep", clock.sleep)
+
+
+def _install_fake_transport(monkeypatch: pytest.MonkeyPatch, transport: _SequencedTransport) -> None:
+    monkeypatch.setattr(agent_worker_module, "get_model", lambda *_args, **_kwargs: "minimax/MiniMax-M2.7")
+    monkeypatch.setattr(agent_worker_module, "resolve_agent_transport", lambda *_args, **_kwargs: "minimax_anthropic")
+    monkeypatch.setattr(agent_worker_module, "create_transport", lambda **_kwargs: transport)
+
+
+def test_worker_first_turn_is_immediate_and_self_writes_do_not_wake_early(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id, _request = _create_workspace(tmp_path, monkeypatch)
+    clock = _FakeClock()
+    start = clock.monotonic()
+    transport = _SequencedTransport([_scratch_write_turn(), _finish_turn()], clock)
+
+    _install_fake_worker_timing(monkeypatch, clock)
+    _install_fake_transport(monkeypatch, transport)
+    monkeypatch.setattr(agent_worker_module, "TURN_MAX_PROMPT_GAP_SECONDS", 6.0)
+    monkeypatch.setattr(agent_worker_module, "TURN_PACING_POLL_SECONDS", 1.0)
+    monkeypatch.setattr(agent_worker_module, "remaining_agent_seconds", lambda *_args, **_kwargs: 9999)
+
+    result = run_agent_worker(str(run_root), agent_id)
+
+    assert result == 0
+    assert transport.call_times == [start, start + 6.0]
+
+
+def test_worker_wakes_early_when_direct_child_status_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id, request = _create_workspace(tmp_path, monkeypatch)
+    child_id = "agent_child"
+    create_agent_workspace(
+        run_root,
+        agent_id=child_id,
+        parent_id=agent_id,
+        preset="research",
+        task_name="Child Task",
+        description="Wait for child progress",
+        task_markdown=render_root_task_markdown(request.user_prompt),
+        tools_markdown=render_tools_markdown(
+            preset="research",
+            available_tools=default_tool_allowlist("research"),
+            available_skills=[],
+        ),
+    )
+    child_paths = agent_workspace_paths(run_root, child_id)
+    clock = _FakeClock()
+    transport = _SequencedTransport([_scratch_write_turn(), _finish_turn()], clock)
+
+    def _complete_child(now: float) -> None:
+        if not transport.call_times or now < transport.call_times[0] + 4.0 or read_status(run_root, child_id) == "done":
+            return
+        write_status(run_root, child_id, "done")
+        os.utime(child_paths["status"], (now, now))
+
+    _install_fake_worker_timing(monkeypatch, clock)
+    _install_fake_transport(monkeypatch, transport)
+    monkeypatch.setattr(agent_worker_module, "TURN_MAX_PROMPT_GAP_SECONDS", 10.0)
+    monkeypatch.setattr(agent_worker_module, "TURN_PACING_POLL_SECONDS", 1.0)
+    monkeypatch.setattr(agent_worker_module, "remaining_agent_seconds", lambda *_args, **_kwargs: 9999)
+    clock.add_action(_complete_child)
+
+    result = run_agent_worker(str(run_root), agent_id)
+
+    assert result == 0
+    assert transport.call_times[1] == transport.call_times[0] + 4.0
+
+
+def test_worker_wakes_early_when_commenter_adds_new_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id, _request = _create_workspace(tmp_path, monkeypatch)
+    clock = _FakeClock()
+    transport = _SequencedTransport([_scratch_write_turn(), _finish_turn()], clock)
+
+    def _add_comment(now: float) -> None:
+        if not transport.call_times or now < transport.call_times[0] + 4.0:
+            return
+        unread, total = unread_commenter_comments(run_root, agent_id)
+        if total:
+            return
+        append_commenter_comments(
+            run_root,
+            agent_id,
+            ["New outside-angle comment."],
+            generated_at=_iso_from_epoch(now),
+        )
+
+    _install_fake_worker_timing(monkeypatch, clock)
+    _install_fake_transport(monkeypatch, transport)
+    monkeypatch.setattr(agent_worker_module, "TURN_MAX_PROMPT_GAP_SECONDS", 10.0)
+    monkeypatch.setattr(agent_worker_module, "TURN_PACING_POLL_SECONDS", 1.0)
+    monkeypatch.setattr(agent_worker_module, "remaining_agent_seconds", lambda *_args, **_kwargs: 9999)
+    clock.add_action(_add_comment)
+
+    result = run_agent_worker(str(run_root), agent_id)
+
+    assert result == 0
+    assert transport.call_times[1] == transport.call_times[0] + 4.0
+
+
+def test_worker_wakes_early_when_runtime_control_activates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id, _request = _create_workspace(tmp_path, monkeypatch)
+    clock = _FakeClock()
+    transport = _SequencedTransport([_scratch_write_turn(), _finish_turn()], clock)
+
+    _install_fake_worker_timing(monkeypatch, clock)
+    _install_fake_transport(monkeypatch, transport)
+    monkeypatch.setattr(agent_worker_module, "TURN_MAX_PROMPT_GAP_SECONDS", 10.0)
+    monkeypatch.setattr(agent_worker_module, "TURN_PACING_POLL_SECONDS", 1.0)
+    monkeypatch.setattr(
+        agent_worker_module,
+        "remaining_agent_seconds",
+        lambda *_args, **_kwargs: (
+            0
+            if transport.call_times and clock.monotonic() >= transport.call_times[0] + 4.0
+            else 9999
+        ),
+    )
+
+    result = run_agent_worker(str(run_root), agent_id)
+
+    assert result == 0
+    assert transport.call_times[1] == transport.call_times[0] + 4.0
+
+
+def test_worker_calls_immediately_when_previous_turn_already_used_full_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id, _request = _create_workspace(tmp_path, monkeypatch)
+    clock = _FakeClock()
+    start = clock.monotonic()
+    transport = _SequencedTransport([_sleep_turn("7"), _finish_turn()], clock)
+
+    _install_fake_worker_timing(monkeypatch, clock)
+    _install_fake_transport(monkeypatch, transport)
+    monkeypatch.setattr(agent_worker_module, "TURN_MAX_PROMPT_GAP_SECONDS", 6.0)
+    monkeypatch.setattr(agent_worker_module, "TURN_PACING_POLL_SECONDS", 1.0)
+    monkeypatch.setattr(agent_worker_module, "remaining_agent_seconds", lambda *_args, **_kwargs: 9999)
+
+    result = run_agent_worker(str(run_root), agent_id)
+
+    assert result == 0
+    assert transport.call_times == [start, start + 7.0]
