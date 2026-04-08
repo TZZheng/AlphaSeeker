@@ -37,6 +37,91 @@ _COL_STATUS = "status"
 _COL_ELAPSED = "elapsed"
 
 
+def _tool_call_arguments(tool_call: dict[str, Any]) -> dict[str, Any]:
+    arguments = tool_call.get("arguments")
+    if isinstance(arguments, dict):
+        return arguments
+    fallback = tool_call.get("input")
+    if isinstance(fallback, dict):
+        return fallback
+    return {}
+
+
+def _format_tool_call(tool_call: dict[str, Any]) -> str:
+    name = str(tool_call.get("name") or "?")
+    if name != "bash":
+        return name
+    argv = _tool_call_arguments(tool_call).get("argv")
+    if isinstance(argv, list):
+        preview = " ".join(str(item) for item in argv if str(item))
+        if preview:
+            return f"bash {preview}"
+    return "bash"
+
+
+def _extract_tool_calls(entry: dict[str, Any], content: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    tool_calls: list[dict[str, Any]] = []
+    raw_tool_calls = entry.get("decision", {}).get("tool_calls", [])
+    if isinstance(raw_tool_calls, list):
+        for tool_call in raw_tool_calls:
+            if isinstance(tool_call, dict):
+                tool_calls.append(tool_call)
+    if tool_calls:
+        return tool_calls
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        tool_calls.append(
+            {
+                "name": str(block.get("name") or "?"),
+                "input": block.get("input") if isinstance(block.get("input"), dict) else {},
+            }
+        )
+    return tool_calls
+
+
+def _assistant_response_lines(agent_id: str, entry: dict[str, Any]) -> tuple[list[str], list[str]]:
+    if entry.get("kind") != "assistant_response":
+        return [], []
+    turn_idx = entry.get("turn_index", "?")
+    ts = entry.get("created_at", "")[:19]
+    ts_part = f"  {ts}" if ts else ""
+    content = entry.get("message", {}).get("content") or []
+    if isinstance(content, str):
+        content = [{"type": "text", "text": content}] if content.strip() else []
+    llm_lines: list[str] = []
+    thinking_lines: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type", "")
+        if btype == "text":
+            text = block.get("text", "")
+            if text and text.strip():
+                llm_lines.append(
+                    f"[dim cyan]{agent_id}[/dim cyan] "
+                    f"[dim]turn {turn_idx}{ts_part}[/dim]\n"
+                    f"  {_summarize(text, 1000)}"
+                )
+        elif btype == "thinking":
+            thinking = block.get("thinking", "")
+            if thinking and thinking.strip():
+                thinking_lines.append(
+                    f"[dim magenta]{agent_id}[/dim magenta] "
+                    f"[dim]turn {turn_idx}{ts_part}[/dim]\n"
+                    f"  {_summarize(thinking, 1000)}"
+                )
+    tool_calls = _extract_tool_calls(entry, content if isinstance(content, list) else [])
+    if tool_calls:
+        calls_str = ", ".join(_format_tool_call(tool_call) for tool_call in tool_calls)
+        llm_lines.append(
+            f"[dim cyan]{agent_id}[/dim cyan] "
+            f"[dim]turn {turn_idx}{ts_part}[/dim]\n"
+            f"  [dim]→ {calls_str}[/dim]"
+        )
+    return llm_lines, thinking_lines
+
+
 class DashboardScreen(Screen):
     """Live research dashboard with agent status, tabbed output, and key controls."""
 
@@ -295,54 +380,9 @@ class DashboardScreen(Screen):
             llm_buf = self._llm_entries.setdefault(agent_id, [])
             thinking_buf = self._thinking_entries.setdefault(agent_id, [])
             for entry in new_entries:
-                if entry.get("kind") != "assistant_response":
-                    continue
-                turn_idx = entry.get("turn_index", "?")
-                ts = entry.get("created_at", "")[:19]
-                ts_part = f"  {ts}" if ts else ""
-                content = entry.get("message", {}).get("content") or []
-                # OpenAI transport stores content as a plain string; treat it as a text block.
-                if isinstance(content, str):
-                    content = [{"type": "text", "text": content}] if content.strip() else []
-                added_text = False
-                for block in content:
-                    if not isinstance(block, dict):
-                        continue
-                    btype = block.get("type", "")
-                    if btype == "text":
-                        text = block.get("text", "")
-                        if text and text.strip():
-                            llm_buf.append(
-                                f"[dim cyan]{agent_id}[/dim cyan] "
-                                f"[dim]turn {turn_idx}{ts_part}[/dim]\n"
-                                f"  {_summarize(text, 1000)}"
-                            )
-                            added_text = True
-                    elif btype == "thinking":
-                        thinking = block.get("thinking", "")
-                        if thinking and thinking.strip():
-                            thinking_buf.append(
-                                f"[dim magenta]{agent_id}[/dim magenta] "
-                                f"[dim]turn {turn_idx}{ts_part}[/dim]\n"
-                                f"  {_summarize(thinking, 1000)}"
-                            )
-                # OpenAI models return content=None on tool-call turns; show tool names instead.
-                if not added_text:
-                    # Try decision.tool_calls first (OpenAI-style transports)
-                    tool_calls = entry.get("decision", {}).get("tool_calls", [])
-                    if not tool_calls:
-                        # Fall back to message.content tool_use blocks (MiniMax transport)
-                        for block in content:
-                            if isinstance(block, dict) and block.get("type") == "tool_use":
-                                name = block.get("name", "?")
-                                tool_calls.append({"name": name})
-                    if tool_calls:
-                        calls_str = ", ".join(tc.get("name", "?") for tc in tool_calls)
-                        llm_buf.append(
-                            f"[dim cyan]{agent_id}[/dim cyan] "
-                            f"[dim]turn {turn_idx}{ts_part}[/dim]\n"
-                            f"  [dim]→ {calls_str}[/dim]"
-                        )
+                llm_lines, thinking_lines = _assistant_response_lines(agent_id, entry)
+                llm_buf.extend(llm_lines)
+                thinking_buf.extend(thinking_lines)
 
     def _scan_commenter_comments(self) -> None:
         """Read new commenter sparks and merge them into the LLM log buffers."""
