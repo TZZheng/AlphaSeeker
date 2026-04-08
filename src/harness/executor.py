@@ -64,7 +64,7 @@ _TYPE_MAP = {
     "boolean": {"type": "boolean"},
 }
 _LEGAL_PRESET_LIST = ", ".join(f"'{preset}'" for preset in AGENT_PRESETS)
-BASH_ALLOWED_COMMANDS = {"cp", "mv", "mkdir", "ls", "rg"}
+BASH_ALLOWED_COMMANDS = {"cp", "mv", "mkdir", "ls", "rg", "sleep"}
 BASH_DEFAULT_TIMEOUT_SECONDS = 10
 BASH_DEFAULT_MAX_OUTPUT_CHARS = 12000
 
@@ -187,7 +187,7 @@ def _tool_definitions() -> dict[str, dict[str, Any]]:
             },
         },
         "bash": {
-            "description": "Run one repo-scoped command from the allowlist.",
+            "description": "Run one repo-scoped bash command from the allowlist (cp, mv, mkdir, ls, rg, sleep).",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -841,6 +841,21 @@ def _handle_bash(session: AgentSession, arguments: dict[str, Any]) -> dict[str, 
         _validate_bash_ls(argv, project_root=project_root, cwd=cwd)
     elif command_name == "rg":
         _validate_bash_rg(argv, project_root=project_root, cwd=cwd)
+    elif command_name == "sleep":
+        # Handled inline without subprocess
+        seconds = float(argv[1]) if len(argv) > 1 else 30
+        time.sleep(seconds)
+        return {
+            "ok": True,
+            "argv": argv,
+            "cwd": str(cwd),
+            "project_root": str(project_root),
+            "returncode": 0,
+            "stdout": "",
+            "stderr": "",
+            "content": f"slept {seconds}s",
+            "summary": f"Slept for {seconds} second(s).",
+        }
 
     timeout_seconds = max(1, min(int(arguments.get("timeout_seconds", BASH_DEFAULT_TIMEOUT_SECONDS)), 60))
     max_output_chars = max(200, min(int(arguments.get("max_output_chars", BASH_DEFAULT_MAX_OUTPUT_CHARS)), 40000))
