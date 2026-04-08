@@ -1,87 +1,57 @@
-# Harness
+# `src/harness`
 
-`src/harness` is a file-based async multi-agent runtime.
+`src/harness` is AlphaSeeker's file-based multi-agent runtime.
 
 In backend terms:
-- a "kernel" means runtime code only handles lifecycle, process control, files, and recovery
-- the LLM owns meaningful decisions, including delegation and stop timing
-- the filesystem is the handoff protocol between agents
+- a "supervisor" is the control loop that launches workers, watches heartbeats, and decides when a run stops
+- a "transport" is the provider-specific API protocol used to talk to a model
+- a "sidecar" is a helper that watches another worker and adds feedback; here the commenter is a supervisor-managed sidecar loop
+- a "registry" is append-only run metadata stored under `registry/*.jsonl`
 
-## Prompt Philosophy
-
-Prompting is split into three layers:
-- `prompts/system.md`: AlphaSeeker-wide operating doctrine
-- `prompts/roles/*.md`: preset-specific behavior such as orchestrator vs. research
-- `prompts/environment.md`: the actual runtime surface, including visible tools, skills, and child presets
-
-The system prompt is intentionally harness-native rather than a generic "all-purpose agent civilization" prompt:
-- it is organized around five duties: act on need, master your tools, learn without cease, work together, and shed the chaff
-- it keeps the action-first and specialization-first spirit
-- it maps durable memory to `scratch/` and `publish/` instead of imaginary memory tools
-- it tells agents to use only visible tools and real runtime outputs
-- it treats file publication and explicit child handoff as the durable coordination mechanism
-
-## Architecture
-
-- `runtime.py`: async supervisor kernel that launches agent worker subprocesses and watches heartbeats
-- `agent_worker.py`: long-lived worker process shared by root agents and child agents
-- `transport.py`: MiniMax Anthropic/OpenAI transport adapters with transcript replay
-- `commenter.py`: paired commenter sidecars that read an agent's workspace and inject advisory comments on later turns
-- `artifacts.py`: run root, agent workspace, registry, object promotion, atomic writes, and persisted skill state
-- `executor.py`: file-first agent tools including `spawn_subagent`, `wait_children`, `bash`, `write_file`, `edit_file`, and artifact promotion
-- `presets.py`: prompt presets and default tool allowlists
-- `registry.py` and `skills/`: deterministic skill library reused as tools
-
-## Workspace Protocol
-
-Each run lives under `data/harness_runs/<run_id>/`:
+## Current File Map
 
 ```text
-registry/
-  agents.jsonl
-  events.jsonl
-  objects/
-  objects_manifest.jsonl
-request.json
-progress.md
-agents/
-  <agent_id>/
-    task.md
-    tools.md
-    context/
-    scratch/
-      commenter/
-        comments.jsonl
-        latest.md
-        notes/
-        turns/
-      transcript.jsonl
-      tool_history.jsonl
-      llm_turns/
-        0001_system_prompt.json
-        0001_request.json
-        0001_response.json
-    publish/
-      summary.md
-      artifact_index.md
-      final.md
-    state/
-      status.txt
-      heartbeat.txt
-      pid.txt
-      parent.txt
-      preset.txt
-      skill_state.json
-      transport_state.json
-      commenter_state.json
+src/harness/
+├── __init__.py              # Public import surface: HarnessRequest, HarnessResponse, run_harness
+├── runtime.py               # Async supervisor; launches, monitors, stops, resumes runs
+├── agent_worker.py          # Per-agent worker loop: prompt build, model call, tool execution
+├── artifacts.py             # Filesystem layout, atomic writes, JSON/JSONL helpers, progress refresh
+├── executor.py              # Model-visible tools and deterministic skill execution bridge
+├── transport.py             # Anthropic/OpenAI/MiniMax adapters plus text_json fallback
+├── commenter.py             # Commenter refresh logic and comment-feed generation
+├── presets.py               # Preset-specific prompt assembly and tool allowlists
+├── registry.py              # Skill-pack registry builder
+├── retrieval.py             # Deterministic retrieval and reduction helpers
+├── benchmark.py             # Benchmark cases, lanes, and metrics extraction
+├── types.py                 # Pydantic contracts for requests, state, evidence, events
+├── TASK.md                  # Local package notes
+├── prompts/
+│   ├── system.md
+│   ├── environment.md
+│   ├── tools.md
+│   ├── root_task.md
+│   ├── response_modes/
+│   ├── roles/
+│   └── internal/
+└── skills/
+    ├── __init__.py
+    ├── core.py
+    ├── equity.py
+    ├── macro.py
+    └── commodity.py
 ```
 
-Notes:
-- Parents explicitly read child `publish/` files. They do not automatically ingest child `scratch/` notes.
-- Each agent gets a paired commenter sidecar. Commenter output is stored under `scratch/commenter/` and later injected back into the agent as a `Comment Feed`.
-- `scratch/llm_turns/` stores the exact system prompt snapshot, request envelope, and provider response for each model turn.
+## Runtime Flow
 
-## Public Interface
+1. `run_harness()` in `runtime.py` is the blocking public wrapper around `_supervise_async()`.
+2. `artifacts.initialize_run_root()` creates `data/harness_runs/<run_id>/`, writes `request.json`, and initializes the append-only registry files.
+3. The supervisor launches `python -m src.harness.agent_worker` subprocesses for queued agents.
+4. Each worker rebuilds prompt context from its on-disk workspace, then calls the active transport in `transport.py`.
+5. Model tool calls are executed through `executor.py`, which can spawn children, write/edit files, run a small shell allowlist, or invoke deterministic skills from enabled packs.
+6. `commenter.py` periodically scans each agent workspace and injects a short `Comment Feed` on later turns.
+7. The run finishes when the root agent reaches a terminal status. A successful run is one where the root reaches `done` and `publish/final.md` exists.
+
+## Public API
 
 ```python
 from src.harness import HarnessRequest, run_harness
@@ -95,107 +65,149 @@ response = run_harness(
 )
 
 print(response.status)
+print(response.stop_reason)
 print(response.run_root)
 print(response.final_report_path)
 ```
 
-`HarnessRequest` is now operational rather than scheduler-oriented:
-- `user_prompt`
-- `runtime`
-- `run_id`
-- `root_preset`
-- `agent_transport`
-- `wall_clock_budget_seconds`
-- `root_wall_clock_seconds`
-- `max_agents_per_run`
-- `max_live_agents`
-- `max_live_children_per_parent`
-- `per_agent_wall_clock_seconds`
-- `stale_heartbeat_seconds`
-- `available_skill_packs`
-- `resume_from_run_root`
+Important `HarnessRequest` fields:
 
-`HarnessResponse` now reports:
-- `status`
-- `stop_reason`
-- `run_root`
-- `root_agent_path`
-- `final_report_path`
-- `error`
+- `user_prompt`: root research task.
+- `run_id`: optional stable folder name under `data/harness_runs/`.
+- `root_preset`: starting role. Default is `orchestrator`.
+- `agent_transport`: provider protocol. `auto` resolves from the selected model family.
+- `wall_clock_budget_seconds`: run-wide time budget enforced by the supervisor.
+- `root_wall_clock_seconds`: root-agent time cap used when computing remaining root time.
+- `max_agents_per_run`, `max_live_agents`, `max_live_children_per_parent`: run concurrency and fan-out caps.
+- `per_agent_wall_clock_seconds`: non-root worker time budget.
+- `stale_heartbeat_seconds`: heartbeat timeout before an agent is marked `stale`.
+- `available_skill_packs`: enabled packs from `core`, `equity`, `macro`, `commodity`. If omitted, the runtime enables all four.
+- `continuous_refinement`: after a `done` root pass, wait for fresh commenter feedback and rerun the root agent.
+- `resume_from_run_root`: reopen an existing run directory and relaunch unfinished work.
 
-Default behavior:
+`HarnessResponse` returns:
+
+- `status`: `completed` or `failed`
+- `stop_reason`: root terminal state such as `done`, `failed`, `stale`, or `cancelled`
+- `run_root`: absolute run directory
+- `root_agent_path`: root workspace path
+- `final_report_path`: root `publish/final.md` if it exists
+- `error`: final failure text, if any
+
+Current defaults:
 
 - `root_preset="orchestrator"`
 - `agent_transport="auto"`
+- `wall_clock_budget_seconds=1200`
+- `max_agents_per_run=64`
 - `max_live_agents=16`
-- `available_skill_packs=["core", "equity", "macro", "commodity"]` if you do not override it
-- for MiniMax models, `auto` selects the Anthropic-compatible transport
+- `max_live_children_per_parent=8`
+- `per_agent_wall_clock_seconds=1800`
+- `stale_heartbeat_seconds=45`
+- `available_skill_packs=["core", "equity", "macro", "commodity"]` when omitted
 
-If you are not used to the backend term "transport": it means the API/message protocol the worker uses to talk to the model provider.
+## Tool Surface
 
-## Runtime Rules
+Base model-visible tools come from `executor.py`:
 
-- The root agent uses the `orchestrator` preset by default, but actual decomposition is still an LLM decision.
-- The legal child presets are fixed: `orchestrator`, `research`, `source_triage`, `writer`, `synthesizer`, and `evaluator`.
-- Unknown preset names are rejected and returned to the agent as repair feedback; the runtime does not silently remap them.
-- The root agent and child agents all run the same worker implementation.
-- Presets are prompt bundles, not separate runtimes.
-- Child handoff is file-based, not schema-based.
-- Child handoff always includes canonical published file paths so a parent can explicitly read them later.
-- Agents see higher-level deterministic research tools, not internal retrieval-stage controls like `retrieve_sources(stage=...)`.
-- File content tools are path-based:
-  - `read_file(path=..., start_line=..., max_lines=...)` for exact or partial reads
-  - `write_file(path=..., content=...)` for full writes under the current agent's `publish/` or `scratch/`
-  - `edit_file(path=..., operation=..., ...)` for bounded edits under the current agent's `publish/` or `scratch/`
-- `bash(argv=[...], cwd=...)` is repo-scoped and currently allows `cp`, `ls`, `mkdir`, `mv`, and `rg`
-- `search_in_files(pattern=..., paths=[...])` remains the structured grep-style tool and is usually easier for agents than parsing raw shell output
-- Only operational constraints are enforced: valid status files, fresh heartbeats, atomic file writes, replayable transcripts, and required published files on `done`.
-- Deep delegation is allowed, but limited by run-wide agent budgets, run-wide live-agent limits, and per-parent live-child limits.
-- Provider transcript replay is persisted under each agent's `scratch/transcript.jsonl`; some providers include explicit `thinking` blocks there, while others only expose tool calls and visible text.
-- Each agent also writes turn-level debug artifacts under `scratch/llm_turns/`. These capture the exact system prompt snapshot, the request envelope sent to the model, and the provider response payload for each turn.
-- If you are not used to the backend term "request envelope": it means the full API payload the worker sends to the model, including prompt text, replayed messages, and tool schemas.
-- Agents do not see countdown-style time prompts by default.
-- When the run-wide wall clock is reached, the supervisor requests a soft stop first, then gives the run a 60-second grace window before hard failure.
-- Each agent also has a paired commenter sidecar. The commenter refreshes periodically from the agent's visible workspace state, writes advisory notes to `scratch/commenter/comments.jsonl`, and unread notes are injected into the next agent turn as a `Comment Feed`.
+- `spawn_subagent`
+- `list_children`
+- `list_publish_files`
+- `promote_artifact` for `research` and `source_triage`
+- `bash`
+- `write_file`
+- `edit_file`
+- `set_status`
 
-## Running A Live Test
+`bash` is intentionally small. The current allowlist is:
 
-Use `uv run python`, not the system `python`, because this repo's environment is managed through `uv`.
+- `cp`
+- `mv`
+- `mkdir`
+- `ls`
+- `rg`
+- `sleep`
 
-The exact pattern used for the live XOM memo tests was:
+Skill packs are registered in `registry.py` and `skills/`:
 
-```bash
-set -a
-source .env
-set +a
+- `core`: local file reads/search, web search/read, context condensation, composite retrieval
+- `equity`: market data, company profile, financials, SEC filings, insiders, peers
+- `macro`: macro indicator helpers
+- `commodity`: EIA inventory, COT, futures curve helpers
 
-uv run python - <<'PY'
-from src.harness import HarnessRequest, run_harness
+Visibility is preset-dependent:
 
-response = run_harness(
-    HarnessRequest(
-        user_prompt=(
-            "Write a cross-domain investment memo on XOM using current evidence. "
-            "Assess valuation, balance-sheet and shareholder-return quality, crude-oil "
-            "supply-demand and futures-curve drivers, and the U.S. macro backdrop. "
-            "Explain the main bull and bear cases, key quantitative evidence, and the "
-            "12-month risk/reward."
-        ),
-        run_id="live-xom-cross-domain-bash-tools-30m",
-        agent_transport="auto",
-        wall_clock_budget_seconds=1800,
-    )
-)
+- `research` sees the broadest visible skill surface from the enabled packs; internal helper skills can still stay hidden
+- `source_triage` only sees `core`
+- other presets get a reduced core read/search surface plus the file/status tools above
 
-print("STATUS:", response.status)
-print("STOP_REASON:", response.stop_reason)
-print("RUN_ROOT:", response.run_root)
-print("FINAL_REPORT:", response.final_report_path)
-print("ERROR:", response.error)
-PY
+## On-Disk Run Layout
+
+Each run lives under `data/harness_runs/<run_id>/`.
+
+```text
+data/harness_runs/<run_id>/
+├── request.json
+├── progress.md
+├── stop_requested                 # Optional sentinel written by the TUI for graceful stop
+├── registry/
+│   ├── agents.jsonl
+│   ├── events.jsonl
+│   ├── objects/
+│   └── objects_manifest.jsonl
+└── agents/
+    └── <agent_id>/
+        ├── task.md
+        ├── tools.md
+        ├── context/
+        ├── publish/
+        │   ├── summary.md
+        │   ├── final.md
+        │   └── artifact_index.md
+        ├── scratch/
+        │   ├── journal.jsonl
+        │   ├── transcript.jsonl
+        │   ├── tool_history.jsonl
+        │   ├── worker.log
+        │   ├── llm_turns/
+        │   ├── reduction/         # Created lazily by retrieval-heavy skills
+        │   └── commenter/
+        │       ├── comments.jsonl
+        │       ├── latest.md
+        │       ├── notes/
+        │       └── turns/
+        └── state/
+            ├── status.txt
+            ├── heartbeat.txt
+            ├── pid.txt
+            ├── parent.txt
+            ├── preset.txt
+            ├── events_queue.jsonl
+            ├── skill_state.json
+            ├── transport_state.json
+            └── commenter_state.json
 ```
 
-Notes:
-- `set -a; source .env; set +a` exports `MINIMAX_API_KEY` and related provider variables into the current shell.
-- `wall_clock_budget_seconds=1800` gives the run a 30-minute budget.
-- If you want a different prompt or preset, change `user_prompt` or `root_preset` in the `HarnessRequest`.
+Important runtime conventions:
+
+- parents explicitly read child `publish/` files; child `scratch/` data is not auto-ingested
+- `progress.md` is the supervisor-maintained human-readable summary used by the TUI
+- `scratch/transcript.jsonl` stores replayable model messages
+- `scratch/llm_turns/` stores the exact system prompt snapshot, request payload, response payload, and any extracted thinking text for each turn
+- `state/events_queue.jsonl` is the parent-visible completion queue used by `list_children`
+
+## Stop, Resume, And Refinement
+
+- When wall-clock budget is exhausted, or the TUI writes `stop_requested`, the supervisor first requests a soft stop.
+- The runtime then gives agents a 60-second grace window to finish publishing before forcing failure.
+- `resume_from_run_root` reloads the original request from disk and only relaunches unfinished agents.
+- `continuous_refinement=True` keeps the root in `refining` after `done` and relaunches it when the commenter produces fresh feedback.
+
+## Benchmark Support
+
+`benchmark.py` provides:
+
+- `run_benchmark_suite()`
+- default benchmark cases for equity, macro, and commodity prompts
+- benchmark lanes such as `default` and `wide`
+- metrics extraction from the on-disk run registry
