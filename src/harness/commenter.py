@@ -40,7 +40,7 @@ from src.shared.model_config import get_model
 COMMENTER_REFRESH_INTERVAL_SECONDS = 30.0
 COMMENTER_MAX_SELECTED_FILES = 10
 COMMENTER_MAX_FEED_COMMENTS = 3
-COMMENTER_MAX_TOOL_STEPS = 4
+COMMENTER_MAX_TOOL_STEPS = 100
 COMMENTER_DEFAULT_READ_MAX_CHARS = 12_000
 COMMENTER_TERMINAL_STATUSES = {"done", "failed", "blocked", "stale", "cancelled"}
 _PROMPTS_ROOT = Path(__file__).with_name("prompts") / "internal"
@@ -729,7 +729,8 @@ def _run_commenter_dialog(
             if not tool_calls:
                 return final_text, trace
             messages.append({"role": "assistant", "content": [_serialize_payload(block) for block in response.content]})
-            # Full results → trace (for auditing). Lightweight summaries → messages (for context).
+            # Full results for the current step so the model can read content.
+            # Previous step's full results are replaced with summaries to save context.
             full_results = [
                 {
                     "type": "tool_result",
@@ -749,19 +750,27 @@ def _run_commenter_dialog(
                 for call in tool_calls
             ]
             trace[-1]["tool_results"] = full_results
-            summary_results = [
-                {
-                    "type": "tool_result",
-                    "tool_use_id": call["call_id"],
-                    "content": _summarize_tool_call(
-                        call["name"],
-                        call["arguments"],
-                        json.loads(full_results[i]["content"]),
-                    ),
-                }
-                for i, call in enumerate(tool_calls)
-            ]
-            messages.append({"role": "user", "content": summary_results})
+            # Replace previous step's full results with summaries
+            if len(trace) >= 2:
+                prev_tool_calls = trace[-2].get("tool_calls", [])
+                prev_full_results = trace[-2].get("tool_results", [])
+                if prev_full_results and prev_tool_calls:
+                    summary_results = [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": prev_call["call_id"],
+                            "content": _summarize_tool_call(
+                                prev_call["name"],
+                                prev_call["arguments"],
+                                json.loads(prev_full_results[i]["content"]),
+                            ),
+                        }
+                        for i, prev_call in enumerate(prev_tool_calls)
+                        if i < len(prev_full_results)
+                    ]
+                    # The previous tool results are the last user message
+                    messages[-2] = {"role": "user", "content": summary_results}
+            messages.append({"role": "user", "content": full_results})
         return final_text, trace
     client = OpenAI(
         base_url=minimax_openai_base_url(),
@@ -822,6 +831,8 @@ def _run_commenter_dialog(
         if not tool_calls:
             return final_text, trace
         messages.append({"role": "assistant", **_serialize_payload(choice.message)})
+        # Full results for the current step so the model can read content.
+        # Previous step's full results are replaced with summaries to save context.
         full_results: list[dict[str, Any]] = []
         for call in tool_calls:
             result = _execute_commenter_tool_call(
@@ -840,16 +851,32 @@ def _run_commenter_dialog(
                 }
             )
         trace[-1]["tool_results"] = full_results
-        # Lightweight summaries for messages to keep context bounded
-        summary_results = [
-            {
-                "role": "tool",
-                "tool_call_id": call["call_id"],
-                "content": _summarize_tool_call(call["name"], call["arguments"], json.loads(full_results[i]["content"])),
-            }
-            for i, call in enumerate(tool_calls)
-        ]
-        messages.extend(summary_results)
+        # Replace previous step's full results with summaries
+        if len(trace) >= 2:
+            prev_tool_calls = trace[-2].get("tool_calls", [])
+            prev_full_results = trace[-2].get("tool_results", [])
+            if prev_full_results and prev_tool_calls:
+                # Find where previous tool results sit in messages and replace them
+                prev_summary_results = [
+                    {
+                        "role": "tool",
+                        "tool_call_id": prev_call["call_id"],
+                        "content": _summarize_tool_call(
+                            prev_call["name"],
+                            prev_call["arguments"],
+                            json.loads(prev_full_results[i]["content"]),
+                        ),
+                    }
+                    for i, prev_call in enumerate(prev_tool_calls)
+                    if i < len(prev_full_results)
+                ]
+                # Previous tool results are the N messages before the last assistant message
+                # (last assistant = messages[-1], previous tools = messages[-1-N:-1])
+                n_prev = len(prev_full_results)
+                replace_start = len(messages) - 1 - n_prev
+                if replace_start >= 0:
+                    messages[replace_start:len(messages) - 1] = prev_summary_results
+        messages.extend(full_results)
     return final_text, trace
 
 

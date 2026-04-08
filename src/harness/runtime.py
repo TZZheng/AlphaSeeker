@@ -545,8 +545,10 @@ async def _monitor_commenters(shared: SupervisorState) -> None:
                 or 0.0
             )
             last_commented = str(state.get("last_commented_fingerprint") or "")
-            # Skip if agent hasn't been running for at least 30 seconds
-            agent_started_at = _iso_to_epoch(record.started_at or "") or 0.0
+            # Skip if agent hasn't actually started running yet
+            agent_started_at = _iso_to_epoch(record.started_at)
+            if agent_started_at is None:
+                continue
             if (
                 fingerprint
                 and fingerprint != last_commented
