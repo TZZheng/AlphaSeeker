@@ -6,14 +6,16 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import (
     DataTable,
     Footer,
+    Markdown,
     RichLog,
     Rule,
     Static,
@@ -122,6 +124,51 @@ def _assistant_response_lines(agent_id: str, entry: dict[str, Any]) -> tuple[lis
     return llm_lines, thinking_lines
 
 
+def _plain_text_from_markup_lines(lines: list[str]) -> str:
+    plain_lines: list[str] = []
+    for line in lines:
+        try:
+            plain_lines.append(Text.from_markup(line).plain)
+        except Exception:
+            plain_lines.append(line)
+    return "\n\n".join(item for item in plain_lines if item).strip()
+
+
+def _results_copy_text(run_root: str) -> str:
+    agents_dir = Path(run_root) / "agents"
+    if not agents_dir.exists():
+        return ""
+    entries: list[str] = []
+    for agent_dir in sorted(agents_dir.iterdir()):
+        if not agent_dir.is_dir():
+            continue
+        agent_id = agent_dir.name
+        for fname in ("summary.md", "final.md"):
+            pub_path = agent_dir / "publish" / fname
+            if not pub_path.exists():
+                continue
+            try:
+                content = pub_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if not content:
+                continue
+            entries.append(f"{agent_id} / {fname}\n{content}")
+    return "\n\n".join(entries).strip()
+
+
+def _partial_results_markdown(run_root: str, snapshot: DashboardSnapshot) -> str:
+    progress_path = Path(run_root) / "progress.md"
+    if progress_path.exists():
+        try:
+            content = progress_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            content = ""
+        if content:
+            return content
+    return f"*Evidence: {snapshot.evidence_count} | Status: {snapshot.status}*"
+
+
 class DashboardScreen(Screen):
     """Live research dashboard with agent status, tabbed output, and key controls."""
 
@@ -173,6 +220,14 @@ class DashboardScreen(Screen):
         min-height: 4;
     }
 
+    #partial-results-pane {
+        height: 1fr;
+    }
+
+    #partial-results-md {
+        margin: 0;
+    }
+
     #output-tabs {
         height: 1fr;
     }
@@ -194,6 +249,7 @@ class DashboardScreen(Screen):
         Binding("l", "show_llm", "LLM", show=True),
         Binding("t", "show_thinking", "Think", show=True),
         Binding("r", "show_results", "Results", show=True),
+        Binding("c", "copy_current", "Copy", show=True),
         Binding("v", "cycle_layout", "Layout", show=True),
         Binding("q", "stop_research", "Stop", show=True),
     ]
@@ -229,6 +285,7 @@ class DashboardScreen(Screen):
 
         # Commenter scanning state — entries merge into _llm_entries
         self._commenter_cursors: dict[str, int] = {}
+        self._partial_results_content: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("AlphaSeeker ● Starting…", id="header-bar")
@@ -241,7 +298,8 @@ class DashboardScreen(Screen):
                 yield DataTable(id="agent-table", zebra_stripes=True, cursor_type="row")
                 yield Rule()
                 yield Static("[b]PARTIAL RESULTS[/b]", classes="pane-title", id="results-title")
-                yield RichLog(id="partial-results", max_lines=300, markup=True, wrap=True)
+                with VerticalScroll(id="partial-results-pane"):
+                    yield Markdown("", id="partial-results-md")
             with Vertical(id="right-pane"):
                 with TabbedContent(id="output-tabs"):
                     with TabPane("LLM Logs", id="tab-llm"):
@@ -480,20 +538,11 @@ class DashboardScreen(Screen):
     # ── Partial results ───────────────────────────────────────────────────────
 
     def _update_partial_results(self, snapshot: DashboardSnapshot) -> None:
-        log = self.query_one("#partial-results", RichLog)
-        log.clear()
-        progress_path = Path(self._run_root) / "progress.md"
-        if progress_path.exists():
-            try:
-                content = progress_path.read_text(encoding="utf-8").strip()
-                if content:
-                    log.write(content)
-                    return
-            except OSError:
-                pass
-        log.write(
-            f"[dim]Evidence: {snapshot.evidence_count}  |  Status: {snapshot.status}[/dim]"
-        )
+        content = _partial_results_markdown(self._run_root, snapshot)
+        if content == self._partial_results_content:
+            return
+        self._partial_results_content = content
+        self.query_one("#partial-results-md", Markdown).update(content)
 
     # ── Results tab ───────────────────────────────────────────────────────────
 
@@ -582,6 +631,35 @@ class DashboardScreen(Screen):
         if not self.query_one("#right-pane", Vertical).display:
             self._set_layout("split")
         self.query_one("#output-tabs", TabbedContent).active = "tab-results"
+
+    def _current_tab_copy_text(self) -> tuple[str, str]:
+        active_tab = self.query_one("#output-tabs", TabbedContent).active
+        if active_tab == "tab-thinking":
+            lines: list[str] = []
+            for agent_id in self._agents_to_display(self._thinking_entries):
+                lines.extend(self._thinking_entries[agent_id])
+            return _plain_text_from_markup_lines(lines), "thinking log"
+        if active_tab == "tab-results":
+            return _results_copy_text(self._run_root), "results"
+        lines = []
+        for agent_id in self._agents_to_display(self._llm_entries):
+            lines.extend(self._llm_entries[agent_id])
+        return _plain_text_from_markup_lines(lines), "LLM log"
+
+    def action_copy_current(self) -> None:
+        selected_text = self.get_selected_text()
+        label = "selection"
+        text = selected_text or ""
+        if not text:
+            text, label = self._current_tab_copy_text()
+        if not text:
+            self.app.notify("Nothing to copy.", severity="warning")
+            return
+        try:
+            self.app.copy_to_clipboard(text)
+            self.app.notify(f"Copied {label}.", severity="information")
+        except Exception:
+            self.app.notify("Failed to copy to clipboard.", severity="error")
 
     def action_cycle_layout(self) -> None:
         """Cycle: split → focus → status → split."""

@@ -11,6 +11,10 @@ from textual.screen import Screen
 from textual.widgets import Footer, Header, Markdown, Static
 
 
+def _copyable_report_text(report: str, selected_text: str | None) -> str:
+    return selected_text or report
+
+
 class DoneScreen(Screen):
     """Screen shown when research completes, displaying the final report."""
 
@@ -92,9 +96,13 @@ class DoneScreen(Screen):
             )
 
     def action_copy_report(self) -> None:
+        report_text = _copyable_report_text(self._report, self.get_selected_text())
+        if not report_text:
+            self.app.notify("Nothing to copy.", severity="warning")
+            return
         try:
-            self.app.copy_to_clipboard(self._report)
-            self.app.notify("Report copied to clipboard!", severity="information")
+            self.app.copy_to_clipboard(report_text)
+            self.app.notify("Copied report text.", severity="information")
         except Exception:
             self.app.notify("Failed to copy to clipboard.", severity="error")
 
