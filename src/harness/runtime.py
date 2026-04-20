@@ -44,7 +44,15 @@ from src.harness.registry import build_skill_registry, get_skills_for_packs
 from src.harness.types import AgentEvent, HarnessRequest, HarnessResponse, SkillSpec
 
 
-TERMINAL_STATUSES = {"done", "failed", "blocked", "stale", "cancelled"}
+TERMINAL_STATUSES = {
+    "done",
+    "failed",
+    "blocked",
+    "stale",
+    "cancelled",
+    "timed_out",
+    "timed_out_with_deliverable",
+}
 POLL_INTERVAL_SECONDS = 1.0
 PROCESS_KILL_GRACE_SECONDS = 2.0
 SOFT_STOP_GRACE_SECONDS = 180.0
@@ -228,13 +236,25 @@ async def _finalize_root_after_forced_stop(shared: SupervisorState) -> None:
     managed = shared.live.pop(shared.root_agent_id, None)
     if managed is not None:
         await _terminate_process(managed)
-    write_status(shared.run_root, shared.root_agent_id, "failed")
+    final_report = agent_workspace_paths(shared.run_root, shared.root_agent_id)["publish_final"]
+    final_exists = final_report.exists()
+    if shared.stop_reason == "wall_clock_budget_exhausted":
+        terminal_status = "timed_out_with_deliverable" if final_exists else "timed_out"
+        default_error = (
+            "Harness wall-clock budget exhausted; root published a deliverable before stop."
+            if final_exists
+            else "Harness wall-clock budget exhausted before the root agent completed."
+        )
+    else:
+        terminal_status = "failed"
+        default_error = "Harness run stopped before the root agent completed."
+    write_status(shared.run_root, shared.root_agent_id, terminal_status)
     update_agent_record(
         shared.run_root,
         agent_id=shared.root_agent_id,
-        status="failed",
+        status=terminal_status,
         finished_at=datetime.now(timezone.utc).isoformat(),
-        error=shared.error or "Harness run stopped before the root agent completed.",
+        error=shared.error or default_error,
     )
     append_event(
         shared.run_root,

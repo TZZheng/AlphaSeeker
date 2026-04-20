@@ -287,7 +287,19 @@ class SkillSpec(BaseModel):
 
 
 AGENT_PRESETS = ("orchestrator", "research", "source_triage", "writer", "synthesizer", "evaluator")
-AGENT_STATUSES = ("queued", "running", "waiting", "done", "failed", "blocked", "stale", "cancelled", "refining")
+AGENT_STATUSES = (
+    "queued",
+    "running",
+    "waiting",
+    "done",
+    "failed",
+    "blocked",
+    "stale",
+    "cancelled",
+    "refining",
+    "timed_out",
+    "timed_out_with_deliverable",
+)
 AGENT_TRANSPORTS = ("auto", "minimax_anthropic", "minimax_openai", "anthropic", "openai", "text_json")
 
 
@@ -312,7 +324,19 @@ class AgentRecord(BaseModel):
     workspace_path: str
     task_name: str
     description: str
-    status: Literal["queued", "running", "waiting", "done", "failed", "blocked", "stale", "cancelled", "refining"] = "queued"
+    status: Literal[
+        "queued",
+        "running",
+        "waiting",
+        "done",
+        "failed",
+        "blocked",
+        "stale",
+        "cancelled",
+        "refining",
+        "timed_out",
+        "timed_out_with_deliverable",
+    ] = "queued"
     created_at: str = Field(default_factory=_utc_now_iso)
     updated_at: str = Field(default_factory=_utc_now_iso)
     pid: int | None = None
