@@ -377,6 +377,7 @@ class HarnessRequest(BaseModel):
     available_skill_packs: list[str] | None = None
     continuous_refinement: bool = False
     resume_from_run_root: str | None = None
+    commenter_interval_seconds: float | None = None
 
     @field_validator("available_skill_packs")
     @classmethod

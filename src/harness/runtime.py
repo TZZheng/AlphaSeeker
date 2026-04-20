@@ -351,6 +351,13 @@ def _read_last_commented_fingerprint(run_root: str, agent_id: str) -> str:
     return str(state.get("last_commented_fingerprint") or "")
 
 
+def _commenter_interval_for_request(request: HarnessRequest) -> float:
+    override = request.commenter_interval_seconds
+    if override is None or override <= 0:
+        return COMMENTER_REFRESH_INTERVAL_SECONDS
+    return float(override)
+
+
 STOP_REQUESTED_FILE = "stop_requested"
 
 
@@ -457,12 +464,13 @@ async def _monitor_agents(shared: SupervisorState) -> None:
             )
 
         # Handle root agent completion and refinement loop
+        commenter_interval = _commenter_interval_for_request(shared.request)
         root_status = read_status(shared.run_root, shared.root_agent_id)
         if root_status == "refining" and shared.root_agent_id not in shared.live:
             # Root finished but is waiting for commenter to produce new content
             if shared.root_finished_refining_at is not None:
                 elapsed = now_epoch - shared.root_finished_refining_at
-                if elapsed >= COMMENTER_REFRESH_INTERVAL_SECONDS:
+                if elapsed >= commenter_interval:
                     current_fp = _read_last_commented_fingerprint(shared.run_root, shared.root_agent_id)
                     if current_fp != shared.root_last_reviewed_fingerprint:
                         # New comments — re-launch root for another pass
@@ -540,6 +548,7 @@ async def _monitor_commenters(shared: SupervisorState) -> None:
     while not shared.stop_requested:
         snapshot = latest_agent_records(shared.run_root)
         now_epoch = time.time()
+        commenter_interval = _commenter_interval_for_request(shared.request)
 
         for agent_id, task in list(shared.commenter_tasks.items()):
             if not task.done():
@@ -578,8 +587,8 @@ async def _monitor_commenters(shared: SupervisorState) -> None:
             if (
                 fingerprint
                 and fingerprint != last_commented
-                and now_epoch - last_attempted_at >= COMMENTER_REFRESH_INTERVAL_SECONDS
-                and now_epoch - agent_started_at >= COMMENTER_REFRESH_INTERVAL_SECONDS
+                and now_epoch - last_attempted_at >= commenter_interval
+                and now_epoch - agent_started_at >= commenter_interval
             ):
                 observation_snapshot = build_commenter_observation_snapshot(
                     shared.run_root,
