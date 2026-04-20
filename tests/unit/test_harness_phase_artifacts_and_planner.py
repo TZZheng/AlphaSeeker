@@ -13,7 +13,8 @@ from src.harness.artifacts import (
     refresh_progress_view,
     save_skill_state,
 )
-from src.harness.presets import default_tool_allowlist, render_root_task_markdown, render_tools_markdown
+from src.harness.presets import default_tool_allowlist
+from src.harness.prompt_builder import render_task_markdown, render_tools_markdown
 from src.harness.registry import build_skill_registry, get_skills_for_packs
 from src.harness.types import HarnessRequest, HarnessState
 
@@ -31,7 +32,7 @@ def test_initialize_run_root_and_workspace_layout(monkeypatch: pytest.MonkeyPatc
         preset="research",
         task_name="Root Task",
         description="Analyze AAPL",
-        task_markdown=render_root_task_markdown(request.user_prompt),
+        task_markdown=render_task_markdown(request.user_prompt),
         tools_markdown=render_tools_markdown(
             preset="research",
             available_tools=default_tool_allowlist("research"),
@@ -65,7 +66,7 @@ def test_save_skill_state_persists_agent_runtime(monkeypatch: pytest.MonkeyPatch
         preset="research",
         task_name="Root Task",
         description="Analyze AAPL",
-        task_markdown=render_root_task_markdown(request.user_prompt),
+        task_markdown=render_task_markdown(request.user_prompt),
         tools_markdown=render_tools_markdown(
             preset="research",
             available_tools=default_tool_allowlist("research"),

@@ -411,7 +411,7 @@ class HarnessResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["completed", "failed"]
+    status: Literal["completed", "failed", "time_out", "time_out_with_deliverable"]
     stop_reason: str | None = None
     run_root: str | None = None
     root_agent_path: str | None = None

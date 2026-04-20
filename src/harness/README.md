@@ -89,12 +89,24 @@ Important `HarnessRequest` fields:
 
 `HarnessResponse` returns:
 
-- `status`: `completed` or `failed`
-- `stop_reason`: root terminal state such as `done`, `failed`, `stale`, or `cancelled`
+- `status`: `completed`, `failed`, `time_out`, or `time_out_with_deliverable`
+- `stop_reason`: root terminal state such as `done`, `failed`, `stale`, `cancelled`, or `wall_clock_budget_exhausted`
+- `wall_clock_budget_exhausted` maps to `time_out` when no root `publish/final.md` exists, and to `time_out_with_deliverable` when a readable root deliverable exists but the root did not finish cleanly
 - `run_root`: absolute run directory
 - `root_agent_path`: root workspace path
 - `final_report_path`: root `publish/final.md` if it exists
 - `error`: final failure text, if any
+
+## Validation Runner
+
+For live patch-edit validation, use the direct Python runner so `.env` is loaded before the harness imports:
+
+```bash
+uv run python scripts/xom_patch_validation.py run --run-id xom-edit-patch-v1
+uv run python scripts/xom_patch_validation.py compare --before-run-root data/harness_runs/xom-edit-baseline-prefix-snapshot --after-run-id xom-edit-patch-v1
+```
+
+The script writes `validation_summary.json` or `validation_comparison.json` into the run directory and prints the same JSON to stdout.
 
 Current defaults:
 
@@ -119,6 +131,7 @@ Base model-visible tools come from `executor.py`:
 - `bash`
 - `write_file`
 - `edit_file`
+- `apply_patch`
 - `set_status`
 
 `bash` is intentionally small. The current allowlist is:

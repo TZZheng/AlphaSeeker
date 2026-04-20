@@ -120,10 +120,48 @@ def test_run_harness_stops_on_run_wall_clock_when_root_never_finishes(
         launch_agent_process=_launcher,
     )
 
-    assert response.status == "failed"
+    assert response.status == "time_out"
     assert response.stop_reason == "wall_clock_budget_exhausted"
     assert response.error is not None
 
+
+def test_run_harness_returns_timeout_with_deliverable_when_root_publish_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(runtime_module, "POLL_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(runtime_module, "SOFT_STOP_GRACE_SECONDS", 0.2)
+
+    async def _launcher(run_root: str, agent_id: str):
+        process = _FakeProcess(2040)
+
+        async def _runner() -> None:
+            write_status(run_root, agent_id, "running")
+            await asyncio.sleep(1.05)
+            paths = agent_workspace_paths(run_root, agent_id)
+            write_text_atomic(paths["publish_summary"], "# Summary\n\nReadable draft exists.\n")
+            write_text_atomic(paths["publish_index"], "- final.md: Draft final answer\n")
+            write_text_atomic(paths["publish_final"], "# Final\n\nReadable draft before timeout.\n")
+            await asyncio.sleep(5.0)
+
+        asyncio.create_task(_runner())
+        return process
+
+    response = run_harness(
+        HarnessRequest(
+            user_prompt="Analyze AAPL",
+            wall_clock_budget_seconds=1,
+            root_wall_clock_seconds=5,
+            per_agent_wall_clock_seconds=5,
+        ),
+        launch_agent_process=_launcher,
+    )
+
+    assert response.status == "time_out_with_deliverable"
+    assert response.stop_reason == "wall_clock_budget_exhausted"
+    assert response.final_report_path is not None
+    assert "Readable draft before timeout." in Path(response.final_report_path).read_text(encoding="utf-8")
 
 
 def test_run_harness_allows_root_to_finish_during_soft_stop_grace(

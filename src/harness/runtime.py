@@ -637,9 +637,15 @@ async def _supervise_async(
 
     root_workspace = agent_workspace_paths(run_root, root_agent_id)["workspace"]
     final_report = agent_workspace_paths(run_root, root_agent_id)["publish_final"]
+    final_report_exists = final_report.exists()
     stop_reason = shared.stop_reason or "unknown"
     error = shared.error
-    status = "completed" if stop_reason == "done" and final_report.exists() else "failed"
+    if stop_reason == "done" and final_report_exists:
+        status = "completed"
+    elif stop_reason == "wall_clock_budget_exhausted":
+        status = "time_out_with_deliverable" if final_report_exists else "time_out"
+    else:
+        status = "failed"
     if status == "failed" and error is None:
         error = "Harness run did not finish with a completed root publish/final.md."
     refresh_progress_view(run_root)
@@ -648,7 +654,7 @@ async def _supervise_async(
         stop_reason=stop_reason,
         run_root=run_root,
         root_agent_path=str(root_workspace),
-        final_report_path=str(final_report) if final_report.exists() else None,
+        final_report_path=str(final_report) if final_report_exists else None,
         error=error,
     )
 
