@@ -7,7 +7,8 @@ import pytest
 
 import src.harness.runtime as runtime_module
 from src.harness.artifacts import agent_workspace_paths, create_agent_workspace, latest_agent_records, write_text_atomic, write_status
-from src.harness.presets import default_tool_allowlist, render_tools_markdown
+from src.harness.presets import default_tool_allowlist
+from src.harness.prompt_builder import render_tools_markdown
 from src.harness.runtime import run_harness
 from src.harness.types import HarnessRequest
 
@@ -122,6 +123,7 @@ def test_run_harness_stops_on_run_wall_clock_when_root_never_finishes(
     assert response.status == "failed"
     assert response.stop_reason == "wall_clock_budget_exhausted"
     assert response.error is not None
+
 
 
 def test_run_harness_allows_root_to_finish_during_soft_stop_grace(
@@ -326,10 +328,15 @@ def test_run_harness_schedules_commenter_refreshes_on_state_change(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("src.harness.runtime.POLL_INTERVAL_SECONDS", 0.05)
     monkeypatch.setattr("src.harness.runtime.COMMENTER_REFRESH_INTERVAL_SECONDS", 0.0)
-    commenter_calls: list[str] = []
+    commenter_calls: list[dict[str, object]] = []
 
-    def _fake_refresh(run_root: str, agent_id: str, request, *, model_name=None, transport_name=None, observed_fingerprint=None):
-        commenter_calls.append(agent_id)
+    def _fake_refresh(run_root: str, agent_id: str, request, *, model_name=None, transport_name=None, observation_snapshot=None):
+        commenter_calls.append(
+            {
+                "agent_id": agent_id,
+                "snapshot": observation_snapshot,
+            }
+        )
         return 0
 
     monkeypatch.setattr("src.harness.runtime.refresh_commenter_for_agent", _fake_refresh)
@@ -359,4 +366,13 @@ def test_run_harness_schedules_commenter_refreshes_on_state_change(
     )
 
     assert response.status == "completed"
-    assert "agent_root" in commenter_calls
+    assert any(call["agent_id"] == "agent_root" for call in commenter_calls)
+    root_snapshots = [call["snapshot"] for call in commenter_calls if call["agent_id"] == "agent_root"]
+    assert all(isinstance(snapshot, dict) for snapshot in root_snapshots)
+    assert all("changed_entries" in snapshot for snapshot in root_snapshots if isinstance(snapshot, dict))
+    assert any(
+        entry.get("display_path") == "scratch/note.md"
+        for snapshot in root_snapshots
+        if isinstance(snapshot, dict)
+        for entry in list(snapshot.get("changed_entries") or [])
+    )

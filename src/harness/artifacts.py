@@ -167,6 +167,8 @@ def agent_workspace_paths(run_root: str | Path, agent_id: str) -> dict[str, Path
         "skill_state": state / "skill_state.json",
         "transport_state": state / "transport_state.json",
         "commenter_state": state / "commenter_state.json",
+        "prompt_memory": state / "prompt_memory.md",
+        "history_summary": state / "history_summary.md",
         "state_root": state,
         "status": state / "status.txt",
         "heartbeat": state / "heartbeat.txt",
@@ -252,6 +254,8 @@ def create_agent_workspace(
     write_text_atomic(paths["tool_history"], "")
     write_text_atomic(paths["commenter_comments"], "")
     write_text_atomic(paths["commenter_latest"], "")
+    write_text_atomic(paths["prompt_memory"], "")
+    write_text_atomic(paths["history_summary"], "")
 
     if context_files:
         for source_path in context_files:

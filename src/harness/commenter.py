@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, TypedDict
 
 import anthropic
 from openai import OpenAI
@@ -25,6 +25,7 @@ from src.harness.artifacts import (
     unread_commenter_comments,
     write_text_atomic,
 )
+from src.harness.prompt_builder import build_commenter_prompt_bundle
 from src.harness.skills.core import read_file_skill, search_in_files_skill
 from src.harness.transport import (
     minimax_anthropic_base_url,
@@ -38,28 +39,40 @@ from src.shared.model_config import get_model
 
 
 COMMENTER_REFRESH_INTERVAL_SECONDS = 30.0
-COMMENTER_MAX_SELECTED_FILES = 10
 COMMENTER_MAX_FEED_COMMENTS = 3
 COMMENTER_MAX_TOOL_STEPS = 100
 COMMENTER_DEFAULT_READ_MAX_CHARS = 12_000
+COMMENTER_MAX_RENDERED_CHANGED_ENTRIES = 20
 COMMENTER_TERMINAL_STATUSES = {"done", "failed", "blocked", "stale", "cancelled"}
-_PROMPTS_ROOT = Path(__file__).with_name("prompts") / "internal"
+COMMENTER_OPERATING_LOG_FILES = {
+    "journal.jsonl",
+    "tool_history.jsonl",
+    "transcript.jsonl",
+    "worker.log",
+}
+
+
+class CommenterChangedEntry(TypedDict):
+    change_type: str
+    path: str
+    display_path: str
+    category: str
+    size_bytes: int
+    mtime_ns: int
+
+
+class CommenterObservationSnapshot(TypedDict):
+    fired_at: str
+    base_fingerprint: str
+    target_fingerprint: str
+    base_manifest: list[dict[str, Any]]
+    target_manifest: list[dict[str, Any]]
+    changed_entries: list[CommenterChangedEntry]
+    inspectable_scope: list[str]
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def _prompt_template(name: str) -> str:
-    path = _PROMPTS_ROOT / name
-    return path.read_text(encoding="utf-8").strip()
-
-
-def _render_prompt(template: str, replacements: dict[str, str]) -> str:
-    rendered = template
-    for key, value in replacements.items():
-        rendered = rendered.replace(f"{{{{{key}}}}}", value.strip())
-    return rendered
 
 
 def _llm_text_content(content: object) -> str:
@@ -156,18 +169,6 @@ def _iter_workspace_files(root: Path) -> list[Path]:
     return sorted(path for path in root.rglob("*") if path.is_file())
 
 
-def _text_preview(path: Path) -> str:
-    try:
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
-            for raw_line in fh:
-                line = raw_line.strip()
-                if line:
-                    return line[:100]
-    except OSError:
-        return ""
-    return ""
-
-
 def _file_entry(path: Path, *, category: str, display_path: str) -> dict[str, Any]:
     try:
         stat = path.stat()
@@ -179,8 +180,18 @@ def _file_entry(path: Path, *, category: str, display_path: str) -> dict[str, An
         "category": category,
         "size_bytes": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
-        "preview": _text_preview(path),
     }
+
+
+def _commenter_scratch_category(path: Path, scratch_root: Path) -> str:
+    relative = path.relative_to(scratch_root).as_posix()
+    if relative in COMMENTER_OPERATING_LOG_FILES:
+        return "operating_log"
+    if relative.startswith("llm_turns/"):
+        return "llm_trace"
+    if relative.startswith("skills/"):
+        return "tool_artifact"
+    return "scratch"
 
 
 def build_commenter_observation_manifest(run_root: str, agent_id: str) -> list[dict[str, Any]]:
@@ -205,9 +216,12 @@ def build_commenter_observation_manifest(run_root: str, agent_id: str) -> list[d
         for path in _iter_workspace_files(root):
             if paths["commenter_root"] in path.parents or path == paths["commenter_latest"]:
                 continue
+            effective_category = category
+            if root_key == "scratch_root":
+                effective_category = _commenter_scratch_category(path, root)
             entry = _file_entry(
                 path,
-                category=category,
+                category=effective_category,
                 display_path=str(path.relative_to(paths["workspace"])),
             )
             if entry:
@@ -228,50 +242,42 @@ def build_commenter_observation_manifest(run_root: str, agent_id: str) -> list[d
     return manifest
 
 
-def compute_commenter_observation_fingerprint(run_root: str, agent_id: str) -> str:
+def _normalize_manifest_entries(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, list):
+        return []
+    manifest: list[dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        display_path = str(item.get("display_path") or "").strip()
+        category = str(item.get("category") or "").strip()
+        if not path or not display_path:
+            continue
+        manifest.append(
+            {
+                "path": path,
+                "display_path": display_path,
+                "category": category,
+                "size_bytes": int(item.get("size_bytes") or 0),
+                "mtime_ns": int(item.get("mtime_ns") or 0),
+            }
+        )
+    manifest.sort(key=lambda item: item["path"])
+    return manifest
+
+
+def _fingerprint_manifest(manifest: list[dict[str, Any]]) -> str:
     digest = hashlib.sha256()
-    for item in build_commenter_observation_manifest(run_root, agent_id):
+    for item in manifest:
         digest.update(
             f"{item['path']}|{item['size_bytes']}|{item['mtime_ns']}".encode("utf-8")
         )
     return digest.hexdigest()
 
 
-def _selection_priority(item: dict[str, Any]) -> tuple[int, int, str]:
-    category = str(item.get("category") or "")
-    display_path = str(item.get("display_path") or "")
-    path = str(item.get("path") or "")
-    priority = {
-        "task": 0,
-        "publish": 1,
-        "child_publish": 2,
-        "scratch": 4,
-        "context": 6,
-        "tools": 7,
-    }.get(category, 8)
-    if path.endswith("transcript.jsonl"):
-        priority = min(priority, 1)
-    elif path.endswith("journal.jsonl") or path.endswith("tool_history.jsonl"):
-        priority = min(priority, 2)
-    elif "/scratch/llm_turns/" in path:
-        priority = min(priority, 3)
-    return (priority, -int(item.get("mtime_ns") or 0), display_path or path)
-
-
-def _select_commenter_files(
-    manifest: list[dict[str, Any]],
-) -> list[str]:
-    if not manifest:
-        return []
-    selected: list[str] = []
-    for item in sorted(manifest, key=_selection_priority):
-        path = str(item["path"])
-        if path in selected:
-            continue
-        selected.append(path)
-        if len(selected) >= COMMENTER_MAX_SELECTED_FILES:
-            break
-    return selected
+def compute_commenter_observation_fingerprint(run_root: str, agent_id: str) -> str:
+    return _fingerprint_manifest(build_commenter_observation_manifest(run_root, agent_id))
 
 
 def _sanitize_transcript_content(text: str) -> str:
@@ -333,29 +339,6 @@ def _serialize_payload(payload: Any) -> Any:
     return payload
 
 
-def _render_manifest_lines(manifest: list[dict[str, Any]]) -> str:
-    lines: list[str] = []
-    for item in manifest:
-        display_path = str(item.get("display_path") or item.get("path") or "").strip()
-        if not display_path:
-            continue
-        category = str(item.get("category") or "").strip()
-        line = f"- {display_path}"
-        if category:
-            line += f" [{category}]"
-        lines.append(line)
-    return "\n".join(lines) or "None"
-
-
-def _render_selected_file_lines(selected_paths: list[str], manifest: list[dict[str, Any]]) -> str:
-    display_lookup = {
-        str(item.get("path") or ""): str(item.get("display_path") or item.get("path") or "")
-        for item in manifest
-    }
-    lines = [f"- {display_lookup.get(path, path)}" for path in selected_paths if display_lookup.get(path, path)]
-    return "\n".join(lines) or "None"
-
-
 def _manifest_alias_map(manifest: list[dict[str, Any]]) -> dict[str, str]:
     aliases: dict[str, str] = {}
     for item in manifest:
@@ -376,6 +359,82 @@ def _commenter_allowed_roots(run_root: str, agent_id: str) -> list[Path]:
             continue
         roots.append(agent_workspace_paths(run_root, record.agent_id)["publish_root"])
     return roots
+
+
+def _commenter_inspectable_scope(run_root: str, agent_id: str) -> list[str]:
+    scope = ["task.md", "tools.md", "context/", "scratch/", "publish/"]
+    child_publish_roots = sorted(
+        f"{record.agent_id}/publish/"
+        for record in latest_agent_records(run_root).values()
+        if record.parent_id == agent_id
+    )
+    scope.extend(child_publish_roots)
+    return scope
+
+
+def _build_changed_entries(
+    *,
+    base_manifest: list[dict[str, Any]],
+    target_manifest: list[dict[str, Any]],
+) -> list[CommenterChangedEntry]:
+    base_by_path = {str(item["path"]): item for item in base_manifest}
+    target_by_path = {str(item["path"]): item for item in target_manifest}
+    changed_entries: list[CommenterChangedEntry] = []
+    for path in sorted(set(base_by_path) | set(target_by_path)):
+        base_item = base_by_path.get(path)
+        target_item = target_by_path.get(path)
+        if base_item is None and target_item is not None:
+            source_item = target_item
+            change_type = "added"
+        elif target_item is None and base_item is not None:
+            source_item = base_item
+            change_type = "deleted"
+        elif base_item is not None and target_item is not None:
+            if (
+                str(base_item.get("display_path") or "") == str(target_item.get("display_path") or "")
+                and str(base_item.get("category") or "") == str(target_item.get("category") or "")
+                and int(base_item.get("size_bytes") or 0) == int(target_item.get("size_bytes") or 0)
+                and int(base_item.get("mtime_ns") or 0) == int(target_item.get("mtime_ns") or 0)
+            ):
+                continue
+            source_item = target_item
+            change_type = "modified"
+        else:
+            continue
+        changed_entries.append(
+            {
+                "change_type": change_type,
+                "path": str(source_item.get("path") or ""),
+                "display_path": str(source_item.get("display_path") or source_item.get("path") or ""),
+                "category": str(source_item.get("category") or ""),
+                "size_bytes": int(source_item.get("size_bytes") or 0),
+                "mtime_ns": int(source_item.get("mtime_ns") or 0),
+            }
+        )
+    return changed_entries
+
+
+def build_commenter_observation_snapshot(
+    run_root: str,
+    agent_id: str,
+    *,
+    base_manifest: list[dict[str, Any]] | None = None,
+    fired_at: str | None = None,
+) -> CommenterObservationSnapshot:
+    normalized_base_manifest = _normalize_manifest_entries(base_manifest or [])
+    target_manifest = build_commenter_observation_manifest(run_root, agent_id)
+    return {
+        "fired_at": fired_at or _utc_now_iso(),
+        "base_fingerprint": _fingerprint_manifest(normalized_base_manifest),
+        "target_fingerprint": _fingerprint_manifest(target_manifest),
+        "base_manifest": normalized_base_manifest,
+        "target_manifest": target_manifest,
+        "changed_entries": _build_changed_entries(
+            base_manifest=normalized_base_manifest,
+            target_manifest=target_manifest,
+        ),
+        "inspectable_scope": _commenter_inspectable_scope(run_root, agent_id),
+    }
 
 
 def _resolve_commenter_target_path(
@@ -549,7 +608,7 @@ def _commenter_tool_specs() -> list[dict[str, Any]]:
     return [
         {
             "name": "read_file",
-            "description": "Read one available file by manifest label or exact path. Use this when you need actual file content before writing the spark.",
+            "description": "Read one inspectable file by display path or exact path. Use this when you need actual file content before writing the spark.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -561,7 +620,7 @@ def _commenter_tool_specs() -> list[dict[str, Any]]:
         },
         {
             "name": "search_in_files",
-            "description": "Search available files for a text pattern before deciding what to read. Paths may use manifest labels or exact paths.",
+            "description": "Search inspectable files for a text pattern before deciding what to read. Paths may use display paths or exact paths.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -631,23 +690,32 @@ def _build_review_prompt(
     *,
     run_root: str,
     agent_id: str,
-    manifest: list[dict[str, Any]],
-    selected_paths: list[str],
+    observation_snapshot: CommenterObservationSnapshot,
 ) -> str:
     task_text = agent_workspace_paths(run_root, agent_id)["task"].read_text(encoding="utf-8")
+    changed_entries = observation_snapshot["changed_entries"]
+    lines: list[str] = []
+    for item in changed_entries[:COMMENTER_MAX_RENDERED_CHANGED_ENTRIES]:
+        line = f"- {item['change_type']}: {item['display_path']}"
+        category = str(item.get("category") or "").strip()
+        if category:
+            line += f" [{category}]"
+        lines.append(line)
+    overflow = len(changed_entries) - len(lines)
+    if overflow > 0:
+        lines.append(f"- ...and {overflow} more changed file(s) within inspectable scope.")
+    changed_lines = "\n".join(lines) or "None"
+    scope_lines = "\n".join(f"- {entry}" for entry in observation_snapshot["inspectable_scope"]) or "None"
     return "\n".join(
         [
-            f"Agent ID: {agent_id}",
-            f"Current Status: {read_status(run_root, agent_id)}",
-            "",
-            "Task",
+            "Current Task",
             task_text.strip(),
             "",
-            "Available Files",
-            _render_manifest_lines(manifest),
+            "Changed Since Last Review",
+            changed_lines,
             "",
-            "Suggested Files To Inspect First",
-            _render_selected_file_lines(selected_paths, manifest),
+            "Inspectable Scope",
+            scope_lines,
         ]
     )
 
@@ -658,24 +726,18 @@ def _run_commenter_dialog(
     agent_id: str,
     request: HarnessRequest,
     manifest: list[dict[str, Any]],
-    selected_paths: list[str],
+    system_prompt: str,
+    user_prompt: str,
     model_name: str,
     transport_name: str,
 ) -> tuple[str, list[dict[str, Any]]]:
-    prompt = _prompt_template("commenter_review.md")
-    review_input = _build_review_prompt(
-        run_root=run_root,
-        agent_id=agent_id,
-        manifest=manifest,
-        selected_paths=selected_paths,
-    )
     if transport_name not in {"minimax_anthropic", "minimax_openai"}:
         return (
             _invoke_text_response(
                 model_name=model_name,
                 transport_name=transport_name,
-                system_prompt=prompt,
-                user_prompt=review_input,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
             ),
             [],
         )
@@ -686,13 +748,13 @@ def _run_commenter_dialog(
             base_url=minimax_anthropic_base_url(),
             api_key=os.environ["MINIMAX_API_KEY"],
         )
-        messages: list[dict[str, Any]] = [{"role": "user", "content": [{"type": "text", "text": review_input}]}]
+        messages: list[dict[str, Any]] = [{"role": "user", "content": [{"type": "text", "text": user_prompt}]}]
         final_text = ""
         for step in range(1, COMMENTER_MAX_TOOL_STEPS + 1):
             response = client.messages.create(
                 model=normalize_minimax_model_name(model_name),
                 max_tokens=1536,
-                system=prompt,
+                system=system_prompt,
                 messages=messages,
                 tools=tool_specs,
             )
@@ -776,10 +838,10 @@ def _run_commenter_dialog(
         base_url=minimax_openai_base_url(),
         api_key=os.environ["MINIMAX_API_KEY"],
     )
-    messages = [{"role": "user", "content": review_input}]
+    messages = [{"role": "user", "content": user_prompt}]
     final_text = ""
     for step in range(1, COMMENTER_MAX_TOOL_STEPS + 1):
-        request_messages = [{"role": "system", "content": prompt}, *messages]
+        request_messages = [{"role": "system", "content": system_prompt}, *messages]
         response = client.chat.completions.create(
             model=normalize_minimax_model_name(model_name),
             messages=request_messages,
@@ -911,29 +973,35 @@ def refresh_commenter_for_agent(
     *,
     model_name: str | None = None,
     transport_name: str | None = None,
-    observed_fingerprint: str | None = None,
+    observation_snapshot: CommenterObservationSnapshot | None = None,
 ) -> int:
     if read_status(run_root, agent_id) in COMMENTER_TERMINAL_STATUSES:
         return 0
     state = load_commenter_state(run_root, agent_id) or {}
-    fingerprint = observed_fingerprint or compute_commenter_observation_fingerprint(run_root, agent_id)
     resolved_model = model_name or get_model("harness", "agent")
     resolved_transport = transport_name or resolve_agent_transport(request.agent_transport, resolved_model)
-    manifest = build_commenter_observation_manifest(run_root, agent_id)
-    selected_paths = _select_commenter_files(manifest)
-    prompt = _prompt_template("commenter_review.md")
+    snapshot = observation_snapshot or build_commenter_observation_snapshot(
+        run_root,
+        agent_id,
+        base_manifest=_normalize_manifest_entries(state.get("last_commented_manifest")),
+    )
+    manifest = _normalize_manifest_entries(snapshot["target_manifest"])
     review_input = _build_review_prompt(
         run_root=run_root,
         agent_id=agent_id,
-        manifest=manifest,
-        selected_paths=selected_paths,
+        observation_snapshot=snapshot,
+    )
+    prompt_bundle = build_commenter_prompt_bundle(
+        tools_available=resolved_transport in {"minimax_anthropic", "minimax_openai"},
+        user_prompt=review_input,
     )
     response_text, trace = _run_commenter_dialog(
         run_root=run_root,
         agent_id=agent_id,
         request=request,
         manifest=manifest,
-        selected_paths=selected_paths,
+        system_prompt=prompt_bundle.system_prompt,
+        user_prompt=prompt_bundle.user_prompt,
         model_name=resolved_model,
         transport_name=resolved_transport,
     )
@@ -943,8 +1011,8 @@ def refresh_commenter_for_agent(
         run_root=run_root,
         agent_id=agent_id,
         state=state,
-        system_prompt=prompt,
-        user_prompt=review_input,
+        system_prompt=prompt_bundle.system_prompt,
+        user_prompt=prompt_bundle.user_prompt,
         response_text=response_text,
         trace=trace,
     )
@@ -955,7 +1023,8 @@ def refresh_commenter_for_agent(
     )
     state.update(
         {
-            "last_commented_fingerprint": fingerprint,
+            "last_commented_manifest": manifest,
+            "last_commented_fingerprint": str(snapshot["target_fingerprint"]),
             "last_refreshed_at": _utc_now_iso(),
             "last_error": "",
         }

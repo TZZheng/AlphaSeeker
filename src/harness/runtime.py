@@ -34,10 +34,12 @@ from src.harness.artifacts import (
 )
 from src.harness.commenter import (
     COMMENTER_REFRESH_INTERVAL_SECONDS,
+    build_commenter_observation_snapshot,
     compute_commenter_observation_fingerprint,
     refresh_commenter_for_agent,
 )
-from src.harness.presets import default_tool_allowlist, render_root_task_markdown, render_tools_markdown, visible_skills_for_preset
+from src.harness.presets import default_tool_allowlist, visible_skills_for_preset
+from src.harness.prompt_builder import render_task_markdown, render_tools_markdown
 from src.harness.registry import build_skill_registry, get_skills_for_packs
 from src.harness.types import AgentEvent, HarnessRequest, HarnessResponse, SkillSpec
 
@@ -45,7 +47,7 @@ from src.harness.types import AgentEvent, HarnessRequest, HarnessResponse, Skill
 TERMINAL_STATUSES = {"done", "failed", "blocked", "stale", "cancelled"}
 POLL_INTERVAL_SECONDS = 1.0
 PROCESS_KILL_GRACE_SECONDS = 2.0
-SOFT_STOP_GRACE_SECONDS = 60.0
+SOFT_STOP_GRACE_SECONDS = 180.0
 
 
 @dataclass
@@ -139,7 +141,7 @@ def _ensure_root_workspace(
         preset=request.root_preset,
         task_name="Root Task",
         description=request.user_prompt.strip()[:160],
-        task_markdown=render_root_task_markdown(request.user_prompt),
+        task_markdown=render_task_markdown(request.user_prompt),
         tools_markdown=render_tools_markdown(
             preset=request.root_preset,
             available_tools=default_tool_allowlist(request.root_preset),
@@ -478,14 +480,18 @@ async def _monitor_agents(shared: SupervisorState) -> None:
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
-async def _run_commenter_refresh(shared: SupervisorState, agent_id: str, fingerprint: str) -> None:
+async def _run_commenter_refresh(
+    shared: SupervisorState,
+    agent_id: str,
+    observation_snapshot: dict[str, Any],
+) -> None:
     try:
         written = await asyncio.to_thread(
             refresh_commenter_for_agent,
             shared.run_root,
             agent_id,
             shared.request,
-            observed_fingerprint=fingerprint,
+            observation_snapshot=observation_snapshot,
         )
         append_event(
             shared.run_root,
@@ -555,10 +561,15 @@ async def _monitor_commenters(shared: SupervisorState) -> None:
                 and now_epoch - last_attempted_at >= COMMENTER_REFRESH_INTERVAL_SECONDS
                 and now_epoch - agent_started_at >= COMMENTER_REFRESH_INTERVAL_SECONDS
             ):
+                observation_snapshot = build_commenter_observation_snapshot(
+                    shared.run_root,
+                    agent_id,
+                    base_manifest=state.get("last_commented_manifest"),
+                )
                 state["last_attempted_at"] = datetime.now(timezone.utc).isoformat()
                 save_commenter_state(shared.run_root, agent_id, state)
                 shared.commenter_tasks[agent_id] = asyncio.create_task(
-                    _run_commenter_refresh(shared, agent_id, fingerprint)
+                    _run_commenter_refresh(shared, agent_id, observation_snapshot)
                 )
 
         await asyncio.sleep(POLL_INTERVAL_SECONDS)

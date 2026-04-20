@@ -14,7 +14,8 @@ from src.harness.artifacts import (
     initialize_run_root,
     load_transcript_entries,
 )
-from src.harness.presets import default_tool_allowlist, render_root_task_markdown, render_tools_markdown
+from src.harness.presets import default_tool_allowlist
+from src.harness.prompt_builder import render_task_markdown, render_tools_markdown
 from src.harness.registry import build_skill_registry, get_skills_for_packs
 from src.harness.transport import AnthropicNativeTransport
 from src.harness.types import HarnessRequest
@@ -57,7 +58,7 @@ def _create_transport(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Anthro
         preset="orchestrator",
         task_name="Root Task",
         description="Test rate limit retry",
-        task_markdown=render_root_task_markdown(request.user_prompt),
+        task_markdown=render_task_markdown(request.user_prompt),
         tools_markdown=render_tools_markdown(
             preset="orchestrator",
             available_tools=default_tool_allowlist("orchestrator"),

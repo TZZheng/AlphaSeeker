@@ -14,7 +14,8 @@ from src.harness.artifacts import (
     write_heartbeat,
     write_status,
 )
-from src.harness.presets import default_tool_allowlist, render_root_task_markdown, render_tools_markdown
+from src.harness.presets import default_tool_allowlist
+from src.harness.prompt_builder import render_task_markdown, render_tools_markdown
 from src.harness.registry import build_skill_registry, get_skills_for_packs
 from src.harness.runtime import run_harness
 from src.harness.types import HarnessRequest
@@ -132,7 +133,7 @@ def test_resume_marks_stale_child_without_relaunching_it(
         preset="research",
         task_name="Root Task",
         description="Resume the run.",
-        task_markdown=render_root_task_markdown(request.user_prompt),
+        task_markdown=render_task_markdown(request.user_prompt),
         tools_markdown=render_tools_markdown(
             preset="research",
             available_tools=default_tool_allowlist("research"),

@@ -7,12 +7,18 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import math
 import sys
 import time
 from typing import Any
 
 import anthropic
+from langchain_core.messages import HumanMessage, SystemMessage
 from openai import OpenAI
+try:
+    import tiktoken
+except ImportError:  # pragma: no cover - optional dependency at runtime
+    tiktoken = None
 
 from src.harness.artifacts import (
     agent_workspace_paths,
@@ -23,6 +29,8 @@ from src.harness.artifacts import (
     write_json_atomic,
     write_text_atomic,
 )
+from src.shared.llm_manager import get_llm
+from src.shared.model_config import get_model
 
 
 DEFAULT_MAX_TOKENS = 8192
@@ -30,6 +38,13 @@ DEFAULT_MAX_TOKENS = 8192
 _RATE_LIMIT_INITIAL_DELAY = 5.0
 _RATE_LIMIT_MAX_DELAY = 60.0
 _RATE_LIMIT_MAX_RETRIES = 6
+_SOFT_INPUT_TOKEN_BUDGET = 170_000
+_HARD_INPUT_TOKEN_WINDOW = 200_000
+_MIN_RAW_USER_TURNS = 1
+_REPLAY_STRING_LIMIT = 1200
+_SUMMARY_INPUT_CHAR_BUDGET = 20000
+_SUMMARY_OUTPUT_CHAR_LIMIT = 12000
+_TOKEN_FALLBACK_CHARS_PER_TOKEN = 4
 
 
 @dataclass
@@ -44,6 +59,16 @@ class ModelTurnResult:
     tool_calls: list[ModelToolCall]
     text_blocks: list[str]
     stop_reason: str | None
+
+
+@dataclass(frozen=True)
+class HistoryCompactionPreflightResult:
+    compaction_changed: bool
+    estimated_input_tokens_before: int
+    estimated_input_tokens_after: int
+    compacted_user_turns: int
+    soft_overflow: bool
+    hard_overflow: bool
 
 
 def is_minimax_model(model_name: str) -> bool:
@@ -98,6 +123,52 @@ def resolve_agent_transport(requested: str, model_name: str) -> str:
     return "text_json"
 
 
+def _token_encoding():
+    if tiktoken is None:
+        return None
+    try:
+        return tiktoken.get_encoding("o200k_base")
+    except Exception:  # pragma: no cover - encoder lookup failure is rare
+        return None
+
+
+def estimate_text_tokens(text: str) -> int:
+    if not text:
+        return 0
+    encoding = _token_encoding()
+    if encoding is not None:
+        return len(encoding.encode(text))
+    return max(1, math.ceil(len(text) / _TOKEN_FALLBACK_CHARS_PER_TOKEN))
+
+
+def estimate_payload_input_tokens(payload: Any) -> int:
+    serialized = json.dumps(_serialize_payload(payload), ensure_ascii=True, separators=(",", ":"))
+    return estimate_text_tokens(serialized)
+
+
+def _openai_tool_specs(tool_specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": spec["name"],
+                "description": spec["description"],
+                "parameters": spec["input_schema"],
+            },
+        }
+        for spec in tool_specs
+    ]
+
+
+def _user_message_for_transport(transport_name: str, text: str) -> dict[str, Any]:
+    if transport_name in {"anthropic", "minimax_anthropic"}:
+        return {
+            "role": "user",
+            "content": [{"type": "text", "text": text}],
+        }
+    return {"role": "user", "content": text}
+
+
 def _serialize_payload(payload: Any) -> Any:
     if hasattr(payload, "model_dump"):
         return payload.model_dump(mode="json")
@@ -114,37 +185,161 @@ def _serialize_payload(payload: Any) -> Any:
     return payload
 
 
-def _transcript_messages(run_root: str, agent_id: str) -> list[dict[str, Any]]:
-    messages: list[dict[str, Any]] = []
-    for entry in load_transcript_entries(run_root, agent_id):
-        if not isinstance(entry, dict):
-            continue
-        raw_message = entry.get("message")
-        if not isinstance(raw_message, dict):
-            continue
-        message = _sanitize_replay_message(raw_message)
-        if message is not None:
-            messages.append(message)
-    return messages
+def _truncate_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 18)] + f"... [{len(text)} chars]"
 
 
-def _sanitize_replay_message(message: dict[str, Any]) -> dict[str, Any] | None:
-    role = str(message.get("role") or "")
+def _content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text)
+                elif item.get("type") == "tool_result":
+                    body = item.get("content")
+                    if isinstance(body, str) and body.strip():
+                        parts.append(body)
+        return "\n".join(parts)
+    return str(content)
+
+
+def _trim_large_strings(value: Any, *, limit: int = _REPLAY_STRING_LIMIT) -> Any:
+    if isinstance(value, str):
+        return _truncate_text(value, limit)
+    if isinstance(value, list):
+        return [_trim_large_strings(item, limit=limit) for item in value]
+    if isinstance(value, dict):
+        return {key: _trim_large_strings(item, limit=limit) for key, item in value.items()}
+    return value
+
+
+def _assistant_message_has_tool_calls(message: dict[str, Any]) -> bool:
+    if message.get("tool_calls") or message.get("function_call"):
+        return True
+    content = message.get("content")
+    if isinstance(content, list):
+        return any(
+            isinstance(item, dict) and item.get("type") == "tool_use"
+            for item in content
+        )
+    return False
+
+
+def _entry_has_tool_calls(entry: dict[str, Any]) -> bool:
+    raw_message = entry.get("message")
+    return isinstance(raw_message, dict) and _assistant_message_has_tool_calls(raw_message)
+
+
+def _sanitize_assistant_tool_payloads(message: dict[str, Any]) -> dict[str, Any]:
     sanitized = dict(message)
-    if role != "assistant":
-        return sanitized
-
-    for key in ("reasoning_content", "reasoning", "reasoning_details"):
-        sanitized.pop(key, None)
-
     content = sanitized.get("content")
     if isinstance(content, list):
-        filtered: list[Any] = []
+        new_content: list[Any] = []
         for item in content:
-            if isinstance(item, dict) and item.get("type") == "thinking":
+            if not isinstance(item, dict):
+                new_content.append(item)
                 continue
-            filtered.append(item)
-        sanitized["content"] = filtered
+            updated = dict(item)
+            if item.get("type") == "tool_use" and isinstance(item.get("input"), dict):
+                updated["input"] = _trim_large_strings(item["input"])
+            new_content.append(updated)
+        sanitized["content"] = new_content
+
+    tool_calls = sanitized.get("tool_calls")
+    if isinstance(tool_calls, list):
+        new_tool_calls: list[Any] = []
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                new_tool_calls.append(call)
+                continue
+            updated_call = dict(call)
+            function = updated_call.get("function")
+            if isinstance(function, dict):
+                updated_function = dict(function)
+                arguments = updated_function.get("arguments")
+                if isinstance(arguments, str):
+                    try:
+                        payload = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        updated_function["arguments"] = _truncate_text(arguments, _REPLAY_STRING_LIMIT)
+                    else:
+                        updated_function["arguments"] = json.dumps(
+                            _trim_large_strings(payload),
+                            ensure_ascii=True,
+                        )
+                updated_call["function"] = updated_function
+            new_tool_calls.append(updated_call)
+        sanitized["tool_calls"] = new_tool_calls
+
+    function_call = sanitized.get("function_call")
+    if isinstance(function_call, dict):
+        updated_call = dict(function_call)
+        arguments = updated_call.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                payload = json.loads(arguments)
+            except json.JSONDecodeError:
+                updated_call["arguments"] = _truncate_text(arguments, _REPLAY_STRING_LIMIT)
+            else:
+                updated_call["arguments"] = json.dumps(
+                    _trim_large_strings(payload),
+                    ensure_ascii=True,
+                )
+        sanitized["function_call"] = updated_call
+    return sanitized
+
+
+def _sanitize_tool_result_message(message: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(message)
+    content = sanitized.get("content")
+    if isinstance(content, list):
+        new_content: list[Any] = []
+        for item in content:
+            if not isinstance(item, dict):
+                new_content.append(item)
+                continue
+            updated = dict(item)
+            if item.get("type") == "tool_result":
+                body = item.get("content")
+                if isinstance(body, str):
+                    updated["content"] = _truncate_text(body, _REPLAY_STRING_LIMIT)
+            new_content.append(updated)
+        sanitized["content"] = new_content
+    elif isinstance(content, str):
+        sanitized["content"] = _truncate_text(content, _REPLAY_STRING_LIMIT)
+    return sanitized
+
+
+def _sanitize_replay_message(
+    message: dict[str, Any],
+    *,
+    entry_kind: str,
+) -> dict[str, Any] | None:
+    role = str(message.get("role") or "")
+    sanitized = dict(message)
+    if role == "assistant":
+        for key in ("reasoning_content", "reasoning", "reasoning_details"):
+            sanitized.pop(key, None)
+
+        content = sanitized.get("content")
+        if isinstance(content, list):
+            filtered: list[Any] = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "thinking":
+                    continue
+                filtered.append(item)
+            sanitized["content"] = filtered
+        sanitized = _sanitize_assistant_tool_payloads(sanitized)
+    elif entry_kind == "tool_result":
+        sanitized = _sanitize_tool_result_message(sanitized)
 
     has_tool_calls = bool(sanitized.get("tool_calls")) or bool(sanitized.get("function_call"))
     content = sanitized.get("content")
@@ -158,6 +353,439 @@ def _sanitize_replay_message(message: dict[str, Any]) -> dict[str, Any] | None:
         if not content and not has_tool_calls:
             return None
     return sanitized
+
+
+def _user_turn_start_indices(entries: list[dict[str, Any]]) -> list[int]:
+    return [
+        index
+        for index, entry in enumerate(entries)
+        if entry.get("kind") == "user_message" and isinstance(entry.get("message"), dict)
+    ]
+
+
+def _clean_replay_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cleaned: list[dict[str, Any]] = []
+    pending_assistant: dict[str, Any] | None = None
+    pending_flushed = False
+
+    for entry in entries:
+        kind = str(entry.get("kind") or "")
+        if kind == "assistant_response" and _entry_has_tool_calls(entry):
+            pending_assistant = entry
+            pending_flushed = False
+            continue
+
+        if kind == "tool_result":
+            if pending_assistant is None:
+                continue
+            if not pending_flushed:
+                cleaned.append(pending_assistant)
+                pending_flushed = True
+            cleaned.append(entry)
+            continue
+
+        if pending_assistant is not None:
+            pending_assistant = None
+            pending_flushed = False
+        cleaned.append(entry)
+
+    return cleaned
+
+
+def _max_compactable_user_turns(entries: list[dict[str, Any]]) -> int:
+    total_turns = len(_user_turn_start_indices(entries))
+    if total_turns <= _MIN_RAW_USER_TURNS:
+        return 0
+    return max(0, total_turns - _MIN_RAW_USER_TURNS)
+
+
+def _entry_slice_for_turns(
+    entries: list[dict[str, Any]],
+    *,
+    start_turn: int,
+    end_turn: int,
+) -> list[dict[str, Any]]:
+    turn_starts = _user_turn_start_indices(entries)
+    if start_turn >= len(turn_starts):
+        return []
+    start_index = turn_starts[start_turn]
+    end_index = turn_starts[end_turn] if end_turn < len(turn_starts) else len(entries)
+    return entries[start_index:end_index]
+
+
+def _summary_line_for_entry(entry: dict[str, Any]) -> list[str]:
+    kind = str(entry.get("kind") or "")
+    message = entry.get("message")
+    if not isinstance(message, dict):
+        return []
+
+    if kind == "user_message":
+        text = _content_to_text(message.get("content"))
+        return [f"- User turn: {_truncate_text(text, 1200)}"] if text.strip() else []
+
+    if kind == "assistant_response":
+        lines: list[str] = []
+        text = _content_to_text(message.get("content"))
+        if text.strip():
+            lines.append(f"- Assistant response: {_truncate_text(text, 1200)}")
+        if _assistant_message_has_tool_calls(message):
+            content = message.get("content")
+            if isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict) or item.get("type") != "tool_use":
+                        continue
+                    name = str(item.get("name") or "unknown_tool")
+                    payload = item.get("input")
+                    lines.append(
+                        f"- Assistant tool call `{name}`: "
+                        f"{json.dumps(_trim_large_strings(payload), ensure_ascii=True)}"
+                    )
+            tool_calls = message.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for call in tool_calls:
+                    if not isinstance(call, dict):
+                        continue
+                    function = call.get("function")
+                    if not isinstance(function, dict):
+                        continue
+                    name = str(function.get("name") or "unknown_tool")
+                    arguments = function.get("arguments")
+                    if isinstance(arguments, str):
+                        try:
+                            payload = json.loads(arguments)
+                        except json.JSONDecodeError:
+                            rendered = _truncate_text(arguments, 800)
+                        else:
+                            rendered = json.dumps(_trim_large_strings(payload), ensure_ascii=True)
+                    else:
+                        rendered = json.dumps(_trim_large_strings(arguments), ensure_ascii=True)
+                    lines.append(f"- Assistant tool call `{name}`: {rendered}")
+        return lines
+
+    if kind == "tool_result":
+        text = _content_to_text(message.get("content"))
+        return [f"- Tool result: {_truncate_text(text, 1200)}"] if text.strip() else []
+
+    return []
+
+
+def _render_compaction_delta(entries: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for entry in _clean_replay_entries(entries):
+        lines.extend(_summary_line_for_entry(entry))
+    rendered = "\n".join(lines).strip()
+    return _truncate_text(rendered, _SUMMARY_INPUT_CHAR_BUDGET) if rendered else ""
+
+
+def _llm_response_text(response: Any) -> str:
+    content = getattr(response, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+            else:
+                text = getattr(item, "text", None)
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(parts)
+    return str(content)
+
+
+def _fallback_history_summary(compacted_markdown: str) -> str:
+    evidence = compacted_markdown.strip() or "- None"
+    sections = [
+        "## Objective",
+        "- None",
+        "",
+        "## Decisions",
+        "- None",
+        "",
+        "## Evidence",
+        evidence,
+        "",
+        "## Files",
+        "- None",
+        "",
+        "## Open Issues",
+        "- None",
+        "",
+        "## Reviewer Feedback",
+        "- None",
+        "",
+        "## Recent Failures",
+        "- None",
+    ]
+    return _truncate_text("\n".join(sections).strip(), _SUMMARY_OUTPUT_CHAR_LIMIT)
+
+
+def _generate_history_summary(compacted_entries: list[dict[str, Any]]) -> tuple[str, str]:
+    compacted_markdown = _render_compaction_delta(compacted_entries)
+    if not compacted_markdown:
+        return "", ""
+
+    summary_model = get_model("harness", "condense")
+    try:
+        llm = get_llm(summary_model)
+        response = llm.invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "You maintain compact continuation memory for an AlphaSeeker agent. "
+                        "Summarize the compacted history into durable state only. "
+                        "Keep concrete facts, decisions, changed files, unresolved reviewer feedback, "
+                        "and meaningful failures. Do not preserve raw large tool payloads. "
+                        "Return concise markdown with sections titled exactly: "
+                        "Objective, Decisions, Evidence, Files, Open Issues, Reviewer Feedback, Recent Failures. "
+                        "If a section has no durable content, write `- None`."
+                    )
+                ),
+                HumanMessage(content=f"Compacted history:\n{compacted_markdown}"),
+            ]
+        )
+        text = _llm_response_text(response).strip()
+        if text:
+            return _truncate_text(text, _SUMMARY_OUTPUT_CHAR_LIMIT), summary_model
+    except Exception:
+        pass
+    return _fallback_history_summary(compacted_markdown), summary_model
+
+
+def _current_compacted_user_turns(run_root: str, agent_id: str) -> int:
+    meta = load_transport_state(run_root, agent_id) or {}
+    history_meta = meta.get("history_compaction") or {}
+    return max(0, int(history_meta.get("compacted_user_turns", 0) or 0))
+
+
+def _transcript_messages(
+    run_root: str,
+    agent_id: str,
+    *,
+    entries: list[dict[str, Any]] | None = None,
+    compacted_turns_override: int | None = None,
+) -> list[dict[str, Any]]:
+    entries = entries if entries is not None else load_transcript_entries(run_root, agent_id)
+    compacted_turns = _current_compacted_user_turns(run_root, agent_id) if compacted_turns_override is None else max(0, compacted_turns_override)
+    turn_starts = _user_turn_start_indices(entries)
+    if compacted_turns > 0 and compacted_turns < len(turn_starts):
+        replay_entries = entries[turn_starts[compacted_turns] :]
+    elif compacted_turns >= len(turn_starts) and turn_starts:
+        replay_entries = []
+    else:
+        replay_entries = entries
+
+    messages: list[dict[str, Any]] = []
+    for entry in _clean_replay_entries(replay_entries):
+        if not isinstance(entry, dict):
+            continue
+        raw_message = entry.get("message")
+        if not isinstance(raw_message, dict):
+            continue
+        message = _sanitize_replay_message(raw_message, entry_kind=str(entry.get("kind") or ""))
+        if message is not None:
+            messages.append(message)
+    return messages
+
+
+def _build_request_payload(
+    *,
+    transport_name: str,
+    model_name: str,
+    system_prompt: str,
+    transcript_messages: list[dict[str, Any]],
+    tool_specs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if transport_name == "minimax_anthropic":
+        return {
+            "model": normalize_minimax_model_name(model_name),
+            "max_tokens": DEFAULT_MAX_TOKENS,
+            "system": system_prompt,
+            "messages": transcript_messages,
+            "tools": tool_specs,
+        }
+    if transport_name == "anthropic":
+        return {
+            "model": model_name,
+            "max_tokens": DEFAULT_MAX_TOKENS,
+            "system": system_prompt,
+            "messages": transcript_messages,
+            "tools": tool_specs,
+        }
+    if transport_name == "minimax_openai":
+        return {
+            "model": normalize_minimax_model_name(model_name),
+            "messages": [{"role": "system", "content": system_prompt}, *transcript_messages],
+            "tools": _openai_tool_specs(tool_specs),
+            "tool_choice": "auto",
+            "max_tokens": DEFAULT_MAX_TOKENS,
+            "extra_body": {"reasoning_split": True},
+        }
+    if transport_name == "openai":
+        return {
+            "model": model_name,
+            "messages": [{"role": "system", "content": system_prompt}, *transcript_messages],
+            "tools": _openai_tool_specs(tool_specs),
+            "tool_choice": "auto",
+            "max_tokens": DEFAULT_MAX_TOKENS,
+        }
+    raise ValueError(f"Unsupported transport for request payload build: {transport_name}")
+
+
+def _estimate_request_input_tokens(
+    *,
+    transport_name: str,
+    model_name: str,
+    system_prompt: str,
+    tool_specs: list[dict[str, Any]],
+    transcript_messages: list[dict[str, Any]],
+    pending_user_prompt: str | None = None,
+) -> int:
+    request_messages = list(transcript_messages)
+    if pending_user_prompt:
+        request_messages.append(_user_message_for_transport(transport_name, pending_user_prompt))
+    request_payload = _build_request_payload(
+        transport_name=transport_name,
+        model_name=model_name,
+        system_prompt=system_prompt,
+        transcript_messages=request_messages,
+        tool_specs=tool_specs,
+    )
+    return estimate_payload_input_tokens(request_payload)
+
+
+def _persist_history_compaction_state(
+    run_root: str,
+    agent_id: str,
+    *,
+    compacted_user_turns: int,
+    summary_model: str | None = None,
+    summary_chars: int | None = None,
+    last_compaction_at: str | None = None,
+    estimated_input_tokens_before: int,
+    estimated_input_tokens_after: int,
+    compaction_applied: bool,
+    soft_overflow: bool,
+    hard_overflow: bool,
+) -> None:
+    meta = load_transport_state(run_root, agent_id) or {}
+    history_meta = dict(meta.get("history_compaction") or {})
+    history_meta.update(
+        {
+            "soft_budget_tokens": _SOFT_INPUT_TOKEN_BUDGET,
+            "hard_context_window_tokens": _HARD_INPUT_TOKEN_WINDOW,
+            "compacted_user_turns": compacted_user_turns,
+            "estimated_input_tokens_before": estimated_input_tokens_before,
+            "estimated_input_tokens_after": estimated_input_tokens_after,
+            "compaction_applied": compaction_applied,
+            "soft_overflow": soft_overflow,
+            "hard_overflow": hard_overflow,
+        }
+    )
+    if summary_model is not None:
+        history_meta["summary_model"] = summary_model
+    if summary_chars is not None:
+        history_meta["summary_chars"] = summary_chars
+    if last_compaction_at is not None:
+        history_meta["last_compaction_at"] = last_compaction_at
+    meta["history_compaction"] = history_meta
+    save_transport_state(run_root, agent_id, meta)
+
+
+def preflight_history_compaction(
+    *,
+    transport_name: str,
+    run_root: str,
+    agent_id: str,
+    model_name: str,
+    system_prompt: str,
+    pending_user_prompt: str,
+    tool_specs: list[dict[str, Any]],
+) -> HistoryCompactionPreflightResult:
+    entries = load_transcript_entries(run_root, agent_id)
+    current_compacted_turns = min(_current_compacted_user_turns(run_root, agent_id), len(_user_turn_start_indices(entries)))
+    transcript_messages = _transcript_messages(
+        run_root,
+        agent_id,
+        entries=entries,
+        compacted_turns_override=current_compacted_turns,
+    )
+    estimated_before = _estimate_request_input_tokens(
+        transport_name=transport_name,
+        model_name=model_name,
+        system_prompt=system_prompt,
+        tool_specs=tool_specs,
+        transcript_messages=transcript_messages,
+        pending_user_prompt=pending_user_prompt,
+    )
+
+    target_compacted_turns = current_compacted_turns
+    max_compactable_turns = _max_compactable_user_turns(entries)
+    estimated_after = estimated_before
+    while estimated_after > _SOFT_INPUT_TOKEN_BUDGET and target_compacted_turns < max_compactable_turns:
+        target_compacted_turns += 1
+        estimated_after = _estimate_request_input_tokens(
+            transport_name=transport_name,
+            model_name=model_name,
+            system_prompt=system_prompt,
+            tool_specs=tool_specs,
+            transcript_messages=_transcript_messages(
+                run_root,
+                agent_id,
+                entries=entries,
+                compacted_turns_override=target_compacted_turns,
+            ),
+            pending_user_prompt=pending_user_prompt,
+        )
+
+    compaction_changed = target_compacted_turns != current_compacted_turns
+    summary_model: str | None = None
+    summary_text = ""
+    compacted_timestamp: str | None = None
+    if compaction_changed:
+        compacted_prefix = _entry_slice_for_turns(entries, start_turn=0, end_turn=target_compacted_turns)
+        summary_text, summary_model = _generate_history_summary(compacted_prefix)
+        history_summary_path = agent_workspace_paths(run_root, agent_id)["history_summary"]
+        write_text_atomic(history_summary_path, summary_text.strip() + "\n" if summary_text.strip() else "")
+        compacted_timestamp = datetime.now(timezone.utc).isoformat()
+        _persist_history_compaction_state(
+            run_root,
+            agent_id,
+            compacted_user_turns=target_compacted_turns,
+            summary_model=summary_model,
+            summary_chars=len(summary_text),
+            last_compaction_at=compacted_timestamp,
+            estimated_input_tokens_before=estimated_before,
+            estimated_input_tokens_after=estimated_after,
+            compaction_applied=True,
+            soft_overflow=estimated_after > _SOFT_INPUT_TOKEN_BUDGET,
+            hard_overflow=estimated_after > _HARD_INPUT_TOKEN_WINDOW,
+        )
+        append_transcript_entry(
+            run_root,
+            agent_id,
+            {
+                "kind": "history_compaction",
+                "created_at": compacted_timestamp,
+                "compacted_user_turns": target_compacted_turns,
+                "summary_model": summary_model,
+                "summary_chars": len(summary_text),
+            },
+        )
+
+    return HistoryCompactionPreflightResult(
+        compaction_changed=compaction_changed,
+        estimated_input_tokens_before=estimated_before,
+        estimated_input_tokens_after=estimated_after,
+        compacted_user_turns=target_compacted_turns,
+        soft_overflow=estimated_after > _SOFT_INPUT_TOKEN_BUDGET,
+        hard_overflow=estimated_after > _HARD_INPUT_TOKEN_WINDOW,
+    )
 
 
 class BaseAgentTransport:
@@ -251,6 +879,7 @@ class BaseAgentTransport:
         request_payload: dict[str, Any],
     ) -> tuple[int, str]:
         turn_index = self._next_counter("turn_index")
+        preflight = dict((self._load_meta().get("history_compaction") or {}))
         artifact_path = self._write_turn_artifact(
             turn_index=turn_index,
             suffix="request",
@@ -258,6 +887,7 @@ class BaseAgentTransport:
                 "turn_index": turn_index,
                 "transport": self.transport_name,
                 "api_name": api_name,
+                "preflight": preflight,
                 "request": request_payload,
             },
         )
@@ -275,6 +905,11 @@ class BaseAgentTransport:
                     "message_count": len(request_payload.get("messages", [])),
                     "tool_count": len(request_payload.get("tools", [])),
                     "system_prompt_chars": len(str(request_payload.get("system", self.system_prompt))),
+                    "estimated_input_tokens_before": preflight.get("estimated_input_tokens_before"),
+                    "estimated_input_tokens_after": preflight.get("estimated_input_tokens_after"),
+                    "compaction_applied": preflight.get("compaction_applied"),
+                    "soft_overflow": preflight.get("soft_overflow"),
+                    "hard_overflow": preflight.get("hard_overflow"),
                 },
             },
         )
@@ -343,7 +978,8 @@ class BaseAgentTransport:
             self._save_meta({"turn_index": 0, "system_prompt_version": 0})
         if not load_transcript_entries(self.run_root, self.agent_id):
             self._append_system_prompt_snapshot(reason="initialized")
-            self.append_user_text(initial_user_prompt)
+            if initial_user_prompt:
+                self.append_user_text(initial_user_prompt)
 
     def update_system_prompt(self, system_prompt: str) -> None:
         if system_prompt == self.system_prompt:
@@ -386,13 +1022,13 @@ class MiniMaxAnthropicTransport(BaseAgentTransport):
 
     def execute_turn(self, tool_specs: list[dict[str, Any]]) -> ModelTurnResult:
         transcript_messages = _transcript_messages(self.run_root, self.agent_id)
-        request_payload = {
-            "model": normalize_minimax_model_name(self.model_name),
-            "max_tokens": DEFAULT_MAX_TOKENS,
-            "system": self.system_prompt,
-            "messages": transcript_messages,
-            "tools": tool_specs,
-        }
+        request_payload = _build_request_payload(
+            transport_name=self.transport_name,
+            model_name=self.model_name,
+            system_prompt=self.system_prompt,
+            transcript_messages=transcript_messages,
+            tool_specs=tool_specs,
+        )
         turn_index, request_artifact_path = self._record_model_request(
             api_name="anthropic.messages.create",
             request_payload=request_payload,
@@ -695,28 +1331,13 @@ class MiniMaxOpenAITransport(BaseAgentTransport):
         )
 
     def execute_turn(self, tool_specs: list[dict[str, Any]]) -> ModelTurnResult:
-        transcript_messages = [
-            {"role": "system", "content": self.system_prompt},
-            *_transcript_messages(self.run_root, self.agent_id),
-        ]
-        request_payload = {
-            "model": normalize_minimax_model_name(self.model_name),
-            "messages": transcript_messages,
-            "tools": [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": spec["name"],
-                        "description": spec["description"],
-                        "parameters": spec["input_schema"],
-                    },
-                }
-                for spec in tool_specs
-            ],
-            "tool_choice": "auto",
-            "max_tokens": DEFAULT_MAX_TOKENS,
-            "extra_body": {"reasoning_split": True},
-        }
+        request_payload = _build_request_payload(
+            transport_name=self.transport_name,
+            model_name=self.model_name,
+            system_prompt=self.system_prompt,
+            transcript_messages=_transcript_messages(self.run_root, self.agent_id),
+            tool_specs=tool_specs,
+        )
         turn_index, request_artifact_path = self._record_model_request(
             api_name="openai.chat.completions.create",
             request_payload=request_payload,
@@ -811,13 +1432,13 @@ class AnthropicNativeTransport(BaseAgentTransport):
 
     def execute_turn(self, tool_specs: list[dict[str, Any]]) -> ModelTurnResult:
         transcript_messages = _transcript_messages(self.run_root, self.agent_id)
-        request_payload = {
-            "model": self.model_name,
-            "max_tokens": DEFAULT_MAX_TOKENS,
-            "system": self.system_prompt,
-            "messages": transcript_messages,
-            "tools": tool_specs,
-        }
+        request_payload = _build_request_payload(
+            transport_name=self.transport_name,
+            model_name=self.model_name,
+            system_prompt=self.system_prompt,
+            transcript_messages=transcript_messages,
+            tool_specs=tool_specs,
+        )
         turn_index, request_artifact_path = self._record_model_request(
             api_name="anthropic.messages.create",
             request_payload=request_payload,
@@ -1033,20 +1654,6 @@ class OpenAINativeTransport(BaseAgentTransport):
         super().__init__(**kwargs)
         self.client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
-    @staticmethod
-    def _to_openai_tools(tool_specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": spec["name"],
-                    "description": spec["description"],
-                    "parameters": spec["input_schema"],
-                },
-            }
-            for spec in tool_specs
-        ]
-
     def append_user_text(self, text: str) -> None:
         # OpenAI format: plain string content, not a list of content blocks
         message = {"role": "user", "content": text}
@@ -1057,19 +1664,13 @@ class OpenAINativeTransport(BaseAgentTransport):
         )
 
     def execute_turn(self, tool_specs: list[dict[str, Any]]) -> ModelTurnResult:
-        # System prompt goes as the first message in OpenAI format
-        transcript_messages = [
-            {"role": "system", "content": self.system_prompt},
-            *_transcript_messages(self.run_root, self.agent_id),
-        ]
-        openai_tools = self._to_openai_tools(tool_specs)
-        request_payload = {
-            "model": self.model_name,
-            "messages": transcript_messages,
-            "tools": openai_tools,
-            "tool_choice": "auto",
-            "max_tokens": DEFAULT_MAX_TOKENS,
-        }
+        request_payload = _build_request_payload(
+            transport_name=self.transport_name,
+            model_name=self.model_name,
+            system_prompt=self.system_prompt,
+            transcript_messages=_transcript_messages(self.run_root, self.agent_id),
+            tool_specs=tool_specs,
+        )
         turn_index, request_artifact_path = self._record_model_request(
             api_name="openai.chat.completions.create",
             request_payload=request_payload,

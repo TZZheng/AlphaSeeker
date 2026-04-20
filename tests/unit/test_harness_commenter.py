@@ -14,6 +14,7 @@ from src.harness.artifacts import (
     create_agent_workspace,
     initialize_run_root,
     load_commenter_comments,
+    load_commenter_state,
     mark_commenter_comments_read,
     read_status,
     unread_commenter_comments,
@@ -23,10 +24,13 @@ from src.harness.artifacts import (
 from src.harness.commenter import (
     _strip_provider_thinking,
     build_comment_feed_message,
+    build_commenter_observation_manifest,
+    build_commenter_observation_snapshot,
     compute_commenter_observation_fingerprint,
     refresh_commenter_for_agent,
 )
-from src.harness.presets import default_tool_allowlist, render_root_task_markdown, render_tools_markdown
+from src.harness.presets import default_tool_allowlist
+from src.harness.prompt_builder import render_task_markdown, render_tools_markdown
 from src.harness.transport import ModelToolCall, ModelTurnResult
 from src.harness.types import HarnessRequest
 
@@ -42,7 +46,7 @@ def _create_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[
         preset="orchestrator",
         task_name="Root Task",
         description="Analyze XOM",
-        task_markdown=render_root_task_markdown(request.user_prompt),
+        task_markdown=render_task_markdown(request.user_prompt),
         tools_markdown=render_tools_markdown(
             preset="orchestrator",
             available_tools=default_tool_allowlist("orchestrator"),
@@ -114,21 +118,46 @@ def test_commenter_fingerprint_ignores_commenter_files(
     assert after_scratch_write != baseline
 
 
-def test_refresh_commenter_records_raw_response_and_turn_artifacts(
+def test_refresh_commenter_records_frozen_incremental_prompt_and_review_baseline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     run_root, agent_id, request = _create_workspace(tmp_path, monkeypatch)
     paths = agent_workspace_paths(run_root, agent_id)
-    write_text_atomic(paths["scratch_root"] / "draft.md", "only child summaries were read\n")
+    write_text_atomic(paths["scratch_root"] / "draft.md", "draft v1\n")
+    write_text_atomic(paths["publish_root"] / "old_summary.md", "# Old Summary\n")
+    base_manifest = build_commenter_observation_manifest(str(run_root), agent_id)
+
+    write_text_atomic(paths["scratch_root"] / "draft.md", "draft v2\n")
+    write_text_atomic(paths["publish_root"] / "final.md", "# Final\n\nNew version.\n")
+    write_text_atomic(paths["scratch_root"] / "journal.jsonl", '{"tool":"write_file"}\n')
+    llm_turns_root = paths["scratch_root"] / "llm_turns"
+    llm_turns_root.mkdir(parents=True, exist_ok=True)
+    write_text_atomic(llm_turns_root / "0001_request.json", '{"messages":[]}\n')
+    (paths["publish_root"] / "old_summary.md").unlink()
+    snapshot = build_commenter_observation_snapshot(
+        str(run_root),
+        agent_id,
+        base_manifest=base_manifest,
+        fired_at="2026-04-11T12:00:00Z",
+    )
+
+    write_text_atomic(paths["scratch_root"] / "draft.md", "draft v3\n")
+    assert compute_commenter_observation_fingerprint(str(run_root), agent_id) != snapshot["target_fingerprint"]
 
     raw_response = (
         "Read the underlying research note before concluding.\n"
         "Then check whether the recommendation still holds when the current strip replaces the headline spot move."
     )
+    captured: dict[str, object] = {}
+
+    def _fake_dialog(**kwargs):
+        captured["manifest"] = kwargs["manifest"]
+        return raw_response, [{"step": 1, "tool_calls": [], "text_blocks": [raw_response]}]
+
     monkeypatch.setattr(
         "src.harness.commenter._run_commenter_dialog",
-        lambda **kwargs: (raw_response, [{"step": 1, "tool_calls": [], "text_blocks": [raw_response]}]),
+        _fake_dialog,
     )
 
     written = refresh_commenter_for_agent(
@@ -137,8 +166,10 @@ def test_refresh_commenter_records_raw_response_and_turn_artifacts(
         request,
         model_name="gpt-4o",
         transport_name="text_json",
+        observation_snapshot=snapshot,
     )
     rows = load_commenter_comments(run_root, agent_id)
+    state = load_commenter_state(run_root, agent_id) or {}
     turns_root = paths["commenter_turns_root"]
 
     assert written == 1
@@ -146,12 +177,66 @@ def test_refresh_commenter_records_raw_response_and_turn_artifacts(
     assert all(Path(str(row["note_path"])).exists() for row in rows)
     assert (turns_root / "0001_system_prompt.md").exists()
     input_text = (turns_root / "0001_input.md").read_text(encoding="utf-8")
-    assert "Available Files" in input_text
-    assert "- scratch/draft.md [scratch]" in input_text
-    assert "Suggested Files To Inspect First" in input_text
-    assert "only child summaries were read" not in input_text
+    assert "Current Task" in input_text
+    assert "Changed Since Last Review" in input_text
+    assert "Inspectable Scope" in input_text
+    assert "Available Files" not in input_text
+    assert "Suggested Files To Inspect First" not in input_text
+    assert "- modified: scratch/draft.md [scratch]" in input_text
+    assert "- modified: scratch/journal.jsonl [operating_log]" in input_text
+    assert "- added: scratch/llm_turns/0001_request.json [llm_trace]" in input_text
+    assert "- added: publish/final.md [publish]" in input_text
+    assert "- deleted: publish/old_summary.md [publish]" in input_text
+    assert "- task.md" in input_text
+    assert "- tools.md" in input_text
+    assert "- scratch/" in input_text
+    assert "- publish/" in input_text
+    assert "draft v2" not in input_text
+    assert "draft v3" not in input_text
+    assert captured["manifest"] == snapshot["target_manifest"]
     assert (turns_root / "0001_response.md").read_text(encoding="utf-8") == raw_response
     assert (turns_root / "0001_trace.json").exists()
+    assert state["last_commented_manifest"] == snapshot["target_manifest"]
+    assert state["last_commented_fingerprint"] == snapshot["target_fingerprint"]
+
+    follow_up_snapshot = build_commenter_observation_snapshot(
+        str(run_root),
+        agent_id,
+        base_manifest=state["last_commented_manifest"],
+        fired_at="2026-04-11T12:01:00Z",
+    )
+    assert [
+        (item["change_type"], item["display_path"], item["category"])
+        for item in follow_up_snapshot["changed_entries"]
+    ] == [("modified", "scratch/draft.md", "scratch")]
+
+
+def test_commenter_manifest_classifies_runtime_files_by_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id, _request = _create_workspace(tmp_path, monkeypatch)
+    paths = agent_workspace_paths(run_root, agent_id)
+    llm_turns_root = paths["scratch_root"] / "llm_turns"
+    llm_turns_root.mkdir(parents=True, exist_ok=True)
+    write_text_atomic(paths["scratch_root"] / "journal.jsonl", '{"kind":"tool"}\n')
+    write_text_atomic(paths["scratch_root"] / "transcript.jsonl", '{"kind":"assistant"}\n')
+    write_text_atomic(paths["scratch_root"] / "tool_history.jsonl", '{"tool":"read_file"}\n')
+    write_text_atomic(llm_turns_root / "0001_request.json", '{"messages":[]}\n')
+    skills_root = paths["scratch_root"] / "skills" / "001_read_file"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    write_text_atomic(skills_root / "output.md", "tool output\n")
+    write_text_atomic(paths["scratch_root"] / "notes.md", "working notes\n")
+
+    manifest = build_commenter_observation_manifest(str(run_root), agent_id)
+    categories = {item["display_path"]: item["category"] for item in manifest}
+
+    assert categories["scratch/journal.jsonl"] == "operating_log"
+    assert categories["scratch/transcript.jsonl"] == "operating_log"
+    assert categories["scratch/tool_history.jsonl"] == "operating_log"
+    assert categories["scratch/llm_turns/0001_request.json"] == "llm_trace"
+    assert categories["scratch/skills/001_read_file/output.md"] == "tool_artifact"
+    assert categories["scratch/notes.md"] == "scratch"
 
 
 def test_refresh_commenter_skips_terminal_agents(
@@ -246,7 +331,7 @@ class _SuccessTransport:
         self.user_messages.append(text)
 
     def execute_turn(self, _tool_specs: list[dict[str, object]]) -> ModelTurnResult:
-        assert any(message.startswith("Comment Feed") for message in self.user_messages)
+        assert any("Comment Feed" in message for message in self.user_messages)
         return ModelTurnResult(
             tool_calls=[
                 ModelToolCall(
@@ -296,7 +381,7 @@ def test_worker_injects_comment_feed_and_marks_comments_read_after_success(
 
     assert result == 0
     assert rows[0]["read"] is True
-    assert any(message.startswith("Comment Feed") for message in fake_transport.user_messages)
+    assert any("Comment Feed" in message for message in fake_transport.user_messages)
 
 
 def test_worker_leaves_comments_unread_when_model_call_fails(
@@ -468,7 +553,7 @@ def test_worker_wakes_early_when_direct_child_status_changes(
         preset="research",
         task_name="Child Task",
         description="Wait for child progress",
-        task_markdown=render_root_task_markdown(request.user_prompt),
+        task_markdown=render_task_markdown(request.user_prompt),
         tools_markdown=render_tools_markdown(
             preset="research",
             available_tools=default_tool_allowlist("research"),
@@ -532,7 +617,7 @@ def test_worker_wakes_early_when_commenter_adds_new_feedback(
     assert transport.call_times[1] == transport.call_times[0] + 4.0
 
 
-def test_worker_wakes_early_when_runtime_control_activates(
+def test_worker_wakes_early_when_soft_time_limit_activates(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -558,6 +643,46 @@ def test_worker_wakes_early_when_runtime_control_activates(
 
     assert result == 0
     assert transport.call_times[1] == transport.call_times[0] + 4.0
+
+
+def test_worker_soft_stop_second_prompt_contains_finalization_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id, _request = _create_workspace(tmp_path, monkeypatch)
+    clock = _FakeClock()
+    transport = _SequencedTransport([_scratch_write_turn(), _finish_turn()], clock)
+
+    _install_fake_worker_timing(monkeypatch, clock)
+    _install_fake_transport(monkeypatch, transport)
+    monkeypatch.setattr(agent_worker_module, "TURN_MAX_PROMPT_GAP_SECONDS", 10.0)
+    monkeypatch.setattr(agent_worker_module, "TURN_PACING_POLL_SECONDS", 1.0)
+    monkeypatch.setattr(
+        agent_worker_module,
+        "remaining_agent_seconds",
+        lambda *_args, **_kwargs: (
+            0
+            if transport.call_times and clock.monotonic() >= transport.call_times[0] + 4.0
+            else 9999
+        ),
+    )
+
+    result = run_agent_worker(str(run_root), agent_id)
+
+    shared_text = (
+        "Soft-stop mode is active. Stop exploration and do not open new workstreams unless strictly necessary."
+    )
+    root_text = (
+        "Spend the remaining turns improving publish/final.md, publish/summary.md, "
+        "and publish/artifact_index.md so they stay readable if execution stops at any time."
+    )
+
+    assert result == 0
+    assert len(transport.user_messages) == 2
+    assert shared_text not in transport.user_messages[0]
+    assert root_text not in transport.user_messages[0]
+    assert shared_text in transport.user_messages[1]
+    assert root_text in transport.user_messages[1]
 
 
 def test_worker_calls_immediately_when_previous_turn_already_used_full_deadline(

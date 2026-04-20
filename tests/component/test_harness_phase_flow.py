@@ -6,7 +6,8 @@ from pathlib import Path
 import pytest
 
 from src.harness.artifacts import agent_workspace_paths, create_agent_workspace, latest_agent_records, write_text_atomic, write_status
-from src.harness.presets import default_tool_allowlist, render_tools_markdown
+from src.harness.presets import default_tool_allowlist
+from src.harness.prompt_builder import render_tools_markdown
 from src.harness.registry import build_skill_registry, get_skills_for_packs
 from src.harness.runtime import run_harness
 from src.harness.types import HarnessRequest

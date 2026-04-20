@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -11,13 +12,17 @@ from src.harness.artifacts import (
     load_transcript_entries,
     read_json,
 )
-from src.harness.presets import default_tool_allowlist, render_root_task_markdown, render_tools_markdown
+from src.harness.presets import default_tool_allowlist
+from src.harness.prompt_builder import render_task_markdown, render_tools_markdown
 from src.harness.registry import build_skill_registry, get_skills_for_packs
 from src.harness.transport import BaseAgentTransport, MiniMaxAnthropicTransport, OpenAINativeTransport
 from src.harness.transport import (
+    _persist_history_compaction_state,
+    _transcript_messages,
     minimax_openai_base_url,
     minimax_anthropic_base_url,
     normalize_minimax_model_name,
+    preflight_history_compaction,
     resolve_agent_transport,
 )
 from src.harness.types import HarnessRequest
@@ -184,6 +189,29 @@ class _FakeOpenAIClient:
         self.chat = _FakeChat()
 
 
+class _FakeSummaryLLM:
+    def invoke(self, _messages: object) -> object:
+        class _Response:
+            content = (
+                "## Objective\n"
+                "- Keep improving the draft.\n\n"
+                "## Decisions\n"
+                "- Compacted older turns.\n\n"
+                "## Evidence\n"
+                "- Older findings preserved.\n\n"
+                "## Files\n"
+                "- publish/final.md\n\n"
+                "## Open Issues\n"
+                "- None\n\n"
+                "## Reviewer Feedback\n"
+                "- None\n\n"
+                "## Recent Failures\n"
+                "- None\n"
+            )
+
+        return _Response()
+
+
 def _create_agent_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, str]:
     monkeypatch.chdir(tmp_path)
     request = HarnessRequest(user_prompt="Analyze XOM", run_id="transport-test")
@@ -196,7 +224,7 @@ def _create_agent_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
         preset="research",
         task_name="Root Task",
         description="Analyze XOM",
-        task_markdown=render_root_task_markdown(request.user_prompt),
+        task_markdown=render_task_markdown(request.user_prompt),
         tools_markdown=render_tools_markdown(
             preset="research",
             available_tools=default_tool_allowlist("research"),
@@ -346,6 +374,23 @@ def test_anthropic_transport_replay_strips_thinking_blocks(
             },
         },
     )
+    append_transcript_entry(
+        run_root,
+        agent_id,
+        {
+            "kind": "tool_result",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_old",
+                        "content": '{"status":"ok"}',
+                    }
+                ],
+            },
+        },
+    )
 
     transport.execute_turn([])
 
@@ -443,3 +488,234 @@ def test_openai_transport_replay_strips_reasoning_content(
 
     assert assistant_message["content"] == "Visible answer."
     assert "reasoning_content" not in assistant_message
+
+
+def test_model_request_artifact_records_compaction_preflight_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "src.harness.transport.OpenAI",
+        lambda **_: _FakeOpenAIClient(),
+    )
+    _persist_history_compaction_state(
+        str(run_root),
+        agent_id,
+        compacted_user_turns=2,
+        estimated_input_tokens_before=180_000,
+        estimated_input_tokens_after=165_000,
+        compaction_applied=True,
+        soft_overflow=False,
+        hard_overflow=False,
+    )
+    transport = OpenAINativeTransport(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name="gpt-4o",
+        system_prompt="System v1",
+    )
+
+    transport.ensure_initialized("Initial prompt")
+    transport.execute_turn([])
+
+    entries = load_transcript_entries(run_root, agent_id)
+    request_entry = next(entry for entry in entries if entry["kind"] == "model_request")
+    request_payload = read_json(request_entry["artifact_path"])
+
+    assert request_payload["preflight"]["estimated_input_tokens_before"] == 180_000
+    assert request_payload["preflight"]["estimated_input_tokens_after"] == 165_000
+    assert request_payload["preflight"]["compaction_applied"] is True
+    assert request_entry["summary"]["estimated_input_tokens_after"] == 165_000
+    assert request_entry["summary"]["compaction_applied"] is True
+
+
+def test_preflight_history_compaction_keeps_full_raw_replay_under_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+    transport = DummyTransport(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name="minimax/MiniMax-M2.7",
+        system_prompt="System v1",
+    )
+    transport.ensure_initialized("Turn 1")
+    for turn_number in range(1, 6):
+        if turn_number > 1:
+            transport.append_user_text(f"Turn {turn_number}")
+        append_transcript_entry(
+            run_root,
+            agent_id,
+            {
+                "kind": "assistant_response",
+                "message": {
+                    "role": "assistant",
+                    "content": f"Assistant response {turn_number}",
+                },
+            },
+        )
+
+    monkeypatch.setattr("src.harness.transport.estimate_payload_input_tokens", lambda _payload: 120_000)
+
+    result = preflight_history_compaction(
+        transport_name="openai",
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name="gpt-4o",
+        system_prompt="System v1",
+        pending_user_prompt="Turn 6",
+        tool_specs=[],
+    )
+
+    replay_messages = _transcript_messages(str(run_root), agent_id)
+    replay_user_messages = [message for message in replay_messages if message["role"] == "user"]
+
+    assert not result.compaction_changed
+    assert result.estimated_input_tokens_before == 120_000
+    assert result.estimated_input_tokens_after == 120_000
+    assert [message["content"] for message in replay_user_messages] == [
+        "Turn 1",
+        "Turn 2",
+        "Turn 3",
+        "Turn 4",
+        "Turn 5",
+    ]
+    assert (run_root / "agents" / agent_id / "state" / "history_summary.md").read_text(encoding="utf-8") == ""
+
+
+def test_preflight_history_compaction_compacts_oldest_turns_only_when_over_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+    transport = DummyTransport(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name="minimax/MiniMax-M2.7",
+        system_prompt="System v1",
+    )
+    transport.ensure_initialized("Turn 1")
+    for turn_number in range(1, 6):
+        if turn_number > 1:
+            transport.append_user_text(f"Turn {turn_number}")
+        append_transcript_entry(
+            run_root,
+            agent_id,
+            {
+                "kind": "assistant_response",
+                "message": {
+                    "role": "assistant",
+                    "content": f"Assistant response {turn_number}",
+                },
+            },
+        )
+
+    def _estimate(payload: dict[str, object]) -> int:
+        rendered = json.dumps(payload, ensure_ascii=True)
+        if "Turn 1" in rendered or "Turn 2" in rendered:
+            return 171_500
+        return 160_000
+
+    monkeypatch.setattr("src.harness.transport.estimate_payload_input_tokens", _estimate)
+    monkeypatch.setattr("src.harness.transport.get_model", lambda *_args: "summary-model")
+    monkeypatch.setattr("src.harness.transport.get_llm", lambda _model: _FakeSummaryLLM())
+
+    result = preflight_history_compaction(
+        transport_name="openai",
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name="gpt-4o",
+        system_prompt="System v1",
+        pending_user_prompt="Turn 6",
+        tool_specs=[],
+    )
+
+    history_summary = (run_root / "agents" / agent_id / "state" / "history_summary.md").read_text(
+        encoding="utf-8"
+    )
+    replay_messages = _transcript_messages(str(run_root), agent_id)
+    replay_user_messages = [message for message in replay_messages if message["role"] == "user"]
+
+    assert result.compaction_changed
+    assert result.estimated_input_tokens_before == 171_500
+    assert result.estimated_input_tokens_after == 160_000
+    assert result.compacted_user_turns == 2
+    assert "Keep improving the draft." in history_summary
+    assert [message["content"] for message in replay_user_messages] == ["Turn 3", "Turn 4", "Turn 5"]
+
+
+def test_preflight_history_compaction_reports_hard_overflow_after_full_compaction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+    transport = DummyTransport(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name="minimax/MiniMax-M2.7",
+        system_prompt="System v1",
+    )
+    transport.ensure_initialized("Turn 1")
+    transport.append_user_text("Turn 2")
+
+    monkeypatch.setattr("src.harness.transport.estimate_payload_input_tokens", lambda _payload: 205_000)
+    monkeypatch.setattr("src.harness.transport.get_model", lambda *_args: "summary-model")
+    monkeypatch.setattr("src.harness.transport.get_llm", lambda _model: _FakeSummaryLLM())
+
+    result = preflight_history_compaction(
+        transport_name="openai",
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name="gpt-4o",
+        system_prompt="System v1",
+        pending_user_prompt="Turn 3",
+        tool_specs=[],
+    )
+
+    assert result.soft_overflow
+    assert result.hard_overflow
+    assert result.compacted_user_turns == 1
+
+
+def test_replay_drops_orphan_assistant_tool_calls_before_next_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+    transport = DummyTransport(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name="gpt-4o",
+        system_prompt="System v1",
+    )
+    transport.ensure_initialized("Turn 1")
+    append_transcript_entry(
+        run_root,
+        agent_id,
+        {
+            "kind": "assistant_response",
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_stale",
+                        "type": "function",
+                        "function": {
+                            "name": "edit_file",
+                            "arguments": '{"path":"publish/final.md","target_text":"stale body"}',
+                        },
+                    }
+                ],
+            },
+        },
+    )
+    transport.append_user_text("Turn 2")
+
+    replay_messages = _transcript_messages(str(run_root), agent_id)
+
+    assert [message["role"] for message in replay_messages] == ["user", "user"]
+    assert replay_messages[-1]["content"] == "Turn 2"

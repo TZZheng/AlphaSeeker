@@ -19,7 +19,8 @@ src/harness/
 ├── executor.py              # Model-visible tools and deterministic skill execution bridge
 ├── transport.py             # Anthropic/OpenAI/MiniMax adapters plus text_json fallback
 ├── commenter.py             # Commenter refresh logic and comment-feed generation
-├── presets.py               # Preset-specific prompt assembly and tool allowlists
+├── prompt_builder.py        # Prompt bundle assembly for agents and commenters
+├── presets.py               # Preset tool allowlists and visible-skill policy
 ├── registry.py              # Skill-pack registry builder
 ├── retrieval.py             # Deterministic retrieval and reduction helpers
 ├── benchmark.py             # Benchmark cases, lanes, and metrics extraction
@@ -27,9 +28,10 @@ src/harness/
 ├── TASK.md                  # Local package notes
 ├── prompts/
 │   ├── system.md
-│   ├── environment.md
+│   ├── task.md
 │   ├── tools.md
-│   ├── root_task.md
+│   ├── commenter_interface.md
+│   ├── actors/
 │   ├── response_modes/
 │   ├── roles/
 │   └── internal/
@@ -183,6 +185,8 @@ data/harness_runs/<run_id>/
             ├── parent.txt
             ├── preset.txt
             ├── events_queue.jsonl
+            ├── prompt_memory.md
+            ├── history_summary.md
             ├── skill_state.json
             ├── transport_state.json
             └── commenter_state.json
@@ -190,10 +194,14 @@ data/harness_runs/<run_id>/
 
 Important runtime conventions:
 
+- `tools.md` is the canonical runtime-interface artifact for normal agents and is loaded into the system prompt.
+- `task.md` is the inspectable task contract and is loaded into the per-turn user prompt, not the system prompt.
 - parents explicitly read child `publish/` files; child `scratch/` data is not auto-ingested
 - `progress.md` is the supervisor-maintained human-readable summary used by the TUI
 - `scratch/transcript.jsonl` stores replayable model messages
 - `scratch/llm_turns/` stores the exact system prompt snapshot, request payload, response payload, and any extracted thinking text for each turn
+- `state/prompt_memory.md` is the optional carried-forward self-summary loaded into the agent system prompt
+- `state/history_summary.md` is the compacted semantic memory for older transcript history once raw replay is trimmed
 - `state/events_queue.jsonl` is the parent-visible completion queue used by `list_children`
 
 ## Stop, Resume, And Refinement

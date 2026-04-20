@@ -17,12 +17,12 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from src.harness.artifacts import (
     agent_workspace_paths,
     append_event,
+    append_transcript_entry,
     latest_agent_records,
     load_transport_state,
     load_request,
     mark_commenter_comments_read,
     read_status,
-    read_text,
     remaining_agent_seconds,
     save_skill_state,
     unread_commenter_comments,
@@ -32,11 +32,17 @@ from src.harness.artifacts import (
 )
 from src.harness.commenter import build_comment_feed_message
 from src.harness.executor import TERMINAL_STATUSES, create_or_load_session, execute_agent_command, execute_model_tool, model_tool_specs
-from src.harness.presets import preset_system_prompt_with_context, render_budget_snapshot, visible_skills_for_preset
+from src.harness.presets import visible_skills_for_preset
+from src.harness.prompt_builder import build_agent_prompt_bundle
 from src.harness.types import AgentCommand, AgentEvent
 from src.shared.llm_manager import get_llm
 from src.shared.model_config import get_model
-from src.harness.transport import create_transport, resolve_agent_transport
+from src.harness.transport import (
+    _persist_history_compaction_state,
+    create_transport,
+    preflight_history_compaction,
+    resolve_agent_transport,
+)
 
 
 MAX_CONSECUTIVE_ERRORS = 4
@@ -84,212 +90,30 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     return payload
 
 
-def _journal_tail(run_root: str, agent_id: str, limit: int = 8) -> str:
-    journal = agent_workspace_paths(run_root, agent_id)["journal"]
-    if not journal.exists():
-        return "None"
-    lines = journal.read_text(encoding="utf-8").splitlines()[-limit:]
-    if not lines:
-        return "None"
-    rendered: list[str] = []
-    for raw in lines:
-        try:
-            item = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        rendered.append(
-            f"- tool={item.get('tool')} note={item.get('note', '')} result={item.get('result', {})}"
-        )
-    return "\n".join(rendered) or "None"
-
-
-def _list_context_files(run_root: str, agent_id: str) -> str:
-    context_root = agent_workspace_paths(run_root, agent_id)["context_root"]
-    if not context_root.exists():
-        return "None"
-    files = [str(path) for path in sorted(context_root.rglob("*")) if path.is_file()]
-    return "\n".join(f"- {name}" for name in files) or "None"
-
-
-def _list_publish_files(run_root: str, agent_id: str) -> str:
-    publish_root = agent_workspace_paths(run_root, agent_id)["publish_root"]
-    if not publish_root.exists():
-        return "None"
-    rows: list[str] = []
-    for path in sorted(publish_root.rglob("*")):
-        if not path.is_file():
-            continue
-        first_line = ""
-        for raw_line in path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if line:
-                first_line = line[:120]
-                break
-        rows.append(f"- {path.relative_to(publish_root).as_posix()}: {first_line}")
-    return "\n".join(rows) or "None"
-
-
-def _children_overview(run_root: str, agent_id: str) -> str:
-    rows: list[str] = []
-    for record in latest_agent_records(run_root).values():
-        if record.parent_id != agent_id:
-            continue
-        child_paths = agent_workspace_paths(run_root, record.agent_id)
-        has_summary = "yes" if child_paths["publish_summary"].exists() else "no"
-        has_final = "yes" if child_paths["publish_final"].exists() else "no"
-        rows.append(
-            f"- {record.agent_id} [{record.status}] preset={record.preset} "
-            f"desc={record.description} has_summary={has_summary} has_final={has_final} "
-            f"summary={child_paths['publish_summary']} index={child_paths['publish_index']}"
-        )
-    return "\n".join(sorted(rows)) or "None"
-
-
-def _budget_snapshot(run_root: str, agent_id: str) -> dict[str, int]:
-    request = load_request(run_root)
-    records = latest_agent_records(run_root)
-    live_agents = sum(1 for record in records.values() if record.status in {"running", "waiting"})
-    live_children = sum(
-        1
-        for record in records.values()
-        if record.parent_id == agent_id and record.status in {"running", "waiting"}
-    )
-    return {
-        "created_agents": len(records),
-        "live_agents": live_agents,
-        "remaining_agent_slots": max(0, request.max_agents_per_run - len(records)),
-        "remaining_live_child_slots": max(0, request.max_live_children_per_parent - live_children),
-    }
-
-
-def _agent_lineage(run_root: str, agent_id: str) -> tuple[int, str]:
-    records = latest_agent_records(run_root)
-    depth = 0
-    chain: list[str] = []
-    current = records.get(agent_id)
-    seen: set[str] = set()
-    while current is not None and current.agent_id not in seen:
-        seen.add(current.agent_id)
-        chain.append(f"{current.agent_id}:{current.preset}")
-        if not current.parent_id:
-            break
-        depth += 1
-        current = records.get(current.parent_id)
-    chain.reverse()
-    return depth, " -> ".join(chain) if chain else "None"
-
-
-def _build_initial_user_prompt(run_root: str, agent_id: str) -> str:
-    paths = agent_workspace_paths(run_root, agent_id)
-    request = load_request(run_root)
-    records = latest_agent_records(run_root)
-    current = records.get(agent_id)
-    depth, lineage = _agent_lineage(run_root, agent_id)
-    budget_snapshot = _budget_snapshot(run_root, agent_id)
-    sections = [
-        "Task",
-        read_text(paths["task"]) or "None",
-        "",
-        "Allowed Tools",
-        read_text(paths["tools"]) or "None",
-        "",
-        "Agent Identity",
-        f"- agent_id: {agent_id}",
-        f"- preset: {current.preset if current else 'unknown'}",
-        f"- parent_id: {current.parent_id if current and current.parent_id else '-'}",
-        f"- root_orchestrator: {'yes' if agent_id == 'agent_root' else 'no'}",
-        "",
-        render_budget_snapshot(
-            request=request,
-            snapshot=budget_snapshot,
-        ),
-        "",
-        "Agent Lineage",
-        f"- depth: {depth}",
-        f"- lineage: {lineage}",
-        "",
-        "Current Status",
-        read_status(run_root, agent_id),
-        "",
-        "Context Files",
-        _list_context_files(run_root, agent_id),
-        "- Read listed context file paths with `read_file(path=...)`.",
-        "",
-        "Published Files",
-        _list_publish_files(run_root, agent_id),
-        "",
-        "Children",
-        _children_overview(run_root, agent_id),
-    ]
-    return "\n".join(sections)
-
-
-def _build_json_prompt(
-    run_root: str,
-    agent_id: str,
+def _current_prompt_bundle(
+    session,
+    *,
+    transport_name: str,
     previous_error: str | None = None,
-    runtime_control: str | None = None,
     comment_feed: str | None = None,
-) -> str:
-    sections = [
-        _build_initial_user_prompt(run_root, agent_id),
-        "",
-        "Recent Journal",
-        _journal_tail(run_root, agent_id),
-    ]
-    if previous_error:
-        sections.extend(["", "Previous Error To Fix", previous_error])
-    if comment_feed:
-        sections.extend(["", comment_feed])
-    if runtime_control:
-        sections.extend(["", runtime_control])
-    return "\n".join(sections)
-
-
-def _build_error_prompt(previous_error: str) -> str:
-    return "\n".join(
-        [
-            "Previous Error To Fix",
-            previous_error,
-            "",
-            "Call a valid tool next or set your status explicitly.",
-        ]
-    )
-
-
-def _build_runtime_finalize_instruction(run_root: str, agent_id: str) -> str:
-    record = latest_agent_records(run_root).get(agent_id)
-    is_root = record is None or not record.parent_id
-    output_line = (
-        "- Write `publish/final.md`, `publish/summary.md`, and `publish/artifact_index.md`, then call `set_status(done)`."
-        if is_root
-        else "- Write the published output file or files your parent needs, update `publish/summary.md` if helpful, then call `set_status(done)`."
-    )
-    return "\n".join(
-        [
-            "Runtime Control",
-            "Stop exploring, stop self-critiquing, and generate final output now.",
-            "- Do not start new broad research, new decomposition, or new long waits.",
-            "- Use the evidence, child outputs, and files you already have.",
-            "- Do one more short read or short wait only if it is strictly necessary to finish a supported answer.",
-            "- Do not keep rereading or polishing published outputs once they are good enough to ship.",
-            "- If something remains uncertain, state that uncertainty explicitly instead of delaying completion.",
-            output_line,
-        ]
-    )
-
-
-def _current_system_prompt(session, *, transport_name: str) -> str:
+    soft_stop_active: bool = False,
+):
     response_mode = "text_json" if transport_name == "text_json" else "native_tools"
     visible_skills = visible_skills_for_preset(
         preset=session.preset,
         available_skills=session.state.available_skills,
     )
-    return preset_system_prompt_with_context(
-        session.preset,
+    return build_agent_prompt_bundle(
+        request=session.request,
+        run_root=session.run_root,
+        agent_id=session.agent_id,
+        preset=session.preset,
         response_mode=response_mode,
         available_tools=session.allowed_tools,
         available_skills=visible_skills,
+        previous_error=previous_error,
+        comment_feed=comment_feed,
+        soft_stop_active=soft_stop_active,
     )
 
 
@@ -385,20 +209,20 @@ def _wait_for_next_turn_window(
     request,
     previous_turn_started_monotonic: float,
     previous_turn_started_epoch: float,
-    runtime_control_was_active: bool,
+    soft_time_limit_was_active: bool,
 ) -> tuple[bool, bool]:
     max_ready_at = previous_turn_started_monotonic + TURN_MAX_PROMPT_GAP_SECONDS
     while True:
         if read_status(run_root, agent_id) in TERMINAL_STATUSES:
-            return False, runtime_control_was_active
+            return False, soft_time_limit_was_active
         now = time.monotonic()
-        runtime_control_active = runtime_control_was_active or remaining_agent_seconds(request, run_root, agent_id) <= 0
+        soft_time_limit_active = soft_time_limit_was_active or remaining_agent_seconds(request, run_root, agent_id) <= 0
         if now >= max_ready_at:
-            return True, runtime_control_active
-        if runtime_control_active != runtime_control_was_active:
-            return True, runtime_control_active
+            return True, soft_time_limit_active
+        if soft_time_limit_active != soft_time_limit_was_active:
+            return True, soft_time_limit_active
         if _has_new_external_material_since(run_root, agent_id, since_epoch=previous_turn_started_epoch):
-            return True, runtime_control_active
+            return True, soft_time_limit_active
         sleep_seconds = min(TURN_PACING_POLL_SECONDS, max(0.0, max_ready_at - now))
         if sleep_seconds > 0:
             time.sleep(sleep_seconds)
@@ -434,7 +258,12 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
     if persisted_transport:
         model_name = str(persisted_transport.get("model_name") or model_name)
         transport_name = str(persisted_transport.get("transport") or transport_name)
-    system_prompt = _current_system_prompt(session, transport_name=transport_name)
+    prompt_bundle = _current_prompt_bundle(
+        session,
+        transport_name=transport_name,
+        soft_stop_active=False,
+    )
+    system_prompt = prompt_bundle.system_prompt
 
     llm = get_llm(model_name) if transport_name == "text_json" else None
     transport = None
@@ -446,17 +275,16 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
             model_name=model_name,
             system_prompt=system_prompt,
         )
-        transport.ensure_initialized(_build_initial_user_prompt(run_root, agent_id))
+        transport.ensure_initialized("")
         transport.update_system_prompt(system_prompt)
 
     consecutive_errors = 0
     idle_retries = 0
     previous_error: str | None = None
-    soft_finalize_requested = False
-    runtime_control_persisted = False
+    soft_finalize_logged = False
     last_turn_started_monotonic: float | None = None
     last_turn_started_epoch: float | None = None
-    last_runtime_control_active = False
+    last_soft_time_limit_active = False
 
     try:
         while True:
@@ -464,23 +292,21 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
             if status in TERMINAL_STATUSES:
                 break
             if last_turn_started_monotonic is not None and last_turn_started_epoch is not None:
-                should_continue, last_runtime_control_active = _wait_for_next_turn_window(
+                should_continue, last_soft_time_limit_active = _wait_for_next_turn_window(
                     run_root,
                     agent_id,
                     request=request,
                     previous_turn_started_monotonic=last_turn_started_monotonic,
                     previous_turn_started_epoch=last_turn_started_epoch,
-                    runtime_control_was_active=last_runtime_control_active,
+                    soft_time_limit_was_active=last_soft_time_limit_active,
                 )
                 if not should_continue:
                     break
                 if read_status(run_root, agent_id) in TERMINAL_STATUSES:
                     break
             remaining_agent = remaining_agent_seconds(request, run_root, agent_id)
-            runtime_control: str | None = None
             if remaining_agent <= 0:
-                runtime_control = _build_runtime_finalize_instruction(run_root, agent_id)
-                if not soft_finalize_requested:
+                if not soft_finalize_logged:
                     append_event(
                         run_root,
                         AgentEvent(
@@ -490,31 +316,31 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
                             details={"reason": "soft_time_limit_reached"},
                         ),
                     )
-                    soft_finalize_requested = True
-            runtime_control_active = soft_finalize_requested or remaining_agent <= 0
+                    soft_finalize_logged = True
+            soft_time_limit_active = remaining_agent <= 0
 
             try:
-                system_prompt = _current_system_prompt(session, transport_name=transport_name)
                 comment_feed, injected_comment_count = build_comment_feed_message(run_root, agent_id)
+                prompt_bundle = _current_prompt_bundle(
+                    session,
+                    transport_name=transport_name,
+                    previous_error=previous_error,
+                    comment_feed=comment_feed,
+                    soft_stop_active=soft_time_limit_active,
+                )
+                system_prompt = prompt_bundle.system_prompt
+                user_prompt = prompt_bundle.user_prompt
+                previous_error = None
                 if transport_name == "text_json":
                     last_turn_started_monotonic = time.monotonic()
                     last_turn_started_epoch = time.time()
-                    last_runtime_control_active = runtime_control_active
+                    last_soft_time_limit_active = soft_time_limit_active
                     response = llm.invoke(
                         [
                             SystemMessage(content=system_prompt),
-                            HumanMessage(
-                                content=_build_json_prompt(
-                                    run_root,
-                                    agent_id,
-                                    previous_error,
-                                    runtime_control if soft_finalize_requested else None,
-                                    comment_feed,
-                                )
-                            ),
+                            HumanMessage(content=user_prompt),
                         ]
                     )
-                    previous_error = None
                     raw_text = _content_to_text(response.content)
                     payload = _extract_json_object(raw_text)
                     command = AgentCommand.model_validate(payload)
@@ -536,24 +362,124 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
                         break
                     continue
 
-                extra_user_messages: list[str] = []
-                if previous_error:
-                    extra_user_messages.append(_build_error_prompt(previous_error))
-                    previous_error = None
-                if comment_feed:
-                    extra_user_messages.append(comment_feed)
-                if runtime_control and (not runtime_control_persisted or extra_user_messages):
-                    extra_user_messages.append(runtime_control)
-                    runtime_control_persisted = True
-                if transport is not None:
-                    for message in extra_user_messages:
-                        transport.append_user_text(message)
+                tool_specs = model_tool_specs(session)
+                compaction_changed_any = False
+                estimated_before = 0
+                estimated_after = 0
+                compacted_user_turns = 0
+                soft_overflow = False
+                hard_overflow = False
+                while True:
+                    preflight = preflight_history_compaction(
+                        transport_name=transport_name,
+                        run_root=run_root,
+                        agent_id=agent_id,
+                        model_name=model_name,
+                        system_prompt=system_prompt,
+                        pending_user_prompt=user_prompt,
+                        tool_specs=tool_specs,
+                    )
+                    compaction_changed_any = compaction_changed_any or preflight.compaction_changed
+                    if estimated_before == 0:
+                        estimated_before = preflight.estimated_input_tokens_before
+                    estimated_after = preflight.estimated_input_tokens_after
+                    compacted_user_turns = preflight.compacted_user_turns
+                    soft_overflow = preflight.soft_overflow
+                    hard_overflow = preflight.hard_overflow
+                    if not preflight.compaction_changed:
+                        break
+                    prompt_bundle = _current_prompt_bundle(
+                        session,
+                        transport_name=transport_name,
+                        previous_error=previous_error,
+                        comment_feed=comment_feed,
+                        soft_stop_active=soft_time_limit_active,
+                    )
+                    system_prompt = prompt_bundle.system_prompt
+                    user_prompt = prompt_bundle.user_prompt
+
+                _persist_history_compaction_state(
+                    run_root,
+                    agent_id,
+                    compacted_user_turns=compacted_user_turns,
+                    estimated_input_tokens_before=estimated_before,
+                    estimated_input_tokens_after=estimated_after,
+                    compaction_applied=compaction_changed_any,
+                    soft_overflow=soft_overflow,
+                    hard_overflow=hard_overflow,
+                )
+                if soft_overflow:
+                    append_transcript_entry(
+                        run_root,
+                        agent_id,
+                        {
+                            "kind": "history_compaction_soft_overflow",
+                            "created_at": datetime.utcnow().isoformat() + "Z",
+                            "estimated_input_tokens_before": estimated_before,
+                            "estimated_input_tokens_after": estimated_after,
+                            "soft_budget_tokens": 170000,
+                            "hard_context_window_tokens": 200000,
+                            "compacted_user_turns": compacted_user_turns,
+                        },
+                    )
+                    append_event(
+                        run_root,
+                        AgentEvent(
+                            event_type="history_compaction_soft_overflow",
+                            agent_id=agent_id,
+                            parent_id=record.parent_id,
+                            details={
+                                "estimated_input_tokens_before": estimated_before,
+                                "estimated_input_tokens_after": estimated_after,
+                                "soft_budget_tokens": 170000,
+                                "hard_context_window_tokens": 200000,
+                                "compacted_user_turns": compacted_user_turns,
+                            },
+                        ),
+                    )
+                if hard_overflow:
+                    previous_error = (
+                        "Next request exceeds the hard input context window even after full transcript compaction. "
+                        f"Estimated input tokens: {estimated_after}. Hard window: 200000."
+                    )
+                    append_transcript_entry(
+                        run_root,
+                        agent_id,
+                        {
+                            "kind": "history_compaction_hard_overflow",
+                            "created_at": datetime.utcnow().isoformat() + "Z",
+                            "estimated_input_tokens_before": estimated_before,
+                            "estimated_input_tokens_after": estimated_after,
+                            "soft_budget_tokens": 170000,
+                            "hard_context_window_tokens": 200000,
+                            "compacted_user_turns": compacted_user_turns,
+                            "error": previous_error,
+                        },
+                    )
+                    append_event(
+                        run_root,
+                        AgentEvent(
+                            event_type="history_compaction_hard_overflow",
+                            agent_id=agent_id,
+                            parent_id=record.parent_id,
+                            details={
+                                "estimated_input_tokens_before": estimated_before,
+                                "estimated_input_tokens_after": estimated_after,
+                                "soft_budget_tokens": 170000,
+                                "hard_context_window_tokens": 200000,
+                                "compacted_user_turns": compacted_user_turns,
+                            },
+                        ),
+                    )
+                    write_status(run_root, agent_id, "blocked")
+                    break
 
                 transport.update_system_prompt(system_prompt)
+                transport.append_user_text(user_prompt)
                 last_turn_started_monotonic = time.monotonic()
                 last_turn_started_epoch = time.time()
-                last_runtime_control_active = runtime_control_active
-                turn = transport.execute_turn(model_tool_specs(session))
+                last_soft_time_limit_active = soft_time_limit_active
+                turn = transport.execute_turn(tool_specs)
                 if injected_comment_count:
                     mark_commenter_comments_read(run_root, agent_id, injected_comment_count)
                 if not turn.tool_calls:

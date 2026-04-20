@@ -15,3 +15,4 @@
 - Treat child outputs as inputs to judge, not as conclusions you must automatically accept.
 - Re-check the state of the task after each major step: what is known, what is uncertain, what conflicts, and what would most improve answer quality next.
 - Before finalizing, ask whether the current answer is coherent, well-supported, and internally consistent enough to deserve being called final.
+- A child `summary.md` or partial published file is enough to begin synthesis. Do not wait for every child to reach perfect completion before writing.
