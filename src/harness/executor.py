@@ -29,7 +29,8 @@ from src.harness.artifacts import (
     write_status,
     write_text_atomic,
 )
-from src.harness.presets import default_tool_allowlist, render_tools_markdown, visible_skills_for_preset
+from src.harness.presets import default_tool_allowlist, visible_skills_for_preset
+from src.harness.prompt_builder import render_tools_markdown
 from src.harness.registry import build_skill_registry, get_skills_for_packs
 from src.harness.skills.common import json_preview
 from src.harness.types import (
@@ -52,6 +53,7 @@ TOOL_NAMES = [
     "bash",
     "write_file",
     "edit_file",
+    "apply_patch",
     "set_status",
 ]
 
@@ -67,6 +69,9 @@ _LEGAL_PRESET_LIST = ", ".join(f"'{preset}'" for preset in AGENT_PRESETS)
 BASH_ALLOWED_COMMANDS = {"cp", "mv", "mkdir", "ls", "rg", "sleep"}
 BASH_DEFAULT_TIMEOUT_SECONDS = 10
 BASH_DEFAULT_MAX_OUTPUT_CHARS = 12000
+PATCH_BEGIN_MARKER = "*** Begin Patch"
+PATCH_END_MARKER = "*** End Patch"
+PATCH_UPDATE_FILE_PREFIX = "*** Update File: "
 
 
 @dataclass
@@ -82,6 +87,17 @@ class AgentSession:
     @property
     def workspace(self) -> Path:
         return agent_workspace_paths(self.run_root, self.agent_id)["workspace"]
+
+
+@dataclass(frozen=True)
+class PatchHunk:
+    entries: list[tuple[str, str]]
+
+
+@dataclass(frozen=True)
+class ParsedPatch:
+    path: str
+    hunks: list[PatchHunk]
 
 
 def create_or_load_session(
@@ -166,7 +182,7 @@ def _tool_definitions() -> dict[str, dict[str, Any]]:
             },
         },
         "list_children": {
-            "description": "List all child agents with status. Drains the events queue so callers know which children just finished. Use in a loop: drain, do useful work, repeat until running_count=0.",
+            "description": "List all child agents with status. Drains the events queue so callers know which children just finished. Do not poll in a tight loop when nothing new has appeared.",
             "input_schema": {"type": "object", "properties": {}},
         },
         "list_publish_files": {
@@ -187,7 +203,7 @@ def _tool_definitions() -> dict[str, dict[str, Any]]:
             },
         },
         "bash": {
-            "description": "Run one repo-scoped bash command from the allowlist (cp, mv, mkdir, ls, rg, sleep).",
+            "description": "Run one repo-scoped bash command from the allowlist for filesystem inspection or file movement. Do not use bash as a passive waiting mechanism; the runtime already pauses between turns.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -224,6 +240,16 @@ def _tool_definitions() -> dict[str, dict[str, Any]]:
                     "occurrence": {"type": "integer"},
                     "replace_all": {"type": "boolean"},
                 },
+            },
+        },
+        "apply_patch": {
+            "description": "Apply one Codex-style single-file patch to an existing publish/ or scratch/ file. The patch string must use the exact markers '*** Begin Patch', one '*** Update File: ...' block, one or more '@@' hunks, and '*** End Patch'.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "patch": {"type": "string"},
+                },
+                "required": ["patch"],
             },
         },
         "set_status": {
@@ -476,7 +502,10 @@ def _render_child_task_markdown(
         output_lines = ["- Use the published file or files your parent asked for."]
     return "\n".join(
         [
-            f"# {task_name}",
+            "# Task Assignment",
+            "",
+            "## Task Name",
+            task_name.strip(),
             "",
             "## One-Line Goal",
             description.strip(),
@@ -986,6 +1015,100 @@ def _find_nth_occurrence(text: str, needle: str, occurrence: int) -> int:
     return index
 
 
+def _parse_patch_hunk(lines: list[str], *, hunk_number: int) -> PatchHunk:
+    entries: list[tuple[str, str]] = []
+    for raw_line in lines:
+        if not raw_line:
+            raise ValueError(f"Patch hunk {hunk_number} contains a line without a patch prefix.")
+        prefix = raw_line[0]
+        if prefix not in {" ", "+", "-"}:
+            raise ValueError(f"Patch hunk {hunk_number} has an illegal line prefix '{prefix}'.")
+        entries.append((prefix, raw_line[1:]))
+    if not entries:
+        raise ValueError(f"Patch hunk {hunk_number} is empty.")
+    if all(prefix == "+" for prefix, _text in entries):
+        raise ValueError(f"Patch hunk {hunk_number} must include at least one context or removed line.")
+    return PatchHunk(entries=entries)
+
+
+def _parse_apply_patch_text(patch_text: str) -> ParsedPatch:
+    lines = patch_text.splitlines()
+    if not lines:
+        raise ValueError("apply_patch requires a non-empty patch.")
+    if lines[0] != PATCH_BEGIN_MARKER:
+        raise ValueError("Patch must start with '*** Begin Patch'.")
+    if lines[-1] != PATCH_END_MARKER:
+        raise ValueError("Patch must end with '*** End Patch'.")
+    if len(lines) < 4:
+        raise ValueError("Patch must include one file update and at least one hunk.")
+
+    file_line = lines[1]
+    if not file_line.startswith(PATCH_UPDATE_FILE_PREFIX):
+        raise ValueError("v1 apply_patch only supports a single '*** Update File: ...' block.")
+    path = file_line[len(PATCH_UPDATE_FILE_PREFIX):].strip()
+    if not path:
+        raise ValueError("Patch update file path cannot be empty.")
+
+    hunks: list[PatchHunk] = []
+    current_hunk_lines: list[str] = []
+    hunk_number = 0
+    for line in lines[2:-1]:
+        if line.startswith("@@"):
+            if current_hunk_lines:
+                hunks.append(_parse_patch_hunk(current_hunk_lines, hunk_number=hunk_number))
+                current_hunk_lines = []
+            hunk_number += 1
+            continue
+        if line.startswith("*** "):
+            raise ValueError("v1 apply_patch only supports one updated file and no nested patch directives.")
+        if hunk_number == 0:
+            raise ValueError("Patch must include '@@' before hunk lines.")
+        current_hunk_lines.append(line)
+
+    if current_hunk_lines:
+        hunks.append(_parse_patch_hunk(current_hunk_lines, hunk_number=hunk_number))
+    if not hunks:
+        raise ValueError("Patch must include at least one hunk.")
+    return ParsedPatch(path=path, hunks=hunks)
+
+
+def _find_unique_line_match(lines: list[str], expected_lines: list[str], *, hunk_number: int) -> int:
+    if not expected_lines:
+        raise ValueError(f"Patch hunk {hunk_number} has no anchor lines to match.")
+    match_indexes = [
+        index
+        for index in range(len(lines) - len(expected_lines) + 1)
+        if lines[index:index + len(expected_lines)] == expected_lines
+    ]
+    if not match_indexes:
+        raise ValueError(f"Patch hunk {hunk_number} context was not found in the target file.")
+    if len(match_indexes) > 1:
+        raise ValueError(f"Patch hunk {hunk_number} context matched multiple locations.")
+    return match_indexes[0]
+
+
+def _apply_line_patch(original: str, parsed_patch: ParsedPatch) -> tuple[str, dict[str, Any]]:
+    current_lines = original.splitlines()
+    trailing_newline = original.endswith("\n")
+
+    for hunk_number, hunk in enumerate(parsed_patch.hunks, start=1):
+        expected_lines = [text for prefix, text in hunk.entries if prefix != "+"]
+        replacement_lines = [text for prefix, text in hunk.entries if prefix != "-"]
+        start_index = _find_unique_line_match(current_lines, expected_lines, hunk_number=hunk_number)
+        current_lines[start_index:start_index + len(expected_lines)] = replacement_lines
+
+    updated = "\n".join(current_lines)
+    if current_lines and trailing_newline:
+        updated += "\n"
+    return (
+        updated,
+        {
+            "operation": "patch",
+            "hunks_applied": len(parsed_patch.hunks),
+        },
+    )
+
+
 def _apply_text_edit(original: str, arguments: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     operation = str(arguments.get("operation") or "").strip()
     content = str(arguments.get("content") or "")
@@ -1032,16 +1155,14 @@ def _apply_text_edit(original: str, arguments: dict[str, Any]) -> tuple[str, dic
     )
 
 
-def _handle_edit_file(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
-    raw_path = str(arguments.get("path") or "").strip()
-    if not raw_path:
-        raise ValueError("edit_file requires path.")
-    path, root_name, relative = _resolve_workspace_file_path(session, raw_path, must_exist=True)
-    if not path.is_file():
-        raise ValueError(f"File '{relative}' does not exist inside {root_name}/.")
-    original = read_text(path)
-    updated, details = _apply_text_edit(original, arguments)
-    write_text_atomic(path, updated)
+def _emit_workspace_update(
+    session: AgentSession,
+    *,
+    root_name: str,
+    path: Path,
+    relative: str,
+    details: dict[str, Any],
+) -> None:
     append_event(
         session.run_root,
         AgentEvent(
@@ -1054,12 +1175,70 @@ def _handle_edit_file(session: AgentSession, arguments: dict[str, Any]) -> dict[
             },
         ),
     )
+
+
+def _handle_edit_file(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
+    raw_path = str(arguments.get("path") or "").strip()
+    if not raw_path:
+        raise ValueError("edit_file requires path.")
+    path, root_name, relative = _resolve_workspace_file_path(session, raw_path, must_exist=True)
+    if not path.is_file():
+        raise ValueError(f"File '{relative}' does not exist inside {root_name}/.")
+    original = read_text(path)
+    updated, details = _apply_text_edit(original, arguments)
+    write_text_atomic(path, updated)
+    _emit_workspace_update(session, root_name=root_name, path=path, relative=relative, details=details)
     return {
         "path": str(path),
         "description": _describe_file(path),
         "root": root_name,
         "operation": details["operation"],
         "match_count": int(details.get("match_count", 0)),
+        "before_chars": len(original),
+        "after_chars": len(updated),
+    }
+
+
+def _rewrite_apply_patch_error(message: str, *, display_path: str) -> str:
+    read_hint = f"Read the current file with read_file(path='{display_path}') before retrying."
+    if "context was not found" in message:
+        return (
+            f"{message} The file content does not match the patch context anymore. "
+            f"{read_hint} Rebuild the patch from the exact current lines."
+        )
+    if "matched multiple locations" in message:
+        return (
+            f"{message} The patch context is ambiguous. "
+            f"{read_hint} Use more specific surrounding lines in the next hunk."
+        )
+    return message
+
+
+def _handle_apply_patch(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
+    raw_patch = arguments.get("patch")
+    if raw_patch is None:
+        raise ValueError("apply_patch requires patch.")
+    parsed_patch = _parse_apply_patch_text(str(raw_patch))
+    path, root_name, relative = _resolve_workspace_file_path(session, parsed_patch.path, must_exist=True)
+    if not path.is_file():
+        raise ValueError(f"File '{relative}' does not exist inside {root_name}/.")
+
+    original = read_text(path)
+    try:
+        updated, details = _apply_line_patch(original, parsed_patch)
+    except ValueError as exc:
+        raise ValueError(_rewrite_apply_patch_error(str(exc), display_path=f"{root_name}/{relative}")) from exc
+    if root_name == "publish" and not updated.strip():
+        raise ValueError("apply_patch cannot leave publish paths empty.")
+
+    write_text_atomic(path, updated)
+    _emit_workspace_update(session, root_name=root_name, path=path, relative=relative, details=details)
+    return {
+        "path": str(path),
+        "description": _describe_file(path),
+        "root": root_name,
+        "operation": details["operation"],
+        "hunks_applied": int(details["hunks_applied"]),
         "before_chars": len(original),
         "after_chars": len(updated),
     }
@@ -1094,5 +1273,6 @@ _HANDLERS = {
     "bash": _handle_bash,
     "write_file": _handle_write_file,
     "edit_file": _handle_edit_file,
+    "apply_patch": _handle_apply_patch,
     "set_status": _handle_set_status,
 }

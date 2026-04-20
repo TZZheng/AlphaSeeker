@@ -15,6 +15,7 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
         "bash",
         "write_file",
         "edit_file",
+        "apply_patch",
         "set_status",
     ],
     "research": [
@@ -25,6 +26,7 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
         "bash",
         "write_file",
         "edit_file",
+        "apply_patch",
         "set_status",
     ],
     "source_triage": [
@@ -34,6 +36,7 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
         "bash",
         "write_file",
         "edit_file",
+        "apply_patch",
         "set_status",
     ],
     "writer": [
@@ -43,6 +46,7 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
         "bash",
         "write_file",
         "edit_file",
+        "apply_patch",
         "set_status",
     ],
     "synthesizer": [
@@ -52,6 +56,7 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
         "bash",
         "write_file",
         "edit_file",
+        "apply_patch",
         "set_status",
     ],
     "evaluator": [
@@ -61,6 +66,7 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
         "bash",
         "write_file",
         "edit_file",
+        "apply_patch",
         "set_status",
     ],
 }

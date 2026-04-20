@@ -16,7 +16,8 @@ from src.harness.artifacts import (
 )
 from src.harness import executor as executor_module
 from src.harness.executor import create_or_load_session, execute_model_tool
-from src.harness.presets import default_tool_allowlist, render_root_task_markdown, render_tools_markdown, visible_skills_for_preset
+from src.harness.presets import default_tool_allowlist, visible_skills_for_preset
+from src.harness.prompt_builder import render_task_markdown, render_tools_markdown
 from src.harness.registry import build_skill_registry, get_skills_for_packs
 from src.harness.types import HarnessRequest, SkillMetrics, SkillResult, SkillSpec
 
@@ -40,7 +41,7 @@ def _create_basic_session(
         preset=preset,
         task_name="Root Task",
         description=user_prompt,
-        task_markdown=render_root_task_markdown(request.user_prompt),
+        task_markdown=render_task_markdown(request.user_prompt),
         tools_markdown=render_tools_markdown(
             preset=preset,
             available_tools=default_tool_allowlist(preset),
@@ -72,7 +73,7 @@ def test_spawn_subagent_rejects_unknown_preset_and_lists_legal_presets(
         preset="orchestrator",
         task_name="Root Task",
         description="Delegate work.",
-        task_markdown=render_root_task_markdown(request.user_prompt),
+        task_markdown=render_task_markdown(request.user_prompt),
         tools_markdown=render_tools_markdown(
             preset="orchestrator",
             available_tools=default_tool_allowlist("orchestrator"),
@@ -110,7 +111,7 @@ def test_spawn_subagent_can_record_expected_publish_files(
         preset="orchestrator",
         task_name="Root Task",
         description="Delegate work.",
-        task_markdown=render_root_task_markdown(request.user_prompt),
+        task_markdown=render_task_markdown(request.user_prompt),
         tools_markdown=render_tools_markdown(
             preset="orchestrator",
             available_tools=default_tool_allowlist("orchestrator"),
@@ -158,7 +159,7 @@ def test_skill_results_return_exact_artifact_and_output_paths(
         preset="research",
         task_name="Root Task",
         description="Run a skill.",
-        task_markdown=render_root_task_markdown(request.user_prompt),
+        task_markdown=render_task_markdown(request.user_prompt),
         tools_markdown=render_tools_markdown(
             preset="research",
             available_tools=default_tool_allowlist("research"),
@@ -223,7 +224,7 @@ def test_publish_tools_normalize_publish_prefix(
         preset="orchestrator",
         task_name="Root Task",
         description="Publish work.",
-        task_markdown=render_root_task_markdown(request.user_prompt),
+        task_markdown=render_task_markdown(request.user_prompt),
         tools_markdown=render_tools_markdown(
             preset="orchestrator",
             available_tools=default_tool_allowlist("orchestrator"),
@@ -336,7 +337,7 @@ def test_context_files_are_copied_for_read_file(
         preset="orchestrator",
         task_name="Root Task",
         description="Delegate with context.",
-        task_markdown=render_root_task_markdown(request.user_prompt),
+        task_markdown=render_task_markdown(request.user_prompt),
         tools_markdown=render_tools_markdown(
             preset="orchestrator",
             available_tools=default_tool_allowlist("orchestrator"),
@@ -389,7 +390,7 @@ def test_search_in_files_returns_match_locations(
         preset="research",
         task_name="Root Task",
         description="Search files.",
-        task_markdown=render_root_task_markdown(request.user_prompt),
+        task_markdown=render_task_markdown(request.user_prompt),
         tools_markdown=render_tools_markdown(
             preset="research",
             available_tools=default_tool_allowlist("research"),
@@ -450,7 +451,7 @@ def test_bash_rg_discovers_matching_paths(
         preset="research",
         task_name="Root Task",
         description="Discover files.",
-        task_markdown=render_root_task_markdown(request.user_prompt),
+        task_markdown=render_task_markdown(request.user_prompt),
         tools_markdown=render_tools_markdown(
             preset="research",
             available_tools=default_tool_allowlist("research"),
@@ -500,7 +501,7 @@ def test_bash_copy_and_move_stay_inside_project_root(
         preset="research",
         task_name="Root Task",
         description="Copy and move files.",
-        task_markdown=render_root_task_markdown(request.user_prompt),
+        task_markdown=render_task_markdown(request.user_prompt),
         tools_markdown=render_tools_markdown(
             preset="research",
             available_tools=default_tool_allowlist("research"),
@@ -566,7 +567,7 @@ def test_bash_rejects_paths_outside_project_root(
         preset="research",
         task_name="Root Task",
         description="Reject outside paths.",
-        task_markdown=render_root_task_markdown(request.user_prompt),
+        task_markdown=render_task_markdown(request.user_prompt),
         tools_markdown=render_tools_markdown(
             preset="research",
             available_tools=default_tool_allowlist("research"),
@@ -641,7 +642,7 @@ def test_read_file_supports_line_slices(
         preset="research",
         task_name="Root Task",
         description="Read lines.",
-        task_markdown=render_root_task_markdown(request.user_prompt),
+        task_markdown=render_task_markdown(request.user_prompt),
         tools_markdown=render_tools_markdown(
             preset="research",
             available_tools=default_tool_allowlist("research"),
@@ -691,7 +692,7 @@ def test_edit_file_replaces_anchored_text_in_publish(
         preset="writer",
         task_name="Root Task",
         description="Edit publish output.",
-        task_markdown=render_root_task_markdown(request.user_prompt),
+        task_markdown=render_task_markdown(request.user_prompt),
         tools_markdown=render_tools_markdown(
             preset="writer",
             available_tools=default_tool_allowlist("writer"),
@@ -749,7 +750,7 @@ def test_edit_file_inserts_into_scratch_without_full_rewrite(
         preset="research",
         task_name="Root Task",
         description="Edit scratch note.",
-        task_markdown=render_root_task_markdown(request.user_prompt),
+        task_markdown=render_task_markdown(request.user_prompt),
         tools_markdown=render_tools_markdown(
             preset="research",
             available_tools=default_tool_allowlist("research"),
@@ -789,3 +790,231 @@ def test_edit_file_inserts_into_scratch_without_full_rewrite(
     )
 
     assert read_result["content"] == "top\nmiddle\nbottom\n"
+
+
+def test_apply_patch_replaces_multiline_paragraph_in_publish(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-apply-patch-paragraph",
+        user_prompt="Patch publish output",
+        preset="writer",
+    )
+    write_result = execute_model_tool(
+        session,
+        "write_file",
+        {
+            "path": "publish/summary.md",
+            "content": "Intro\nThe old thesis line 1.\nThe old thesis line 2.\nOutro\n",
+        },
+    )
+
+    patch_result = execute_model_tool(
+        session,
+        "apply_patch",
+        {
+            "patch": "\n".join(
+                [
+                    "*** Begin Patch",
+                    "*** Update File: publish/summary.md",
+                    "@@",
+                    " Intro",
+                    "-The old thesis line 1.",
+                    "-The old thesis line 2.",
+                    "+The new thesis line 1.",
+                    "+The new thesis line 2.",
+                    " Outro",
+                    "*** End Patch",
+                ]
+            ),
+        },
+    )
+    read_result = execute_model_tool(session, "read_file", {"path": write_result["path"]})
+
+    assert patch_result["operation"] == "patch"
+    assert patch_result["hunks_applied"] == 1
+    assert read_result["content"] == "Intro\nThe new thesis line 1.\nThe new thesis line 2.\nOutro\n"
+    assert patch_result["description"] == "Intro"
+
+
+def test_apply_patch_supports_two_hunks_in_one_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-apply-patch-two-hunks",
+        user_prompt="Patch two sections",
+        preset="research",
+    )
+    write_result = execute_model_tool(
+        session,
+        "write_file",
+        {
+            "path": "scratch/notes.md",
+            "content": "alpha\nbeta\ngamma\ndelta\nepsilon\n",
+        },
+    )
+
+    patch_result = execute_model_tool(
+        session,
+        "apply_patch",
+        {
+            "patch": "\n".join(
+                [
+                    "*** Begin Patch",
+                    "*** Update File: scratch/notes.md",
+                    "@@",
+                    " alpha",
+                    "-beta",
+                    "+BETA",
+                    " gamma",
+                    "@@",
+                    " delta",
+                    "-epsilon",
+                    "+EPSILON",
+                    "*** End Patch",
+                ]
+            ),
+        },
+    )
+    read_result = execute_model_tool(session, "read_file", {"path": write_result["path"]})
+
+    assert patch_result["hunks_applied"] == 2
+    assert read_result["content"] == "alpha\nBETA\ngamma\ndelta\nEPSILON\n"
+
+
+def test_apply_patch_rejects_ambiguous_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-apply-patch-ambiguous",
+        user_prompt="Patch ambiguous note",
+        preset="research",
+    )
+    execute_model_tool(
+        session,
+        "write_file",
+        {
+            "path": "scratch/notes.md",
+            "content": "start\nshared\nold\nend\nstart\nshared\nold\nend\n",
+        },
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        execute_model_tool(
+            session,
+            "apply_patch",
+            {
+                "patch": "\n".join(
+                    [
+                        "*** Begin Patch",
+                        "*** Update File: scratch/notes.md",
+                        "@@",
+                        " start",
+                        " shared",
+                        "-old",
+                        "+new",
+                        " end",
+                        "*** End Patch",
+                    ]
+                ),
+            },
+        )
+    message = str(exc_info.value)
+    assert "matched multiple locations" in message
+    assert "read_file(path='scratch/notes.md')" in message
+    assert "more specific surrounding lines" in message
+
+
+def test_apply_patch_rejects_missing_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-apply-patch-missing",
+        user_prompt="Patch missing note",
+        preset="research",
+    )
+    execute_model_tool(
+        session,
+        "write_file",
+        {"path": "scratch/notes.md", "content": "alpha\nbeta\ngamma\n"},
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        execute_model_tool(
+            session,
+            "apply_patch",
+            {
+                "patch": "\n".join(
+                    [
+                        "*** Begin Patch",
+                        "*** Update File: scratch/notes.md",
+                        "@@",
+                        " alpha",
+                        "-missing",
+                        "+replacement",
+                        " gamma",
+                        "*** End Patch",
+                    ]
+                ),
+            },
+        )
+    message = str(exc_info.value)
+    assert "context was not found" in message
+    assert "read_file(path='scratch/notes.md')" in message
+    assert "exact current lines" in message
+
+
+def test_apply_patch_is_atomic_when_a_later_hunk_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-apply-patch-atomic",
+        user_prompt="Patch atomically",
+        preset="research",
+    )
+    write_result = execute_model_tool(
+        session,
+        "write_file",
+        {"path": "scratch/notes.md", "content": "alpha\nbeta\ngamma\nomega\n"},
+    )
+
+    with pytest.raises(ValueError, match="context was not found"):
+        execute_model_tool(
+            session,
+            "apply_patch",
+            {
+                "patch": "\n".join(
+                    [
+                        "*** Begin Patch",
+                        "*** Update File: scratch/notes.md",
+                        "@@",
+                        " alpha",
+                        "-beta",
+                        "+BETA",
+                        " gamma",
+                        "@@",
+                        " missing",
+                        "+line",
+                        "*** End Patch",
+                    ]
+                ),
+            },
+        )
+
+    read_result = execute_model_tool(session, "read_file", {"path": write_result["path"]})
+    assert read_result["content"] == "alpha\nbeta\ngamma\nomega\n"
