@@ -17,6 +17,8 @@ from src.harness.artifacts import (
     load_commenter_state,
     mark_commenter_comments_read,
     read_status,
+    read_jsonl,
+    registry_paths,
     unread_commenter_comments,
     write_status,
     write_text_atomic,
@@ -26,6 +28,7 @@ from src.harness.commenter import (
     build_comment_feed_message,
     build_commenter_observation_manifest,
     build_commenter_observation_snapshot,
+    complete_commenter_gate,
     compute_commenter_observation_fingerprint,
     refresh_commenter_for_agent,
 )
@@ -382,6 +385,9 @@ def test_worker_injects_comment_feed_and_marks_comments_read_after_success(
     assert result == 0
     assert rows[0]["read"] is True
     assert any("Comment Feed" in message for message in fake_transport.user_messages)
+    events = _turn_finished_events(run_root)
+    assert len(events) == 1
+    assert events[0]["details"]["tool_count"] == 4
 
 
 def test_worker_leaves_comments_unread_when_model_call_fails(
@@ -402,6 +408,7 @@ def test_worker_leaves_comments_unread_when_model_call_fails(
 
     assert result == 1
     assert rows[0]["read"] is False
+    assert _turn_finished_events(run_root) == []
 
 
 def _iso_from_epoch(epoch: float) -> str:
@@ -511,12 +518,43 @@ def _install_fake_worker_timing(monkeypatch: pytest.MonkeyPatch, clock: _FakeClo
     monkeypatch.setattr(agent_worker_module.time, "monotonic", clock.monotonic)
     monkeypatch.setattr(agent_worker_module.time, "time", clock.time)
     monkeypatch.setattr(agent_worker_module.time, "sleep", clock.sleep)
+    monkeypatch.setattr(agent_worker_module, "COMMENTER_GATE_POLL_SECONDS", 0.0)
 
 
 def _install_fake_transport(monkeypatch: pytest.MonkeyPatch, transport: _SequencedTransport) -> None:
     monkeypatch.setattr(agent_worker_module, "get_model", lambda *_args, **_kwargs: "minimax/MiniMax-M2.7")
     monkeypatch.setattr(agent_worker_module, "resolve_agent_transport", lambda *_args, **_kwargs: "minimax_anthropic")
     monkeypatch.setattr(agent_worker_module, "create_transport", lambda **_kwargs: transport)
+
+
+def _complete_pending_commenter_gate(run_root: Path, agent_id: str) -> None:
+    state = load_commenter_state(run_root, agent_id) or {}
+    gate = state.get("pending_commenter_gate")
+    if not isinstance(gate, dict):
+        return
+    gate_id = str(gate.get("gate_id") or "")
+    if not gate_id or str(gate.get("status") or "") in {"completed", "failed", "skipped"}:
+        return
+    complete_commenter_gate(
+        str(run_root),
+        agent_id,
+        gate_id,
+        status="completed",
+        reason="test_commenter_completed",
+        comments_written=0,
+    )
+
+
+def _auto_complete_commenter_gate(clock: _FakeClock, run_root: Path, agent_id: str) -> None:
+    clock.add_action(lambda _now: _complete_pending_commenter_gate(run_root, agent_id))
+
+
+def _turn_finished_events(run_root: Path) -> list[dict[str, object]]:
+    return [
+        row
+        for row in read_jsonl(registry_paths(run_root)["events_registry"])
+        if row.get("event_type") == "agent_turn_finished"
+    ]
 
 
 def test_worker_first_turn_is_immediate_and_self_writes_do_not_wake_early(
@@ -530,6 +568,7 @@ def test_worker_first_turn_is_immediate_and_self_writes_do_not_wake_early(
 
     _install_fake_worker_timing(monkeypatch, clock)
     _install_fake_transport(monkeypatch, transport)
+    _auto_complete_commenter_gate(clock, run_root, agent_id)
     monkeypatch.setattr(agent_worker_module, "TURN_MAX_PROMPT_GAP_SECONDS", 6.0)
     monkeypatch.setattr(agent_worker_module, "TURN_PACING_POLL_SECONDS", 1.0)
     monkeypatch.setattr(agent_worker_module, "remaining_agent_seconds", lambda *_args, **_kwargs: 9999)
@@ -538,6 +577,33 @@ def test_worker_first_turn_is_immediate_and_self_writes_do_not_wake_early(
 
     assert result == 0
     assert transport.call_times == [start, start + 6.0]
+
+
+def test_worker_waits_for_commenter_gate_before_next_llm_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id, _request = _create_workspace(tmp_path, monkeypatch)
+    clock = _FakeClock()
+    start = clock.monotonic()
+    transport = _SequencedTransport([_scratch_write_turn(), _finish_turn()], clock)
+
+    def _complete_gate_after_delay(now: float) -> None:
+        if transport.call_times and now >= transport.call_times[0] + 3.0:
+            _complete_pending_commenter_gate(run_root, agent_id)
+
+    _install_fake_worker_timing(monkeypatch, clock)
+    _install_fake_transport(monkeypatch, transport)
+    monkeypatch.setattr(agent_worker_module, "COMMENTER_GATE_POLL_SECONDS", 1.0)
+    monkeypatch.setattr(agent_worker_module, "TURN_MAX_PROMPT_GAP_SECONDS", 0.0)
+    monkeypatch.setattr(agent_worker_module, "TURN_PACING_POLL_SECONDS", 1.0)
+    monkeypatch.setattr(agent_worker_module, "remaining_agent_seconds", lambda *_args, **_kwargs: 9999)
+    clock.add_action(_complete_gate_after_delay)
+
+    result = run_agent_worker(str(run_root), agent_id)
+
+    assert result == 0
+    assert transport.call_times == [start, start + 3.0]
 
 
 def test_worker_wakes_early_when_direct_child_status_changes(
@@ -572,6 +638,7 @@ def test_worker_wakes_early_when_direct_child_status_changes(
 
     _install_fake_worker_timing(monkeypatch, clock)
     _install_fake_transport(monkeypatch, transport)
+    _auto_complete_commenter_gate(clock, run_root, agent_id)
     monkeypatch.setattr(agent_worker_module, "TURN_MAX_PROMPT_GAP_SECONDS", 10.0)
     monkeypatch.setattr(agent_worker_module, "TURN_PACING_POLL_SECONDS", 1.0)
     monkeypatch.setattr(agent_worker_module, "remaining_agent_seconds", lambda *_args, **_kwargs: 9999)
@@ -606,6 +673,7 @@ def test_worker_wakes_early_when_commenter_adds_new_feedback(
 
     _install_fake_worker_timing(monkeypatch, clock)
     _install_fake_transport(monkeypatch, transport)
+    _auto_complete_commenter_gate(clock, run_root, agent_id)
     monkeypatch.setattr(agent_worker_module, "TURN_MAX_PROMPT_GAP_SECONDS", 10.0)
     monkeypatch.setattr(agent_worker_module, "TURN_PACING_POLL_SECONDS", 1.0)
     monkeypatch.setattr(agent_worker_module, "remaining_agent_seconds", lambda *_args, **_kwargs: 9999)
@@ -627,6 +695,7 @@ def test_worker_wakes_early_when_soft_time_limit_activates(
 
     _install_fake_worker_timing(monkeypatch, clock)
     _install_fake_transport(monkeypatch, transport)
+    _auto_complete_commenter_gate(clock, run_root, agent_id)
     monkeypatch.setattr(agent_worker_module, "TURN_MAX_PROMPT_GAP_SECONDS", 10.0)
     monkeypatch.setattr(agent_worker_module, "TURN_PACING_POLL_SECONDS", 1.0)
     monkeypatch.setattr(
@@ -655,6 +724,7 @@ def test_worker_soft_stop_second_prompt_contains_finalization_guidance(
 
     _install_fake_worker_timing(monkeypatch, clock)
     _install_fake_transport(monkeypatch, transport)
+    _auto_complete_commenter_gate(clock, run_root, agent_id)
     monkeypatch.setattr(agent_worker_module, "TURN_MAX_PROMPT_GAP_SECONDS", 10.0)
     monkeypatch.setattr(agent_worker_module, "TURN_PACING_POLL_SECONDS", 1.0)
     monkeypatch.setattr(
@@ -696,6 +766,7 @@ def test_worker_calls_immediately_when_previous_turn_already_used_full_deadline(
 
     _install_fake_worker_timing(monkeypatch, clock)
     _install_fake_transport(monkeypatch, transport)
+    _auto_complete_commenter_gate(clock, run_root, agent_id)
     monkeypatch.setattr(agent_worker_module, "TURN_MAX_PROMPT_GAP_SECONDS", 6.0)
     monkeypatch.setattr(agent_worker_module, "TURN_PACING_POLL_SECONDS", 1.0)
     monkeypatch.setattr(agent_worker_module, "remaining_agent_seconds", lambda *_args, **_kwargs: 9999)

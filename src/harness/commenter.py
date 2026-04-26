@@ -38,12 +38,13 @@ from src.shared.llm_manager import get_llm
 from src.shared.model_config import get_model
 
 
-COMMENTER_REFRESH_INTERVAL_SECONDS = 60.0
+COMMENTER_DEFAULT_DELAY_SECONDS = 5.0
 COMMENTER_MAX_FEED_COMMENTS = 3
 COMMENTER_MAX_TOOL_STEPS = 100
 COMMENTER_DEFAULT_READ_MAX_CHARS = 12_000
 COMMENTER_MAX_RENDERED_CHANGED_ENTRIES = 20
 COMMENTER_TERMINAL_STATUSES = {"done", "failed", "blocked", "stale", "cancelled"}
+COMMENTER_GATE_FINISHED_STATUSES = {"completed", "skipped", "failed"}
 COMMENTER_OPERATING_LOG_FILES = {
     "journal.jsonl",
     "tool_history.jsonl",
@@ -73,6 +74,108 @@ class CommenterObservationSnapshot(TypedDict):
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def open_commenter_gate(
+    run_root: str,
+    agent_id: str,
+    *,
+    turn_index: int,
+    tool_count: int,
+    stop_reason: str | None,
+    gate_id: str | None = None,
+) -> dict[str, Any]:
+    state = load_commenter_state(run_root, agent_id) or {}
+    resolved_gate_id = gate_id or f"{agent_id}:{turn_index}:{datetime.now(timezone.utc).timestamp():.6f}"
+    gate = {
+        "gate_id": resolved_gate_id,
+        "turn_index": turn_index,
+        "tool_count": tool_count,
+        "stop_reason": stop_reason or "",
+        "status": "pending",
+        "created_at": _utc_now_iso(),
+        "started_at": "",
+        "completed_at": "",
+        "completion_reason": "",
+        "comments_written": 0,
+        "error": "",
+    }
+    state["pending_commenter_gate"] = gate
+    state["last_pending_commenter_gate_id"] = resolved_gate_id
+    save_commenter_state(run_root, agent_id, state)
+    return gate
+
+
+def mark_commenter_gate_running(run_root: str, agent_id: str, gate_id: str) -> None:
+    state = load_commenter_state(run_root, agent_id) or {}
+    gate = state.get("pending_commenter_gate")
+    if not isinstance(gate, dict) or str(gate.get("gate_id") or "") != gate_id:
+        return
+    if str(gate.get("status") or "") in COMMENTER_GATE_FINISHED_STATUSES:
+        return
+    gate["status"] = "running"
+    gate["started_at"] = _utc_now_iso()
+    state["pending_commenter_gate"] = gate
+    save_commenter_state(run_root, agent_id, state)
+
+
+def complete_commenter_gate(
+    run_root: str,
+    agent_id: str,
+    gate_id: str,
+    *,
+    status: str,
+    reason: str,
+    comments_written: int = 0,
+    error: str = "",
+) -> None:
+    state = load_commenter_state(run_root, agent_id) or {}
+    gate = state.get("pending_commenter_gate")
+    if not isinstance(gate, dict) or str(gate.get("gate_id") or "") != gate_id:
+        gate = {
+            "gate_id": gate_id,
+            "turn_index": 0,
+            "tool_count": 0,
+            "stop_reason": "",
+            "created_at": "",
+            "started_at": "",
+        }
+    gate.update(
+        {
+            "status": status,
+            "completed_at": _utc_now_iso(),
+            "completion_reason": reason,
+            "comments_written": int(comments_written),
+            "error": error,
+        }
+    )
+    state["pending_commenter_gate"] = gate
+    state["last_completed_commenter_gate"] = dict(gate)
+    save_commenter_state(run_root, agent_id, state)
+
+
+def commenter_gate_finished(state: dict[str, Any] | None, gate_id: str) -> bool:
+    if not state:
+        return False
+    for key in ("pending_commenter_gate", "last_completed_commenter_gate"):
+        gate = state.get(key)
+        if not isinstance(gate, dict):
+            continue
+        if str(gate.get("gate_id") or "") != gate_id:
+            continue
+        if str(gate.get("status") or "") in COMMENTER_GATE_FINISHED_STATUSES:
+            return True
+    return False
+
+
+def commenter_gate_payload(state: dict[str, Any] | None, gate_id: str) -> dict[str, Any] | None:
+    if not state:
+        return None
+    for key in ("pending_commenter_gate", "last_completed_commenter_gate"):
+        gate = state.get(key)
+        if isinstance(gate, dict) and str(gate.get("gate_id") or "") == gate_id:
+            return gate
+    return None
 
 
 def _llm_text_content(content: object) -> str:
@@ -370,6 +473,15 @@ def _commenter_inspectable_scope(run_root: str, agent_id: str) -> list[str]:
     )
     scope.extend(child_publish_roots)
     return scope
+
+
+def _commenter_status_is_terminal(run_root: str, agent_id: str, request: HarnessRequest) -> bool:
+    status = read_status(run_root, agent_id)
+    if status == "done" and request.continuous_refinement:
+        record = latest_agent_records(run_root).get(agent_id)
+        if record is None or not record.parent_id:
+            return False
+    return status in COMMENTER_TERMINAL_STATUSES
 
 
 def _build_changed_entries(
@@ -975,7 +1087,7 @@ def refresh_commenter_for_agent(
     transport_name: str | None = None,
     observation_snapshot: CommenterObservationSnapshot | None = None,
 ) -> int:
-    if read_status(run_root, agent_id) in COMMENTER_TERMINAL_STATUSES:
+    if _commenter_status_is_terminal(run_root, agent_id, request):
         return 0
     state = load_commenter_state(run_root, agent_id) or {}
     resolved_model = model_name or get_model("harness", "agent")
@@ -1005,7 +1117,7 @@ def refresh_commenter_for_agent(
         model_name=resolved_model,
         transport_name=resolved_transport,
     )
-    if read_status(run_root, agent_id) in COMMENTER_TERMINAL_STATUSES:
+    if _commenter_status_is_terminal(run_root, agent_id, request):
         return 0
     _record_commenter_turn(
         run_root=run_root,

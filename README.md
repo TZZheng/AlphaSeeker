@@ -63,7 +63,7 @@ Key design choices:
 - **File-based handoff** — agents communicate by writing and reading files, not in-memory state. Every intermediate result is inspectable.
 - **Subprocess isolation** — a crashed or stalled child agent cannot block the pipeline.
 - **Skill packs** — deterministic tools organized by domain: core, equity, macro, commodity.
-- **Commenter sidecar** — a paired reviewer reads each agent's workspace and injects advisory notes into the next turn.
+- **Commenter sidecar** — after each agent turn, a paired reviewer reads changed workspace state and injects advisory notes before that agent's next model call.
 
 ---
 

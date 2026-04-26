@@ -24,6 +24,7 @@ from src.harness.artifacts import (
     load_request,
     read_heartbeat,
     read_jsonl,
+    registry_paths,
     read_status,
     refresh_progress_view,
     save_commenter_state,
@@ -33,9 +34,12 @@ from src.harness.artifacts import (
     write_text_atomic,
 )
 from src.harness.commenter import (
-    COMMENTER_REFRESH_INTERVAL_SECONDS,
+    COMMENTER_DEFAULT_DELAY_SECONDS,
     build_commenter_observation_snapshot,
+    commenter_gate_payload,
+    complete_commenter_gate,
     compute_commenter_observation_fingerprint,
+    mark_commenter_gate_running,
     refresh_commenter_for_agent,
 )
 from src.harness.presets import default_tool_allowlist, visible_skills_for_preset
@@ -66,6 +70,14 @@ class ManagedProcess:
 
 
 @dataclass
+class PendingCommenterRefresh:
+    agent_id: str
+    gate_id: str
+    turn_index: int
+    due_epoch: float
+
+
+@dataclass
 class SupervisorState:
     request: HarnessRequest
     run_root: str
@@ -75,23 +87,15 @@ class SupervisorState:
     launcher: Any
     run_started_at: float
     commenter_tasks: dict[str, asyncio.Task[None]]
+    commenter_schedules: dict[str, PendingCommenterRefresh]
+    processed_commenter_gate_ids: set[str]
     stop_reason: str | None = None
     error: str | None = None
     stop_requested: bool = False
     soft_stop_requested: bool = False
     soft_stop_started_at: float | None = None
     root_last_reviewed_fingerprint: str = ""
-    root_finished_refining_at: float | None = None
-
-
-def _iso_to_epoch(value: str | None) -> float | None:
-    if not value:
-        return None
-    try:
-        normalized = value.replace("Z", "+00:00")
-        return datetime.fromisoformat(normalized).timestamp()
-    except ValueError:
-        return None
+    root_refinement_gate_id: str | None = None
 
 
 async def _default_launch_agent_process(run_root: str, agent_id: str) -> asyncio.subprocess.Process:
@@ -351,11 +355,11 @@ def _read_last_commented_fingerprint(run_root: str, agent_id: str) -> str:
     return str(state.get("last_commented_fingerprint") or "")
 
 
-def _commenter_interval_for_request(request: HarnessRequest) -> float:
+def _commenter_delay_for_request(request: HarnessRequest) -> float:
     override = request.commenter_interval_seconds
-    if override is None or override <= 0:
-        return COMMENTER_REFRESH_INTERVAL_SECONDS
-    return float(override)
+    if override is None:
+        return COMMENTER_DEFAULT_DELAY_SECONDS
+    return max(0.0, float(override))
 
 
 STOP_REQUESTED_FILE = "stop_requested"
@@ -464,16 +468,15 @@ async def _monitor_agents(shared: SupervisorState) -> None:
             )
 
         # Handle root agent completion and refinement loop
-        commenter_interval = _commenter_interval_for_request(shared.request)
         root_status = read_status(shared.run_root, shared.root_agent_id)
         if root_status == "refining" and shared.root_agent_id not in shared.live:
-            # Root finished but is waiting for commenter to produce new content
-            if shared.root_finished_refining_at is not None:
-                elapsed = now_epoch - shared.root_finished_refining_at
-                if elapsed >= commenter_interval:
+            # Root finished a pass and is waiting for commenter feedback from that pass.
+            if shared.root_refinement_gate_id is not None:
+                state = load_commenter_state(shared.run_root, shared.root_agent_id) or {}
+                gate = commenter_gate_payload(state, shared.root_refinement_gate_id)
+                if gate is not None and str(gate.get("status") or "") in {"completed", "failed", "skipped"}:
                     current_fp = _read_last_commented_fingerprint(shared.run_root, shared.root_agent_id)
-                    if current_fp != shared.root_last_reviewed_fingerprint:
-                        # New comments — re-launch root for another pass
+                    if int(gate.get("comments_written") or 0) > 0 and current_fp != shared.root_last_reviewed_fingerprint:
                         shared.root_last_reviewed_fingerprint = current_fp
                         write_status(shared.run_root, shared.root_agent_id, "queued")
                         process = await shared.launcher(shared.run_root, shared.root_agent_id)
@@ -490,14 +493,15 @@ async def _monitor_agents(shared: SupervisorState) -> None:
                             pid=process.pid,
                             started_at=datetime.now(timezone.utc).isoformat(),
                         )
-                        shared.root_finished_refining_at = None
-                    # else: no new comments yet, keep waiting
+                    shared.root_refinement_gate_id = None
         elif root_status in TERMINAL_STATUSES and shared.root_agent_id not in shared.live:
             if root_status == "done" and shared.request.continuous_refinement:
                 # Root finished a pass — enter refinement wait state
                 fp = _read_last_commented_fingerprint(shared.run_root, shared.root_agent_id)
                 shared.root_last_reviewed_fingerprint = fp
-                shared.root_finished_refining_at = now_epoch
+                state = load_commenter_state(shared.run_root, shared.root_agent_id) or {}
+                gate = state.get("pending_commenter_gate")
+                shared.root_refinement_gate_id = str(gate.get("gate_id") or "") if isinstance(gate, dict) else None
                 write_status(shared.run_root, shared.root_agent_id, "refining")
                 # Do NOT stop — wait for commenter to produce new comments
             else:
@@ -512,6 +516,8 @@ async def _run_commenter_refresh(
     shared: SupervisorState,
     agent_id: str,
     observation_snapshot: dict[str, Any],
+    *,
+    gate_id: str,
 ) -> None:
     try:
         written = await asyncio.to_thread(
@@ -526,8 +532,17 @@ async def _run_commenter_refresh(
             AgentEvent(
                 event_type="commenter_refreshed",
                 agent_id=agent_id,
-                details={"comments_written": written},
+                details={"comments_written": written, "commenter_gate_id": gate_id},
             ),
+        )
+        await asyncio.to_thread(
+            complete_commenter_gate,
+            shared.run_root,
+            agent_id,
+            gate_id,
+            status="completed",
+            reason="commenter_refreshed",
+            comments_written=written,
         )
     except Exception as exc:
         state = load_commenter_state(shared.run_root, agent_id) or {}
@@ -539,16 +554,24 @@ async def _run_commenter_refresh(
             AgentEvent(
                 event_type="commenter_failed",
                 agent_id=agent_id,
-                details={"error": state["last_error"]},
+                details={"error": state["last_error"], "commenter_gate_id": gate_id},
             ),
+        )
+        await asyncio.to_thread(
+            complete_commenter_gate,
+            shared.run_root,
+            agent_id,
+            gate_id,
+            status="failed",
+            reason="commenter_failed",
+            error=state["last_error"],
         )
 
 
 async def _monitor_commenters(shared: SupervisorState) -> None:
     while not shared.stop_requested:
-        snapshot = latest_agent_records(shared.run_root)
         now_epoch = time.time()
-        commenter_interval = _commenter_interval_for_request(shared.request)
+        commenter_delay = _commenter_delay_for_request(shared.request)
 
         for agent_id, task in list(shared.commenter_tasks.items()):
             if not task.done():
@@ -557,49 +580,93 @@ async def _monitor_commenters(shared: SupervisorState) -> None:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
-        for agent_id, record in snapshot.items():
-            if record.status in TERMINAL_STATUSES:
-                task = shared.commenter_tasks.pop(agent_id, None)
-                if task is not None:
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await task
+        events = read_jsonl(registry_paths(shared.run_root)["events_registry"])
+        for row in events:
+            if row.get("event_type") != "agent_turn_finished":
                 continue
+            details = row.get("details") if isinstance(row.get("details"), dict) else {}
+            gate_id = str(details.get("commenter_gate_id") or "")
+            agent_id = str(row.get("agent_id") or "")
+            if not gate_id or not agent_id or gate_id in shared.processed_commenter_gate_ids:
+                continue
+            shared.processed_commenter_gate_ids.add(gate_id)
+            state = load_commenter_state(shared.run_root, agent_id) or {}
+            gate = commenter_gate_payload(state, gate_id)
+            if gate is None or str(gate.get("status") or "") in {"completed", "failed", "skipped"}:
+                continue
+            turn_index = int(details.get("turn_index") or gate.get("turn_index") or 0)
+            shared.commenter_schedules[agent_id] = PendingCommenterRefresh(
+                agent_id=agent_id,
+                gate_id=gate_id,
+                turn_index=turn_index,
+                due_epoch=now_epoch + commenter_delay,
+            )
+
+        snapshot = latest_agent_records(shared.run_root)
+        for agent_id, schedule in list(shared.commenter_schedules.items()):
             if agent_id in shared.commenter_tasks:
                 continue
-            fingerprint = compute_commenter_observation_fingerprint(shared.run_root, agent_id)
-            state = load_commenter_state(shared.run_root, agent_id) or {}
-            last_observed = str(state.get("last_observed_fingerprint") or "")
-            if fingerprint != last_observed:
-                state["last_observed_fingerprint"] = fingerprint
-                state["last_changed_at"] = datetime.now(timezone.utc).isoformat()
-                save_commenter_state(shared.run_root, agent_id, state)
-            last_attempted_at = (
-                _iso_to_epoch(str(state.get("last_attempted_at") or ""))
-                or _iso_to_epoch(str(state.get("last_refreshed_at") or ""))
-                or 0.0
-            )
-            last_commented = str(state.get("last_commented_fingerprint") or "")
-            # Skip if agent hasn't actually started running yet
-            agent_started_at = _iso_to_epoch(record.started_at)
-            if agent_started_at is None:
+            if now_epoch < schedule.due_epoch:
                 continue
-            if (
-                fingerprint
-                and fingerprint != last_commented
-                and now_epoch - last_attempted_at >= commenter_interval
-                and now_epoch - agent_started_at >= commenter_interval
-            ):
-                observation_snapshot = build_commenter_observation_snapshot(
+            record = snapshot.get(agent_id)
+            current_status = read_status(shared.run_root, agent_id)
+            root_done_for_refinement = (
+                agent_id == shared.root_agent_id
+                and current_status == "done"
+                and shared.request.continuous_refinement
+            )
+            if record is None or (current_status in TERMINAL_STATUSES and not root_done_for_refinement):
+                await asyncio.to_thread(
+                    complete_commenter_gate,
                     shared.run_root,
                     agent_id,
-                    base_manifest=state.get("last_commented_manifest"),
+                    schedule.gate_id,
+                    status="skipped",
+                    reason="agent_terminal",
                 )
-                state["last_attempted_at"] = datetime.now(timezone.utc).isoformat()
-                save_commenter_state(shared.run_root, agent_id, state)
-                shared.commenter_tasks[agent_id] = asyncio.create_task(
-                    _run_commenter_refresh(shared, agent_id, observation_snapshot)
+                shared.commenter_schedules.pop(agent_id, None)
+                continue
+
+            fingerprint = compute_commenter_observation_fingerprint(shared.run_root, agent_id)
+            state = load_commenter_state(shared.run_root, agent_id) or {}
+            last_commented = str(state.get("last_commented_fingerprint") or "")
+            if not fingerprint or fingerprint == last_commented:
+                await asyncio.to_thread(
+                    complete_commenter_gate,
+                    shared.run_root,
+                    agent_id,
+                    schedule.gate_id,
+                    status="skipped",
+                    reason="no_observation_change",
                 )
+                append_event(
+                    shared.run_root,
+                    AgentEvent(
+                        event_type="commenter_skipped",
+                        agent_id=agent_id,
+                        details={"commenter_gate_id": schedule.gate_id, "reason": "no_observation_change"},
+                    ),
+                )
+                shared.commenter_schedules.pop(agent_id, None)
+                continue
+
+            observation_snapshot = build_commenter_observation_snapshot(
+                shared.run_root,
+                agent_id,
+                base_manifest=state.get("last_commented_manifest"),
+            )
+            state["last_attempted_at"] = datetime.now(timezone.utc).isoformat()
+            save_commenter_state(shared.run_root, agent_id, state)
+            await asyncio.to_thread(mark_commenter_gate_running, shared.run_root, agent_id, schedule.gate_id)
+            shared.commenter_schedules.pop(agent_id, None)
+            shared.commenter_tasks[agent_id] = asyncio.create_task(
+                _run_commenter_refresh(
+                    shared,
+                    agent_id,
+                    observation_snapshot,
+                    gate_id=schedule.gate_id,
+                )
+            )
 
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
@@ -632,6 +699,8 @@ async def _supervise_async(
         launcher=launcher,
         run_started_at=time.time(),
         commenter_tasks={},
+        commenter_schedules={},
+        processed_commenter_gate_ids=set(),
     )
 
     launcher_task = asyncio.create_task(_launch_queued_agents(shared))

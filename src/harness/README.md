@@ -5,7 +5,7 @@
 In backend terms:
 - a "supervisor" is the control loop that launches workers, watches heartbeats, and decides when a run stops
 - a "transport" is the provider-specific API protocol used to talk to a model
-- a "sidecar" is a helper that watches another worker and adds feedback; here the commenter is a supervisor-managed sidecar loop
+- a "sidecar" is a helper that watches another worker and adds feedback; here the commenter is a supervisor-managed reviewer that runs after worker turns
 - a "registry" is append-only run metadata stored under `registry/*.jsonl`
 
 ## Current File Map
@@ -50,7 +50,7 @@ src/harness/
 3. The supervisor launches `python -m src.harness.agent_worker` subprocesses for queued agents.
 4. Each worker rebuilds prompt context from its on-disk workspace, then calls the active transport in `transport.py`.
 5. Model tool calls are executed through `executor.py`, which can spawn children, write/edit files, run a small shell allowlist, or invoke deterministic skills from enabled packs.
-6. `commenter.py` periodically scans each agent workspace and injects a short `Comment Feed` on later turns.
+6. After each successful worker turn, `commenter.py` reviews changed workspace state after a configurable delay and injects a short `Comment Feed` before that worker's next model call.
 7. The run finishes when the root agent reaches a terminal status. A successful run is one where the root reaches `done` and `publish/final.md` exists.
 
 ## Public API
@@ -85,6 +85,7 @@ Important `HarnessRequest` fields:
 - `stale_heartbeat_seconds`: heartbeat timeout before an agent is marked `stale`.
 - `available_skill_packs`: enabled packs from `core`, `equity`, `macro`, `commodity`. If omitted, the runtime enables all four.
 - `continuous_refinement`: after a `done` root pass, wait for fresh commenter feedback and rerun the root agent.
+- `commenter_interval_seconds`: post-turn commenter delay. `None` uses 5 seconds; `0` runs as soon as the supervisor observes the completed turn.
 - `resume_from_run_root`: reopen an existing run directory and relaunch unfinished work.
 
 `HarnessResponse` returns:
@@ -118,6 +119,7 @@ Current defaults:
 - `max_live_children_per_parent=8`
 - `per_agent_wall_clock_seconds=1800`
 - `stale_heartbeat_seconds=45`
+- `commenter_interval_seconds=None`, which means a 5-second post-turn commenter delay
 - `available_skill_packs=["core", "equity", "macro", "commodity"]` when omitted
 
 ## Tool Surface
@@ -228,7 +230,7 @@ Important runtime conventions:
 - When wall-clock budget is exhausted, or the TUI writes `stop_requested`, the supervisor first requests a soft stop.
 - The runtime then gives agents a 60-second grace window to finish publishing before forcing failure.
 - `resume_from_run_root` reloads the original request from disk and only relaunches unfinished agents.
-- `continuous_refinement=True` keeps the root in `refining` after `done` and relaunches it when the commenter produces fresh feedback.
+- `continuous_refinement=True` keeps the root in `refining` after `done` and relaunches it when the post-turn commenter produces fresh feedback.
 
 ## Benchmark Support
 

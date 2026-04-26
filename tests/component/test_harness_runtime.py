@@ -8,20 +8,23 @@ import pytest
 import src.harness.runtime as runtime_module
 from src.harness.artifacts import (
     agent_workspace_paths,
+    append_event,
     create_agent_workspace,
     latest_agent_records,
+    load_commenter_state,
     load_request,
     read_jsonl,
     registry_paths,
     write_text_atomic,
     write_status,
 )
+from src.harness.commenter import open_commenter_gate
 from src.harness.executor import create_or_load_session, execute_model_tool
 from src.harness.presets import default_tool_allowlist
 from src.harness.prompt_builder import render_tools_markdown
 from src.harness.registry import build_skill_registry
 from src.harness.runtime import run_harness
-from src.harness.types import HarnessRequest
+from src.harness.types import AgentEvent, HarnessRequest
 
 pytestmark = pytest.mark.component
 
@@ -51,6 +54,32 @@ def _complete_agent(run_root: str, agent_id: str, *, body: str) -> None:
     write_text_atomic(paths["publish_index"], "- final.md: Final answer\n")
     write_text_atomic(paths["publish_final"], body)
     write_status(run_root, agent_id, "done")
+
+
+def _emit_turn_finished(run_root: str, agent_id: str, *, turn_index: int = 1) -> str:
+    gate = open_commenter_gate(
+        run_root,
+        agent_id,
+        turn_index=turn_index,
+        tool_count=1,
+        stop_reason="tool_use",
+    )
+    gate_id = str(gate["gate_id"])
+    append_event(
+        run_root,
+        AgentEvent(
+            event_type="agent_turn_finished",
+            agent_id=agent_id,
+            details={
+                "turn_index": turn_index,
+                "tool_count": 1,
+                "stop_reason": "tool_use",
+                "commenter_gate_id": gate_id,
+                "status_after_turn": "running",
+            },
+        ),
+    )
+    return gate_id
 
 
 def test_run_harness_completes_with_root_publish(
@@ -424,13 +453,16 @@ def test_root_failure_cancels_live_descendants(
     assert records["agent_child"].status == "cancelled"
 
 
-def test_run_harness_schedules_commenter_refreshes_on_state_change(
+def test_commenter_default_delay_is_five_seconds() -> None:
+    assert runtime_module._commenter_delay_for_request(HarnessRequest(user_prompt="Analyze AAPL")) == 5.0
+
+
+def test_run_harness_does_not_schedule_commenter_from_file_change_alone(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("src.harness.runtime.POLL_INTERVAL_SECONDS", 0.05)
-    monkeypatch.setattr("src.harness.runtime.COMMENTER_REFRESH_INTERVAL_SECONDS", 0.0)
     commenter_calls: list[dict[str, object]] = []
 
     def _fake_refresh(run_root: str, agent_id: str, request, *, model_name=None, transport_name=None, observation_snapshot=None):
@@ -448,6 +480,7 @@ def test_run_harness_schedules_commenter_refreshes_on_state_change(
         process = _FakeProcess(4001)
 
         async def _runner() -> None:
+            write_status(run_root, agent_id, "running")
             await asyncio.sleep(0.08)
             write_text_atomic(
                 agent_workspace_paths(run_root, agent_id)["scratch_root"] / "note.md",
@@ -463,6 +496,61 @@ def test_run_harness_schedules_commenter_refreshes_on_state_change(
     response = run_harness(
         HarnessRequest(
             user_prompt="Analyze AAPL",
+            commenter_interval_seconds=0,
+            wall_clock_budget_seconds=5,
+        ),
+        launch_agent_process=_launcher,
+    )
+
+    assert response.status == "completed"
+    assert commenter_calls == []
+
+
+def test_run_harness_schedules_commenter_after_turn_finished_event(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("src.harness.runtime.POLL_INTERVAL_SECONDS", 0.05)
+    commenter_calls: list[dict[str, object]] = []
+
+    def _fake_refresh(run_root: str, agent_id: str, request, *, model_name=None, transport_name=None, observation_snapshot=None):
+        commenter_calls.append(
+            {
+                "agent_id": agent_id,
+                "snapshot": observation_snapshot,
+            }
+        )
+        return 1
+
+    monkeypatch.setattr("src.harness.runtime.refresh_commenter_for_agent", _fake_refresh)
+
+    async def _launcher(run_root: str, agent_id: str):
+        process = _FakeProcess(4002)
+
+        async def _runner() -> None:
+            write_status(run_root, agent_id, "running")
+            write_text_atomic(
+                agent_workspace_paths(run_root, agent_id)["scratch_root"] / "note.md",
+                "new scratch state\n",
+            )
+            gate_id = _emit_turn_finished(run_root, agent_id)
+            for _ in range(40):
+                state = load_commenter_state(run_root, agent_id) or {}
+                gate = state.get("pending_commenter_gate")
+                if isinstance(gate, dict) and gate.get("gate_id") == gate_id and gate.get("status") == "completed":
+                    break
+                await asyncio.sleep(0.05)
+            _complete_agent(run_root, agent_id, body="# Final\n\nRoot answer.\n")
+            process.returncode = 0
+
+        asyncio.create_task(_runner())
+        return process
+
+    response = run_harness(
+        HarnessRequest(
+            user_prompt="Analyze AAPL",
+            commenter_interval_seconds=0,
             wall_clock_budget_seconds=5,
         ),
         launch_agent_process=_launcher,
@@ -479,3 +567,53 @@ def test_run_harness_schedules_commenter_refreshes_on_state_change(
         if isinstance(snapshot, dict)
         for entry in list(snapshot.get("changed_entries") or [])
     )
+
+
+def test_commenter_failure_completes_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("src.harness.runtime.POLL_INTERVAL_SECONDS", 0.05)
+    completed_gate: dict[str, object] = {}
+
+    def _failing_refresh(*_args, **_kwargs):
+        raise RuntimeError("commenter failed in test")
+
+    monkeypatch.setattr("src.harness.runtime.refresh_commenter_for_agent", _failing_refresh)
+
+    async def _launcher(run_root: str, agent_id: str):
+        process = _FakeProcess(4003)
+
+        async def _runner() -> None:
+            write_status(run_root, agent_id, "running")
+            write_text_atomic(
+                agent_workspace_paths(run_root, agent_id)["scratch_root"] / "note.md",
+                "new scratch state\n",
+            )
+            gate_id = _emit_turn_finished(run_root, agent_id)
+            for _ in range(40):
+                state = load_commenter_state(run_root, agent_id) or {}
+                gate = state.get("pending_commenter_gate")
+                if isinstance(gate, dict) and gate.get("gate_id") == gate_id and gate.get("status") == "failed":
+                    completed_gate.update(gate)
+                    break
+                await asyncio.sleep(0.05)
+            _complete_agent(run_root, agent_id, body="# Final\n\nRoot answer.\n")
+            process.returncode = 0
+
+        asyncio.create_task(_runner())
+        return process
+
+    response = run_harness(
+        HarnessRequest(
+            user_prompt="Analyze AAPL",
+            commenter_interval_seconds=0,
+            wall_clock_budget_seconds=5,
+        ),
+        launch_agent_process=_launcher,
+    )
+
+    assert response.status == "completed"
+    assert completed_gate["status"] == "failed"
+    assert "commenter failed in test" in str(completed_gate["error"])

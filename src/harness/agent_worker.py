@@ -19,6 +19,7 @@ from src.harness.artifacts import (
     append_event,
     append_transcript_entry,
     latest_agent_records,
+    load_commenter_state,
     load_transport_state,
     load_request,
     mark_commenter_comments_read,
@@ -31,6 +32,7 @@ from src.harness.artifacts import (
     write_status,
 )
 from src.harness.commenter import build_comment_feed_message
+from src.harness.commenter import commenter_gate_finished, open_commenter_gate
 from src.harness.executor import TERMINAL_STATUSES, create_or_load_session, execute_agent_command, execute_model_tool, model_tool_specs
 from src.harness.presets import visible_skills_for_preset
 from src.harness.prompt_builder import build_agent_prompt_bundle
@@ -49,6 +51,7 @@ MAX_CONSECUTIVE_ERRORS = 4
 MAX_IDLE_RETRIES = 2
 TURN_MAX_PROMPT_GAP_SECONDS = 60.0
 TURN_PACING_POLL_SECONDS = 1.0
+COMMENTER_GATE_POLL_SECONDS = 0.5
 
 
 def _content_to_text(content: object) -> str:
@@ -228,6 +231,50 @@ def _wait_for_next_turn_window(
             time.sleep(sleep_seconds)
 
 
+def _wait_for_commenter_gate(run_root: str, agent_id: str, *, gate_id: str) -> None:
+    while True:
+        if read_status(run_root, agent_id) in TERMINAL_STATUSES:
+            return
+        if commenter_gate_finished(load_commenter_state(run_root, agent_id), gate_id):
+            return
+        time.sleep(COMMENTER_GATE_POLL_SECONDS)
+
+
+def _record_successful_turn_finished(
+    run_root: str,
+    agent_id: str,
+    *,
+    parent_id: str,
+    turn_index: int,
+    tool_count: int,
+    stop_reason: str | None,
+) -> str:
+    gate = open_commenter_gate(
+        run_root,
+        agent_id,
+        turn_index=turn_index,
+        tool_count=tool_count,
+        stop_reason=stop_reason,
+    )
+    gate_id = str(gate["gate_id"])
+    append_event(
+        run_root,
+        AgentEvent(
+            event_type="agent_turn_finished",
+            agent_id=agent_id,
+            parent_id=parent_id,
+            details={
+                "turn_index": turn_index,
+                "tool_count": tool_count,
+                "stop_reason": stop_reason or "",
+                "commenter_gate_id": gate_id,
+                "status_after_turn": read_status(run_root, agent_id),
+            },
+        ),
+    )
+    return gate_id
+
+
 def run_agent_worker(run_root: str, agent_id: str) -> int:
     request = load_request(run_root)
     record = latest_agent_records(run_root).get(agent_id)
@@ -285,12 +332,19 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
     last_turn_started_monotonic: float | None = None
     last_turn_started_epoch: float | None = None
     last_soft_time_limit_active = False
+    successful_turn_index = 0
+    pending_commenter_gate_id: str | None = None
 
     try:
         while True:
             status = read_status(run_root, agent_id)
             if status in TERMINAL_STATUSES:
                 break
+            if pending_commenter_gate_id is not None:
+                _wait_for_commenter_gate(run_root, agent_id, gate_id=pending_commenter_gate_id)
+                pending_commenter_gate_id = None
+                if read_status(run_root, agent_id) in TERMINAL_STATUSES:
+                    break
             if last_turn_started_monotonic is not None and last_turn_started_epoch is not None:
                 should_continue, last_soft_time_limit_active = _wait_for_next_turn_window(
                     run_root,
@@ -355,6 +409,15 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
                             parent_id=record.parent_id,
                             details={"tool": command.tool, "result": result},
                         ),
+                    )
+                    successful_turn_index += 1
+                    pending_commenter_gate_id = _record_successful_turn_finished(
+                        run_root,
+                        agent_id,
+                        parent_id=record.parent_id,
+                        turn_index=successful_turn_index,
+                        tool_count=1,
+                        stop_reason=None,
                     )
                     consecutive_errors = 0
                     idle_retries = 0
@@ -544,6 +607,15 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
                     )
                 if transport is not None and tool_results:
                     transport.append_tool_results(tool_results)
+                successful_turn_index += 1
+                pending_commenter_gate_id = _record_successful_turn_finished(
+                    run_root,
+                    agent_id,
+                    parent_id=record.parent_id,
+                    turn_index=successful_turn_index,
+                    tool_count=len(tool_results),
+                    stop_reason=turn.stop_reason,
+                )
                 consecutive_errors = 0
                 idle_retries = 0
                 if read_status(run_root, agent_id) in TERMINAL_STATUSES:
