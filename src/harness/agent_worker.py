@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from datetime import datetime
 import json
 import os
-from pathlib import Path
 import re
 import threading
 import time
@@ -52,6 +52,47 @@ MAX_IDLE_RETRIES = 2
 TURN_MAX_PROMPT_GAP_SECONDS = 60.0
 TURN_PACING_POLL_SECONDS = 1.0
 COMMENTER_GATE_POLL_SECONDS = 0.5
+
+
+@dataclass
+class WorkerRuntime:
+    request: Any
+    record: Any
+    session: Any
+    model_name: str
+    transport_name: str
+    llm: Any = None
+    transport: Any = None
+
+
+@dataclass
+class WorkerLoopState:
+    consecutive_errors: int = 0
+    idle_retries: int = 0
+    previous_error: str | None = None
+    soft_finalize_logged: bool = False
+    last_turn_started_monotonic: float | None = None
+    last_turn_started_epoch: float | None = None
+    last_soft_time_limit_active: bool = False
+    successful_turn_index: int = 0
+    pending_commenter_gate_id: str | None = None
+
+
+@dataclass
+class TurnPrompt:
+    system_prompt: str
+    user_prompt: str
+    comment_feed: str | None
+    injected_comment_count: int
+
+
+@dataclass
+class NativeTurnPreparation:
+    system_prompt: str
+    user_prompt: str
+    tool_specs: list[dict[str, Any]]
+    hard_overflow: bool
+    previous_error: str | None = None
 
 
 def _content_to_text(content: object) -> str:
@@ -275,7 +316,7 @@ def _record_successful_turn_finished(
     return gate_id
 
 
-def run_agent_worker(run_root: str, agent_id: str) -> int:
+def _load_worker_session(run_root: str, agent_id: str) -> tuple[Any, Any, Any]:
     request = load_request(run_root)
     record = latest_agent_records(run_root).get(agent_id)
     if record is None:
@@ -286,19 +327,17 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
         agent_id=agent_id,
         preset=record.preset,
     )
+    return request, record, session
 
-    stop_event = threading.Event()
-    heartbeat_thread = threading.Thread(
-        target=_heartbeat_loop,
-        args=(run_root, agent_id, stop_event),
-        daemon=True,
-    )
 
-    write_pid(run_root, agent_id, os.getpid())
-    write_status(run_root, agent_id, "running")
-    append_event(run_root, AgentEvent(event_type="worker_started", agent_id=agent_id, parent_id=record.parent_id))
-    heartbeat_thread.start()
-
+def _build_worker_runtime(
+    run_root: str,
+    agent_id: str,
+    *,
+    request: Any,
+    record: Any,
+    session: Any,
+) -> WorkerRuntime:
     model_name = get_model("harness", "agent")
     transport_name = resolve_agent_transport(request.agent_transport, model_name)
     persisted_transport = load_transport_state(run_root, agent_id)
@@ -325,342 +364,568 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
         transport.ensure_initialized("")
         transport.update_system_prompt(system_prompt)
 
-    consecutive_errors = 0
-    idle_retries = 0
-    previous_error: str | None = None
-    soft_finalize_logged = False
-    last_turn_started_monotonic: float | None = None
-    last_turn_started_epoch: float | None = None
-    last_soft_time_limit_active = False
-    successful_turn_index = 0
-    pending_commenter_gate_id: str | None = None
+    return WorkerRuntime(
+        request=request,
+        record=record,
+        session=session,
+        model_name=model_name,
+        transport_name=transport_name,
+        llm=llm,
+        transport=transport,
+    )
+
+
+def _start_worker_lifecycle(
+    run_root: str,
+    agent_id: str,
+    *,
+    parent_id: str,
+) -> tuple[threading.Event, threading.Thread]:
+    stop_event = threading.Event()
+    heartbeat_thread = threading.Thread(
+        target=_heartbeat_loop,
+        args=(run_root, agent_id, stop_event),
+        daemon=True,
+    )
+
+    write_pid(run_root, agent_id, os.getpid())
+    write_status(run_root, agent_id, "running")
+    append_event(run_root, AgentEvent(event_type="worker_started", agent_id=agent_id, parent_id=parent_id))
+    heartbeat_thread.start()
+    return stop_event, heartbeat_thread
+
+
+def _stop_worker_lifecycle(stop_event: threading.Event, heartbeat_thread: threading.Thread) -> None:
+    stop_event.set()
+    heartbeat_thread.join(timeout=1.0)
+
+
+def _wait_before_next_turn(run_root: str, agent_id: str, runtime: WorkerRuntime, state: WorkerLoopState) -> bool:
+    if read_status(run_root, agent_id) in TERMINAL_STATUSES:
+        return False
+    if state.pending_commenter_gate_id is not None:
+        _wait_for_commenter_gate(run_root, agent_id, gate_id=state.pending_commenter_gate_id)
+        state.pending_commenter_gate_id = None
+        if read_status(run_root, agent_id) in TERMINAL_STATUSES:
+            return False
+    if state.last_turn_started_monotonic is None or state.last_turn_started_epoch is None:
+        return True
+
+    should_continue, state.last_soft_time_limit_active = _wait_for_next_turn_window(
+        run_root,
+        agent_id,
+        request=runtime.request,
+        previous_turn_started_monotonic=state.last_turn_started_monotonic,
+        previous_turn_started_epoch=state.last_turn_started_epoch,
+        soft_time_limit_was_active=state.last_soft_time_limit_active,
+    )
+    if not should_continue:
+        return False
+    return read_status(run_root, agent_id) not in TERMINAL_STATUSES
+
+
+def _soft_time_limit_active(run_root: str, agent_id: str, runtime: WorkerRuntime, state: WorkerLoopState) -> bool:
+    remaining_agent = remaining_agent_seconds(runtime.request, run_root, agent_id)
+    if remaining_agent <= 0 and not state.soft_finalize_logged:
+        append_event(
+            run_root,
+            AgentEvent(
+                event_type="soft_finalize_requested",
+                agent_id=agent_id,
+                parent_id=runtime.record.parent_id,
+                details={"reason": "soft_time_limit_reached"},
+            ),
+        )
+        state.soft_finalize_logged = True
+    return remaining_agent <= 0
+
+
+def _build_turn_prompt(runtime: WorkerRuntime, state: WorkerLoopState, *, soft_stop_active: bool) -> TurnPrompt:
+    comment_feed, injected_comment_count = build_comment_feed_message(runtime.session.run_root, runtime.session.agent_id)
+    prompt_bundle = _current_prompt_bundle(
+        runtime.session,
+        transport_name=runtime.transport_name,
+        previous_error=state.previous_error,
+        comment_feed=comment_feed,
+        soft_stop_active=soft_stop_active,
+    )
+    return TurnPrompt(
+        system_prompt=prompt_bundle.system_prompt,
+        user_prompt=prompt_bundle.user_prompt,
+        comment_feed=comment_feed,
+        injected_comment_count=injected_comment_count,
+    )
+
+
+def _mark_successful_turn(
+    run_root: str,
+    agent_id: str,
+    runtime: WorkerRuntime,
+    state: WorkerLoopState,
+    *,
+    tool_count: int,
+    stop_reason: str | None,
+) -> None:
+    state.successful_turn_index += 1
+    state.pending_commenter_gate_id = _record_successful_turn_finished(
+        run_root,
+        agent_id,
+        parent_id=runtime.record.parent_id,
+        turn_index=state.successful_turn_index,
+        tool_count=tool_count,
+        stop_reason=stop_reason,
+    )
+    state.consecutive_errors = 0
+    state.idle_retries = 0
+
+
+def _record_turn_start(state: WorkerLoopState, *, soft_time_limit_active: bool) -> None:
+    state.last_turn_started_monotonic = time.monotonic()
+    state.last_turn_started_epoch = time.time()
+    state.last_soft_time_limit_active = soft_time_limit_active
+
+
+def _execute_text_json_turn(
+    run_root: str,
+    agent_id: str,
+    runtime: WorkerRuntime,
+    state: WorkerLoopState,
+    prompt: TurnPrompt,
+    *,
+    soft_time_limit_active: bool,
+) -> None:
+    _record_turn_start(state, soft_time_limit_active=soft_time_limit_active)
+    response = runtime.llm.invoke(
+        [
+            SystemMessage(content=prompt.system_prompt),
+            HumanMessage(content=prompt.user_prompt),
+        ]
+    )
+    raw_text = _content_to_text(response.content)
+    payload = _extract_json_object(raw_text)
+    command = AgentCommand.model_validate(payload)
+    if prompt.injected_comment_count:
+        mark_commenter_comments_read(run_root, agent_id, prompt.injected_comment_count)
+    result = execute_agent_command(runtime.session, command)
+    append_event(
+        run_root,
+        AgentEvent(
+            event_type="tool_completed",
+            agent_id=agent_id,
+            parent_id=runtime.record.parent_id,
+            details={"tool": command.tool, "result": result},
+        ),
+    )
+    _mark_successful_turn(
+        run_root,
+        agent_id,
+        runtime,
+        state,
+        tool_count=1,
+        stop_reason=None,
+    )
+
+
+def _record_history_compaction_soft_overflow(
+    run_root: str,
+    agent_id: str,
+    runtime: WorkerRuntime,
+    *,
+    estimated_before: int,
+    estimated_after: int,
+    compacted_user_turns: int,
+) -> None:
+    append_transcript_entry(
+        run_root,
+        agent_id,
+        {
+            "kind": "history_compaction_soft_overflow",
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "estimated_input_tokens_before": estimated_before,
+            "estimated_input_tokens_after": estimated_after,
+            "soft_budget_tokens": 170000,
+            "hard_context_window_tokens": 200000,
+            "compacted_user_turns": compacted_user_turns,
+        },
+    )
+    append_event(
+        run_root,
+        AgentEvent(
+            event_type="history_compaction_soft_overflow",
+            agent_id=agent_id,
+            parent_id=runtime.record.parent_id,
+            details={
+                "estimated_input_tokens_before": estimated_before,
+                "estimated_input_tokens_after": estimated_after,
+                "soft_budget_tokens": 170000,
+                "hard_context_window_tokens": 200000,
+                "compacted_user_turns": compacted_user_turns,
+            },
+        ),
+    )
+
+
+def _record_history_compaction_hard_overflow(
+    run_root: str,
+    agent_id: str,
+    runtime: WorkerRuntime,
+    *,
+    previous_error: str,
+    estimated_before: int,
+    estimated_after: int,
+    compacted_user_turns: int,
+) -> None:
+    append_transcript_entry(
+        run_root,
+        agent_id,
+        {
+            "kind": "history_compaction_hard_overflow",
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "estimated_input_tokens_before": estimated_before,
+            "estimated_input_tokens_after": estimated_after,
+            "soft_budget_tokens": 170000,
+            "hard_context_window_tokens": 200000,
+            "compacted_user_turns": compacted_user_turns,
+            "error": previous_error,
+        },
+    )
+    append_event(
+        run_root,
+        AgentEvent(
+            event_type="history_compaction_hard_overflow",
+            agent_id=agent_id,
+            parent_id=runtime.record.parent_id,
+            details={
+                "estimated_input_tokens_before": estimated_before,
+                "estimated_input_tokens_after": estimated_after,
+                "soft_budget_tokens": 170000,
+                "hard_context_window_tokens": 200000,
+                "compacted_user_turns": compacted_user_turns,
+            },
+        ),
+    )
+
+
+def _prepare_native_turn(
+    run_root: str,
+    agent_id: str,
+    runtime: WorkerRuntime,
+    state: WorkerLoopState,
+    prompt: TurnPrompt,
+    *,
+    soft_time_limit_active: bool,
+) -> NativeTurnPreparation:
+    tool_specs = model_tool_specs(runtime.session)
+    compaction_changed_any = False
+    estimated_before = 0
+    estimated_after = 0
+    compacted_user_turns = 0
+    soft_overflow = False
+    hard_overflow = False
+    system_prompt = prompt.system_prompt
+    user_prompt = prompt.user_prompt
+
+    while True:
+        preflight = preflight_history_compaction(
+            transport_name=runtime.transport_name,
+            run_root=run_root,
+            agent_id=agent_id,
+            model_name=runtime.model_name,
+            system_prompt=system_prompt,
+            pending_user_prompt=user_prompt,
+            tool_specs=tool_specs,
+        )
+        compaction_changed_any = compaction_changed_any or preflight.compaction_changed
+        if estimated_before == 0:
+            estimated_before = preflight.estimated_input_tokens_before
+        estimated_after = preflight.estimated_input_tokens_after
+        compacted_user_turns = preflight.compacted_user_turns
+        soft_overflow = preflight.soft_overflow
+        hard_overflow = preflight.hard_overflow
+        if not preflight.compaction_changed:
+            break
+        prompt_bundle = _current_prompt_bundle(
+            runtime.session,
+            transport_name=runtime.transport_name,
+            previous_error=state.previous_error,
+            comment_feed=prompt.comment_feed,
+            soft_stop_active=soft_time_limit_active,
+        )
+        system_prompt = prompt_bundle.system_prompt
+        user_prompt = prompt_bundle.user_prompt
+
+    _persist_history_compaction_state(
+        run_root,
+        agent_id,
+        compacted_user_turns=compacted_user_turns,
+        estimated_input_tokens_before=estimated_before,
+        estimated_input_tokens_after=estimated_after,
+        compaction_applied=compaction_changed_any,
+        soft_overflow=soft_overflow,
+        hard_overflow=hard_overflow,
+    )
+    if soft_overflow:
+        _record_history_compaction_soft_overflow(
+            run_root,
+            agent_id,
+            runtime,
+            estimated_before=estimated_before,
+            estimated_after=estimated_after,
+            compacted_user_turns=compacted_user_turns,
+        )
+    if hard_overflow:
+        previous_error = (
+            "Next request exceeds the hard input context window even after full transcript compaction. "
+            f"Estimated input tokens: {estimated_after}. Hard window: 200000."
+        )
+        _record_history_compaction_hard_overflow(
+            run_root,
+            agent_id,
+            runtime,
+            previous_error=previous_error,
+            estimated_before=estimated_before,
+            estimated_after=estimated_after,
+            compacted_user_turns=compacted_user_turns,
+        )
+        write_status(run_root, agent_id, "blocked")
+        return NativeTurnPreparation(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            tool_specs=tool_specs,
+            hard_overflow=True,
+            previous_error=previous_error,
+        )
+
+    return NativeTurnPreparation(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        tool_specs=tool_specs,
+        hard_overflow=False,
+    )
+
+
+def _record_idle_turn(run_root: str, agent_id: str, runtime: WorkerRuntime, state: WorkerLoopState, turn) -> str:
+    state.idle_retries += 1
+    state.previous_error = "Model returned no tool call. Use an available tool or set_status."
+    append_event(
+        run_root,
+        AgentEvent(
+            event_type="worker_idle",
+            agent_id=agent_id,
+            parent_id=runtime.record.parent_id,
+            details={
+                "stop_reason": turn.stop_reason or "",
+                "text": "\n".join(turn.text_blocks)[:400],
+            },
+        ),
+    )
+    if state.idle_retries > MAX_IDLE_RETRIES:
+        write_status(run_root, agent_id, "blocked")
+        state.previous_error = "Model repeatedly failed to call a tool."
+        return "stop"
+    return "continue"
+
+
+def _execute_model_tool_calls(
+    run_root: str,
+    agent_id: str,
+    runtime: WorkerRuntime,
+    tool_calls: list[Any],
+) -> list[dict[str, Any]]:
+    tool_results: list[dict[str, Any]] = []
+    for tool_call in tool_calls:
+        try:
+            result = execute_model_tool(runtime.session, tool_call.name, tool_call.arguments)
+            append_event(
+                run_root,
+                AgentEvent(
+                    event_type="tool_completed",
+                    agent_id=agent_id,
+                    parent_id=runtime.record.parent_id,
+                    details={"tool": tool_call.name, "result": result},
+                ),
+            )
+        except Exception as exc:
+            result = {
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            append_event(
+                run_root,
+                AgentEvent(
+                    event_type="tool_failed",
+                    agent_id=agent_id,
+                    parent_id=runtime.record.parent_id,
+                    details={
+                        "tool": tool_call.name,
+                        "arguments": tool_call.arguments,
+                        "error": result["error"],
+                    },
+                ),
+            )
+        tool_results.append(
+            {
+                "call_id": tool_call.call_id,
+                "name": tool_call.name,
+                "arguments": tool_call.arguments,
+                "result": result,
+            }
+        )
+    return tool_results
+
+
+def _execute_native_turn(
+    run_root: str,
+    agent_id: str,
+    runtime: WorkerRuntime,
+    state: WorkerLoopState,
+    prompt: TurnPrompt,
+    prepared: NativeTurnPreparation,
+    *,
+    soft_time_limit_active: bool,
+) -> str:
+    runtime.transport.update_system_prompt(prepared.system_prompt)
+    runtime.transport.append_user_text(prepared.user_prompt)
+    _record_turn_start(state, soft_time_limit_active=soft_time_limit_active)
+    turn = runtime.transport.execute_turn(prepared.tool_specs)
+    if prompt.injected_comment_count:
+        mark_commenter_comments_read(run_root, agent_id, prompt.injected_comment_count)
+    if not turn.tool_calls:
+        return _record_idle_turn(run_root, agent_id, runtime, state, turn)
+
+    tool_results = _execute_model_tool_calls(run_root, agent_id, runtime, turn.tool_calls)
+    if tool_results:
+        runtime.transport.append_tool_results(tool_results)
+    _mark_successful_turn(
+        run_root,
+        agent_id,
+        runtime,
+        state,
+        tool_count=len(tool_results),
+        stop_reason=turn.stop_reason,
+    )
+    return "completed"
+
+
+def _handle_worker_turn_error(
+    run_root: str,
+    agent_id: str,
+    runtime: WorkerRuntime,
+    state: WorkerLoopState,
+    exc: Exception,
+) -> bool:
+    state.previous_error = f"{type(exc).__name__}: {exc}"
+    append_event(
+        run_root,
+        AgentEvent(
+            event_type="worker_error",
+            agent_id=agent_id,
+            parent_id=runtime.record.parent_id,
+            details={"error": state.previous_error},
+        ),
+    )
+    state.consecutive_errors += 1
+    if state.consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+        write_status(run_root, agent_id, "failed")
+        return False
+    return True
+
+
+def _finalize_worker(run_root: str, agent_id: str, runtime: WorkerRuntime, state: WorkerLoopState) -> int:
+    final_status = read_status(run_root, agent_id)
+    record = latest_agent_records(run_root).get(agent_id) or runtime.record
+    if final_status == "done" and not _publish_outputs_satisfy_completion(run_root, agent_id):
+        write_status(run_root, agent_id, "failed")
+        final_status = "failed"
+        record = latest_agent_records(run_root).get(agent_id) or runtime.record
+        if not record.parent_id:
+            state.previous_error = "Root agent marked done without publishing summary, artifact index, and final output."
+        else:
+            state.previous_error = "Child agent marked done without publishing any non-empty file in publish/."
+    if final_status in {"failed", "blocked"} and state.previous_error:
+        runtime.session.state.last_error = state.previous_error
+    save_skill_state(runtime.session.state)
+    append_event(
+        run_root,
+        AgentEvent(
+            event_type="worker_finished",
+            agent_id=agent_id,
+            parent_id=record.parent_id,
+            details={"status": final_status, "error": state.previous_error or runtime.session.state.last_error or ""},
+        ),
+    )
+    return 0 if final_status == "done" else 1
+
+
+def run_agent_worker(run_root: str, agent_id: str) -> int:
+    request, record, session = _load_worker_session(run_root, agent_id)
+    stop_event, heartbeat_thread = _start_worker_lifecycle(
+        run_root,
+        agent_id,
+        parent_id=record.parent_id,
+    )
+    runtime = _build_worker_runtime(
+        run_root,
+        agent_id,
+        request=request,
+        record=record,
+        session=session,
+    )
+    state = WorkerLoopState()
 
     try:
         while True:
-            status = read_status(run_root, agent_id)
-            if status in TERMINAL_STATUSES:
+            if not _wait_before_next_turn(run_root, agent_id, runtime, state):
                 break
-            if pending_commenter_gate_id is not None:
-                _wait_for_commenter_gate(run_root, agent_id, gate_id=pending_commenter_gate_id)
-                pending_commenter_gate_id = None
-                if read_status(run_root, agent_id) in TERMINAL_STATUSES:
-                    break
-            if last_turn_started_monotonic is not None and last_turn_started_epoch is not None:
-                should_continue, last_soft_time_limit_active = _wait_for_next_turn_window(
-                    run_root,
-                    agent_id,
-                    request=request,
-                    previous_turn_started_monotonic=last_turn_started_monotonic,
-                    previous_turn_started_epoch=last_turn_started_epoch,
-                    soft_time_limit_was_active=last_soft_time_limit_active,
-                )
-                if not should_continue:
-                    break
-                if read_status(run_root, agent_id) in TERMINAL_STATUSES:
-                    break
-            remaining_agent = remaining_agent_seconds(request, run_root, agent_id)
-            if remaining_agent <= 0:
-                if not soft_finalize_logged:
-                    append_event(
-                        run_root,
-                        AgentEvent(
-                            event_type="soft_finalize_requested",
-                            agent_id=agent_id,
-                            parent_id=record.parent_id,
-                            details={"reason": "soft_time_limit_reached"},
-                        ),
-                    )
-                    soft_finalize_logged = True
-            soft_time_limit_active = remaining_agent <= 0
+            soft_time_limit_active = _soft_time_limit_active(run_root, agent_id, runtime, state)
 
             try:
-                comment_feed, injected_comment_count = build_comment_feed_message(run_root, agent_id)
-                prompt_bundle = _current_prompt_bundle(
-                    session,
-                    transport_name=transport_name,
-                    previous_error=previous_error,
-                    comment_feed=comment_feed,
-                    soft_stop_active=soft_time_limit_active,
-                )
-                system_prompt = prompt_bundle.system_prompt
-                user_prompt = prompt_bundle.user_prompt
-                previous_error = None
-                if transport_name == "text_json":
-                    last_turn_started_monotonic = time.monotonic()
-                    last_turn_started_epoch = time.time()
-                    last_soft_time_limit_active = soft_time_limit_active
-                    response = llm.invoke(
-                        [
-                            SystemMessage(content=system_prompt),
-                            HumanMessage(content=user_prompt),
-                        ]
-                    )
-                    raw_text = _content_to_text(response.content)
-                    payload = _extract_json_object(raw_text)
-                    command = AgentCommand.model_validate(payload)
-                    if injected_comment_count:
-                        mark_commenter_comments_read(run_root, agent_id, injected_comment_count)
-                    result = execute_agent_command(session, command)
-                    append_event(
-                        run_root,
-                        AgentEvent(
-                            event_type="tool_completed",
-                            agent_id=agent_id,
-                            parent_id=record.parent_id,
-                            details={"tool": command.tool, "result": result},
-                        ),
-                    )
-                    successful_turn_index += 1
-                    pending_commenter_gate_id = _record_successful_turn_finished(
+                prompt = _build_turn_prompt(runtime, state, soft_stop_active=soft_time_limit_active)
+                state.previous_error = None
+                if runtime.transport_name == "text_json":
+                    _execute_text_json_turn(
                         run_root,
                         agent_id,
-                        parent_id=record.parent_id,
-                        turn_index=successful_turn_index,
-                        tool_count=1,
-                        stop_reason=None,
+                        runtime,
+                        state,
+                        prompt,
+                        soft_time_limit_active=soft_time_limit_active,
                     )
-                    consecutive_errors = 0
-                    idle_retries = 0
                     if read_status(run_root, agent_id) in TERMINAL_STATUSES:
                         break
                     continue
 
-                tool_specs = model_tool_specs(session)
-                compaction_changed_any = False
-                estimated_before = 0
-                estimated_after = 0
-                compacted_user_turns = 0
-                soft_overflow = False
-                hard_overflow = False
-                while True:
-                    preflight = preflight_history_compaction(
-                        transport_name=transport_name,
-                        run_root=run_root,
-                        agent_id=agent_id,
-                        model_name=model_name,
-                        system_prompt=system_prompt,
-                        pending_user_prompt=user_prompt,
-                        tool_specs=tool_specs,
-                    )
-                    compaction_changed_any = compaction_changed_any or preflight.compaction_changed
-                    if estimated_before == 0:
-                        estimated_before = preflight.estimated_input_tokens_before
-                    estimated_after = preflight.estimated_input_tokens_after
-                    compacted_user_turns = preflight.compacted_user_turns
-                    soft_overflow = preflight.soft_overflow
-                    hard_overflow = preflight.hard_overflow
-                    if not preflight.compaction_changed:
-                        break
-                    prompt_bundle = _current_prompt_bundle(
-                        session,
-                        transport_name=transport_name,
-                        previous_error=previous_error,
-                        comment_feed=comment_feed,
-                        soft_stop_active=soft_time_limit_active,
-                    )
-                    system_prompt = prompt_bundle.system_prompt
-                    user_prompt = prompt_bundle.user_prompt
-
-                _persist_history_compaction_state(
+                prepared = _prepare_native_turn(
                     run_root,
                     agent_id,
-                    compacted_user_turns=compacted_user_turns,
-                    estimated_input_tokens_before=estimated_before,
-                    estimated_input_tokens_after=estimated_after,
-                    compaction_applied=compaction_changed_any,
-                    soft_overflow=soft_overflow,
-                    hard_overflow=hard_overflow,
+                    runtime,
+                    state,
+                    prompt,
+                    soft_time_limit_active=soft_time_limit_active,
                 )
-                if soft_overflow:
-                    append_transcript_entry(
-                        run_root,
-                        agent_id,
-                        {
-                            "kind": "history_compaction_soft_overflow",
-                            "created_at": datetime.utcnow().isoformat() + "Z",
-                            "estimated_input_tokens_before": estimated_before,
-                            "estimated_input_tokens_after": estimated_after,
-                            "soft_budget_tokens": 170000,
-                            "hard_context_window_tokens": 200000,
-                            "compacted_user_turns": compacted_user_turns,
-                        },
-                    )
-                    append_event(
-                        run_root,
-                        AgentEvent(
-                            event_type="history_compaction_soft_overflow",
-                            agent_id=agent_id,
-                            parent_id=record.parent_id,
-                            details={
-                                "estimated_input_tokens_before": estimated_before,
-                                "estimated_input_tokens_after": estimated_after,
-                                "soft_budget_tokens": 170000,
-                                "hard_context_window_tokens": 200000,
-                                "compacted_user_turns": compacted_user_turns,
-                            },
-                        ),
-                    )
-                if hard_overflow:
-                    previous_error = (
-                        "Next request exceeds the hard input context window even after full transcript compaction. "
-                        f"Estimated input tokens: {estimated_after}. Hard window: 200000."
-                    )
-                    append_transcript_entry(
-                        run_root,
-                        agent_id,
-                        {
-                            "kind": "history_compaction_hard_overflow",
-                            "created_at": datetime.utcnow().isoformat() + "Z",
-                            "estimated_input_tokens_before": estimated_before,
-                            "estimated_input_tokens_after": estimated_after,
-                            "soft_budget_tokens": 170000,
-                            "hard_context_window_tokens": 200000,
-                            "compacted_user_turns": compacted_user_turns,
-                            "error": previous_error,
-                        },
-                    )
-                    append_event(
-                        run_root,
-                        AgentEvent(
-                            event_type="history_compaction_hard_overflow",
-                            agent_id=agent_id,
-                            parent_id=record.parent_id,
-                            details={
-                                "estimated_input_tokens_before": estimated_before,
-                                "estimated_input_tokens_after": estimated_after,
-                                "soft_budget_tokens": 170000,
-                                "hard_context_window_tokens": 200000,
-                                "compacted_user_turns": compacted_user_turns,
-                            },
-                        ),
-                    )
-                    write_status(run_root, agent_id, "blocked")
+                if prepared.hard_overflow:
+                    state.previous_error = prepared.previous_error
                     break
-
-                transport.update_system_prompt(system_prompt)
-                transport.append_user_text(user_prompt)
-                last_turn_started_monotonic = time.monotonic()
-                last_turn_started_epoch = time.time()
-                last_soft_time_limit_active = soft_time_limit_active
-                turn = transport.execute_turn(tool_specs)
-                if injected_comment_count:
-                    mark_commenter_comments_read(run_root, agent_id, injected_comment_count)
-                if not turn.tool_calls:
-                    idle_retries += 1
-                    previous_error = "Model returned no tool call. Use an available tool or set_status."
-                    append_event(
-                        run_root,
-                        AgentEvent(
-                            event_type="worker_idle",
-                            agent_id=agent_id,
-                            parent_id=record.parent_id,
-                            details={
-                                "stop_reason": turn.stop_reason or "",
-                                "text": "\n".join(turn.text_blocks)[:400],
-                            },
-                        ),
-                    )
-                    if idle_retries > MAX_IDLE_RETRIES:
-                        write_status(run_root, agent_id, "blocked")
-                        previous_error = "Model repeatedly failed to call a tool."
-                        break
-                    continue
-
-                tool_results: list[dict[str, Any]] = []
-                for tool_call in turn.tool_calls:
-                    try:
-                        result = execute_model_tool(session, tool_call.name, tool_call.arguments)
-                        append_event(
-                            run_root,
-                            AgentEvent(
-                                event_type="tool_completed",
-                                agent_id=agent_id,
-                                parent_id=record.parent_id,
-                                details={"tool": tool_call.name, "result": result},
-                            ),
-                        )
-                    except Exception as exc:
-                        result = {
-                            "status": "error",
-                            "error": f"{type(exc).__name__}: {exc}",
-                        }
-                        append_event(
-                            run_root,
-                            AgentEvent(
-                                event_type="tool_failed",
-                                agent_id=agent_id,
-                                parent_id=record.parent_id,
-                                details={
-                                    "tool": tool_call.name,
-                                    "arguments": tool_call.arguments,
-                                    "error": result["error"],
-                                },
-                            ),
-                        )
-                    tool_results.append(
-                        {
-                            "call_id": tool_call.call_id,
-                            "name": tool_call.name,
-                            "arguments": tool_call.arguments,
-                            "result": result,
-                        }
-                    )
-                if transport is not None and tool_results:
-                    transport.append_tool_results(tool_results)
-                successful_turn_index += 1
-                pending_commenter_gate_id = _record_successful_turn_finished(
+                native_result = _execute_native_turn(
                     run_root,
                     agent_id,
-                    parent_id=record.parent_id,
-                    turn_index=successful_turn_index,
-                    tool_count=len(tool_results),
-                    stop_reason=turn.stop_reason,
+                    runtime,
+                    state,
+                    prompt,
+                    prepared,
+                    soft_time_limit_active=soft_time_limit_active,
                 )
-                consecutive_errors = 0
-                idle_retries = 0
-                if read_status(run_root, agent_id) in TERMINAL_STATUSES:
+                if native_result == "continue":
+                    continue
+                if native_result == "stop" or read_status(run_root, agent_id) in TERMINAL_STATUSES:
                     break
             except Exception as exc:
-                previous_error = f"{type(exc).__name__}: {exc}"
-                append_event(
-                    run_root,
-                    AgentEvent(
-                        event_type="worker_error",
-                        agent_id=agent_id,
-                        parent_id=record.parent_id,
-                        details={"error": previous_error},
-                    ),
-                )
-                consecutive_errors += 1
-                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                    write_status(run_root, agent_id, "failed")
+                if not _handle_worker_turn_error(run_root, agent_id, runtime, state, exc):
                     break
 
-        final_status = read_status(run_root, agent_id)
-        if final_status == "done" and not _publish_outputs_satisfy_completion(run_root, agent_id):
-            write_status(run_root, agent_id, "failed")
-            final_status = "failed"
-            record = latest_agent_records(run_root).get(agent_id)
-            if record is None or not record.parent_id:
-                previous_error = "Root agent marked done without publishing summary, artifact index, and final output."
-            else:
-                previous_error = "Child agent marked done without publishing any non-empty file in publish/."
-        if final_status in {"failed", "blocked"} and previous_error:
-            session.state.last_error = previous_error
-        save_skill_state(session.state)
-        append_event(
-            run_root,
-            AgentEvent(
-                event_type="worker_finished",
-                agent_id=agent_id,
-                parent_id=record.parent_id,
-                details={"status": final_status, "error": previous_error or session.state.last_error or ""},
-            ),
-        )
-        return 0 if final_status == "done" else 1
+        return _finalize_worker(run_root, agent_id, runtime, state)
     finally:
-        stop_event.set()
-        heartbeat_thread.join(timeout=1.0)
+        _stop_worker_lifecycle(stop_event, heartbeat_thread)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
