@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 import json
 import os
@@ -26,6 +27,7 @@ from src.harness.artifacts import (
     read_text,
     refresh_progress_view,
     save_skill_state,
+    snapshot_final_report_if_changed,
     write_status,
     write_text_atomic,
 )
@@ -331,6 +333,7 @@ def execute_agent_command(session: AgentSession, command: AgentCommand) -> dict[
     if handler is None:
         raise ValueError(f"Unknown tool '{command.tool}'.")
     result = handler(session, command.arguments)
+    _snapshot_final_report_after_tool(session, command.tool, result)
     _append_journal(
         session,
         {
@@ -363,11 +366,38 @@ def execute_model_tool(session: AgentSession, tool_name: str, arguments: dict[st
         "result": result,
         "created_at": _now_iso(),
     }
+    _snapshot_final_report_after_tool(session, tool_name, result)
     _append_journal(session, journal_row)
     append_tool_history(session.run_root, session.agent_id, journal_row)
     save_skill_state(session.state)
     refresh_progress_view(session.run_root)
     return result
+
+
+def _snapshot_final_report_after_tool(session: AgentSession, tool_name: str, result: dict[str, Any]) -> None:
+    trigger_operation = ""
+    if isinstance(result, dict):
+        trigger_operation = str(result.get("operation") or "")
+    try:
+        snapshot_final_report_if_changed(
+            session.run_root,
+            session.agent_id,
+            trigger={"trigger_tool": tool_name, "trigger_operation": trigger_operation},
+        )
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            append_event(
+                session.run_root,
+                AgentEvent(
+                    event_type="final_report_snapshot_failed",
+                    agent_id=session.agent_id,
+                    details={
+                        "trigger_tool": tool_name,
+                        "trigger_operation": trigger_operation,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                ),
+            )
 
 
 def _append_journal(session: AgentSession, payload: dict[str, Any]) -> None:

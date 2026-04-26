@@ -6,9 +6,20 @@ from pathlib import Path
 import pytest
 
 import src.harness.runtime as runtime_module
-from src.harness.artifacts import agent_workspace_paths, create_agent_workspace, latest_agent_records, write_text_atomic, write_status
+from src.harness.artifacts import (
+    agent_workspace_paths,
+    create_agent_workspace,
+    latest_agent_records,
+    load_request,
+    read_jsonl,
+    registry_paths,
+    write_text_atomic,
+    write_status,
+)
+from src.harness.executor import create_or_load_session, execute_model_tool
 from src.harness.presets import default_tool_allowlist
 from src.harness.prompt_builder import render_tools_markdown
+from src.harness.registry import build_skill_registry
 from src.harness.runtime import run_harness
 from src.harness.types import HarnessRequest
 
@@ -162,6 +173,60 @@ def test_run_harness_returns_timeout_with_deliverable_when_root_publish_exists(
     assert response.stop_reason == "wall_clock_budget_exhausted"
     assert response.final_report_path is not None
     assert "Readable draft before timeout." in Path(response.final_report_path).read_text(encoding="utf-8")
+
+
+def test_run_harness_records_root_final_report_versions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    async def _launcher(run_root: str, agent_id: str):
+        process = _FakeProcess(2045)
+
+        async def _runner() -> None:
+            request = load_request(run_root)
+            session = create_or_load_session(
+                request=request,
+                run_root=run_root,
+                agent_id=agent_id,
+                preset="orchestrator",
+                registry_map=build_skill_registry(),
+            )
+            execute_model_tool(
+                session,
+                "write_file",
+                {"path": "publish/final.md", "content": "# Final\n\nFirst version.\n"},
+            )
+            execute_model_tool(
+                session,
+                "edit_file",
+                {
+                    "path": "publish/final.md",
+                    "operation": "replace",
+                    "target_text": "First version.",
+                    "content": "Second version.",
+                },
+            )
+            paths = agent_workspace_paths(run_root, agent_id)
+            write_text_atomic(paths["publish_summary"], "# Summary\n\nRoot finished.\n")
+            write_text_atomic(paths["publish_index"], "- final.md: Final answer\n")
+            write_status(run_root, agent_id, "done")
+            process.returncode = 0
+
+        asyncio.create_task(_runner())
+        return process
+
+    response = run_harness(
+        HarnessRequest(user_prompt="Analyze AAPL"),
+        launch_agent_process=_launcher,
+    )
+
+    assert response.status == "completed"
+    rows = read_jsonl(registry_paths(str(response.run_root))["final_report_versions"])
+    assert [row["version"] for row in rows] == [1, 2]
+    assert Path(str(rows[0]["snapshot_path"])).read_text(encoding="utf-8") == "# Final\n\nFirst version.\n"
+    assert Path(str(rows[1]["snapshot_path"])).read_text(encoding="utf-8") == "# Final\n\nSecond version.\n"
 
 
 def test_run_harness_allows_root_to_finish_during_soft_stop_grace(

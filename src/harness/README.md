@@ -168,8 +168,13 @@ data/harness_runs/<run_id>/
 ├── registry/
 │   ├── agents.jsonl
 │   ├── events.jsonl
+│   ├── final_report_versions.jsonl
 │   ├── objects/
-│   └── objects_manifest.jsonl
+│   ├── objects_manifest.jsonl
+│   └── report_versions/
+│       └── agent_root/
+│           ├── v0001.md
+│           └── v0002.md
 └── agents/
     └── <agent_id>/
         ├── task.md
@@ -211,6 +216,7 @@ Important runtime conventions:
 - `task.md` is the inspectable task contract and is loaded into the per-turn user prompt, not the system prompt.
 - parents explicitly read child `publish/` files; child `scratch/` data is not auto-ingested
 - `progress.md` is the supervisor-maintained human-readable summary used by the TUI
+- root `publish/final.md` is the latest report, while changed versions are copied to `registry/report_versions/agent_root/` and logged in `registry/final_report_versions.jsonl`
 - `scratch/transcript.jsonl` stores replayable model messages
 - `scratch/llm_turns/` stores the exact system prompt snapshot, request payload, response payload, and any extracted thinking text for each turn
 - `state/prompt_memory.md` is the optional carried-forward self-summary loaded into the agent system prompt

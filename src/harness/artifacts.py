@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -24,11 +25,13 @@ except ImportError:  # pragma: no cover - Unix is expected in this environment.
 REGISTRY_DIR = "registry"
 AGENTS_DIR = "agents"
 OBJECTS_DIR = "objects"
+REPORT_VERSIONS_DIR = "report_versions"
 REQUEST_FILE = "request.json"
 PROGRESS_FILE = "progress.md"
 AGENTS_REGISTRY_FILE = "agents.jsonl"
 EVENTS_REGISTRY_FILE = "events.jsonl"
 OBJECTS_MANIFEST_FILE = "objects_manifest.jsonl"
+FINAL_REPORT_VERSIONS_FILE = "final_report_versions.jsonl"
 HEARTBEAT_INTERVAL_SECONDS = 10
 
 
@@ -133,8 +136,20 @@ def registry_paths(run_root: str | Path) -> dict[str, Path]:
         "events_registry": registry_root / EVENTS_REGISTRY_FILE,
         "objects_root": registry_root / OBJECTS_DIR,
         "objects_manifest": registry_root / OBJECTS_MANIFEST_FILE,
+        "report_versions_root": registry_root / REPORT_VERSIONS_DIR,
+        "final_report_versions": registry_root / FINAL_REPORT_VERSIONS_FILE,
         "request": root / REQUEST_FILE,
         "progress": root / PROGRESS_FILE,
+    }
+
+
+def final_report_snapshot_paths(run_root: str | Path, agent_id: str) -> dict[str, Path]:
+    paths = registry_paths(run_root)
+    versions_root = paths["report_versions_root"] / agent_id
+    return {
+        "source": agent_workspace_paths(run_root, agent_id)["publish_final"],
+        "versions_root": versions_root,
+        "manifest": paths["final_report_versions"],
     }
 
 
@@ -200,8 +215,14 @@ def initialize_run_root(request: HarnessRequest) -> tuple[Path, str]:
     paths = registry_paths(run_root)
     paths["registry_root"].mkdir(parents=True, exist_ok=True)
     paths["objects_root"].mkdir(parents=True, exist_ok=True)
+    paths["report_versions_root"].mkdir(parents=True, exist_ok=True)
     write_json_atomic(paths["request"], request.model_dump(mode="json"))
-    for path in (paths["agents_registry"], paths["events_registry"], paths["objects_manifest"]):
+    for path in (
+        paths["agents_registry"],
+        paths["events_registry"],
+        paths["objects_manifest"],
+        paths["final_report_versions"],
+    ):
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
             write_text_atomic(path, "")
@@ -315,6 +336,74 @@ def append_agent_record(run_root: str | Path, record: AgentRecord) -> None:
 
 def append_event(run_root: str | Path, event: AgentEvent) -> None:
     append_jsonl(registry_paths(run_root)["events_registry"], event.model_dump(mode="json"))
+
+
+def snapshot_final_report_if_changed(
+    run_root: str | Path,
+    agent_id: str,
+    *,
+    trigger: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    records = latest_agent_records(run_root)
+    record = records.get(agent_id)
+    if record is None or record.parent_id:
+        return None
+
+    paths = final_report_snapshot_paths(run_root, agent_id)
+    source = paths["source"]
+    if not source.exists() or not source.is_file():
+        return None
+    content = source.read_text(encoding="utf-8")
+    if not content:
+        return None
+
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    manifest_path = paths["manifest"]
+    agent_rows = [row for row in read_jsonl(manifest_path) if row.get("agent_id") == agent_id]
+    latest_row = agent_rows[-1] if agent_rows else None
+    if latest_row and latest_row.get("sha256") == digest:
+        return None
+
+    existing_versions = [
+        int(row.get("version", 0))
+        for row in agent_rows
+        if isinstance(row.get("version"), int) or str(row.get("version", "")).isdigit()
+    ]
+    version = (max(existing_versions) if existing_versions else 0) + 1
+    versions_root = paths["versions_root"]
+    versions_root.mkdir(parents=True, exist_ok=True)
+    snapshot_path = versions_root / f"v{version:04d}.md"
+    while snapshot_path.exists():
+        version += 1
+        snapshot_path = versions_root / f"v{version:04d}.md"
+
+    write_text_atomic(snapshot_path, content)
+    trigger_payload = trigger or {}
+    manifest_row = {
+        "version": version,
+        "agent_id": agent_id,
+        "source_path": str(source),
+        "snapshot_path": str(snapshot_path),
+        "sha256": digest,
+        "chars": len(content),
+        "created_at": _utc_now_iso(),
+        "trigger_tool": str(
+            trigger_payload.get("trigger_tool") or trigger_payload.get("tool") or ""
+        ),
+        "trigger_operation": str(
+            trigger_payload.get("trigger_operation") or trigger_payload.get("operation") or ""
+        ),
+    }
+    append_jsonl(manifest_path, manifest_row)
+    append_event(
+        run_root,
+        AgentEvent(
+            event_type="final_report_snapshot_created",
+            agent_id=agent_id,
+            details=manifest_row,
+        ),
+    )
+    return manifest_row
 
 
 def latest_agent_records(run_root: str | Path) -> dict[str, AgentRecord]:

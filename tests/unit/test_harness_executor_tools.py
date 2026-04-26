@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -56,6 +57,10 @@ def _create_basic_session(
         registry_map=registry,
     )
     return run_root, root_agent_id, session
+
+
+def _final_report_snapshot_rows(run_root: Path) -> list[dict[str, object]]:
+    return read_jsonl(registry_paths(run_root)["final_report_versions"])
 
 
 def test_spawn_subagent_rejects_unknown_preset_and_lists_legal_presets(
@@ -320,6 +325,187 @@ def test_write_file_allows_empty_scratch_content(
 
     assert result["path"] == str(note_path)
     assert note_path.read_text(encoding="utf-8") == ""
+
+
+def test_root_write_file_snapshots_final_report(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, _root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-final-snapshot-write",
+        user_prompt="Publish a final memo",
+    )
+    content = "# Final\n\nDraft memo.\n"
+
+    write_result = execute_model_tool(
+        session,
+        "write_file",
+        {"path": "publish/final.md", "content": content},
+    )
+
+    rows = _final_report_snapshot_rows(run_root)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["version"] == 1
+    assert row["agent_id"] == "agent_root"
+    assert row["source_path"] == write_result["path"]
+    assert row["sha256"] == hashlib.sha256(content.encode("utf-8")).hexdigest()
+    assert row["chars"] == len(content)
+    assert row["trigger_tool"] == "write_file"
+    assert row["trigger_operation"] == ""
+    assert Path(str(row["snapshot_path"])).read_text(encoding="utf-8") == content
+    events = read_jsonl(registry_paths(run_root)["events_registry"])
+    assert any(event.get("event_type") == "final_report_snapshot_created" for event in events)
+
+
+def test_identical_root_final_write_does_not_create_duplicate_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, _root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-final-snapshot-duplicate",
+        user_prompt="Publish a final memo",
+    )
+    content = "# Final\n\nSame memo.\n"
+
+    execute_model_tool(session, "write_file", {"path": "publish/final.md", "content": content})
+    execute_model_tool(session, "write_file", {"path": "publish/final.md", "content": content})
+
+    rows = _final_report_snapshot_rows(run_root)
+    assert len(rows) == 1
+    assert Path(str(rows[0]["snapshot_path"])).name == "v0001.md"
+
+
+def test_editing_root_final_creates_next_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, _root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-final-snapshot-edit",
+        user_prompt="Revise a final memo",
+        preset="writer",
+    )
+
+    execute_model_tool(session, "write_file", {"path": "publish/final.md", "content": "# Final\n\nDraft.\n"})
+    execute_model_tool(
+        session,
+        "edit_file",
+        {
+            "path": "publish/final.md",
+            "operation": "replace",
+            "target_text": "Draft.",
+            "content": "Revised.",
+        },
+    )
+
+    rows = _final_report_snapshot_rows(run_root)
+    assert [row["version"] for row in rows] == [1, 2]
+    assert Path(str(rows[1]["snapshot_path"])).name == "v0002.md"
+    assert Path(str(rows[1]["snapshot_path"])).read_text(encoding="utf-8") == "# Final\n\nRevised.\n"
+    assert rows[1]["trigger_tool"] == "edit_file"
+    assert rows[1]["trigger_operation"] == "replace"
+
+
+def test_updating_publish_summary_does_not_snapshot_final_report(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, _root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-final-snapshot-summary",
+        user_prompt="Publish a summary",
+    )
+
+    execute_model_tool(session, "write_file", {"path": "publish/summary.md", "content": "# Summary\n"})
+
+    assert _final_report_snapshot_rows(run_root) == []
+
+
+def test_child_final_write_does_not_snapshot_report_versions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, _root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-final-snapshot-child",
+        user_prompt="Delegate a child final",
+    )
+    child = execute_model_tool(
+        session,
+        "spawn_subagent",
+        {
+            "task_name": "Child final",
+            "description": "Publish child final.",
+            "preset": "writer",
+        },
+    )
+    child_session = create_or_load_session(
+        request=session.request,
+        run_root=str(run_root),
+        agent_id=str(child["agent_id"]),
+        preset="writer",
+        registry_map=session.registry_map,
+    )
+
+    execute_model_tool(child_session, "write_file", {"path": "publish/final.md", "content": "# Child\n"})
+
+    assert _final_report_snapshot_rows(run_root) == []
+
+
+def test_failed_final_edits_do_not_create_new_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, _root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-final-snapshot-failed-edit",
+        user_prompt="Revise a final memo",
+        preset="writer",
+    )
+    execute_model_tool(session, "write_file", {"path": "publish/final.md", "content": "# Final\n\nStable.\n"})
+
+    with pytest.raises(ValueError, match="target_text not found"):
+        execute_model_tool(
+            session,
+            "edit_file",
+            {
+                "path": "publish/final.md",
+                "operation": "replace",
+                "target_text": "Missing",
+                "content": "Replacement",
+            },
+        )
+    with pytest.raises(ValueError, match="context was not found"):
+        execute_model_tool(
+            session,
+            "apply_patch",
+            {
+                "patch": "\n".join(
+                    [
+                        "*** Begin Patch",
+                        "*** Update File: publish/final.md",
+                        "@@",
+                        " Missing context",
+                        "-Old",
+                        "+New",
+                        "*** End Patch",
+                    ]
+                ),
+            },
+        )
+
+    rows = _final_report_snapshot_rows(run_root)
+    assert len(rows) == 1
+    assert Path(str(rows[0]["snapshot_path"])).read_text(encoding="utf-8") == "# Final\n\nStable.\n"
 
 
 def test_context_files_are_copied_for_read_file(
