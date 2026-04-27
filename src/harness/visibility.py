@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
 
 from src.harness.artifacts import agent_workspace_paths, latest_agent_records
 
@@ -162,9 +161,3 @@ def resolve_visible_write_file(
             return candidate, root_name, relative
     raise VisibilityError("Write paths must stay inside this agent's publish/ or scratch/ tree.")
 
-
-def filter_visible_search_targets(run_root: str | Path, agent_id: str, paths: Iterable[str]) -> list[Path]:
-    return [
-        resolve_visible_search_target(run_root, agent_id, raw_path)
-        for raw_path in paths
-    ]

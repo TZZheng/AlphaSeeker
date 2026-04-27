@@ -834,17 +834,6 @@ class BaseAgentTransport:
         write_json_atomic(path, payload)
         return str(path)
 
-    def _write_thinking_block(self, *, turn_index: int, content: list[str]) -> None:
-        """Write thinking block content to a human-readable text file for live observability."""
-        root = self._llm_turns_root()
-        # Per-turn thinking file: _harness/llm_turns/0001_thinking.txt
-        turn_path = root / f"{turn_index:04d}_thinking.txt"
-        text = "\n\n---\n\n".join(content) if content else ""
-        write_text_atomic(turn_path, text)
-        # Latest thinking symlink so you can always `cat` the most recent one
-        latest_path = root / "thinking_current.txt"
-        write_text_atomic(latest_path, text)
-
     def _append_system_prompt_snapshot(self, *, reason: str) -> None:
         version = self._next_counter("system_prompt_version")
         artifact_path = self._write_turn_artifact(

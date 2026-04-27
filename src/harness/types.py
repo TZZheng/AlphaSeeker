@@ -34,15 +34,6 @@ class EvidenceItem(BaseModel):
     created_at: str = Field(default_factory=_utc_now_iso)
 
 
-class SkillCall(BaseModel):
-    """One deterministic skill invocation requested by the controller."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    arguments: dict[str, Any] = Field(default_factory=dict)
-
-
 class SkillMetrics(BaseModel):
     """Normalized counters emitted by skills for controller reasoning."""
 

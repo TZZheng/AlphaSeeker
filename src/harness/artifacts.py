@@ -489,22 +489,6 @@ def remaining_run_seconds(
     return max(0, int(request.wall_clock_budget_seconds - elapsed))
 
 
-def remaining_root_seconds(
-    request: HarnessRequest,
-    run_root: str | Path,
-    *,
-    now_epoch: float | None = None,
-) -> int:
-    started = run_started_epoch(run_root)
-    root_limit = root_time_limit_seconds(request)
-    if started is None:
-        return min(root_limit, request.wall_clock_budget_seconds)
-    now = now_epoch or datetime.now(timezone.utc).timestamp()
-    elapsed = max(0.0, now - started)
-    remaining_root = max(0, int(root_limit - elapsed))
-    return min(remaining_root, remaining_run_seconds(request, run_root, now_epoch=now))
-
-
 def remaining_agent_seconds(
     request: HarnessRequest,
     run_root: str | Path,
