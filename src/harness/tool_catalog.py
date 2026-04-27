@@ -91,7 +91,7 @@ def harness_tool_definitions() -> dict[str, dict[str, Any]]:
             },
         },
         "bash": {
-            "description": "Run one repo-scoped bash command from the allowlist for filesystem inspection or file movement. Do not use bash as a passive waiting mechanism; the runtime already pauses between turns.",
+            "description": "Run one repo-scoped bash command from the allowlist for filesystem inspection or file movement.",
             "input_schema": {
                 "type": "object",
                 "properties": {
