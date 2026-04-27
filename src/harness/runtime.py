@@ -101,7 +101,7 @@ class SupervisorState:
 async def _default_launch_agent_process(run_root: str, agent_id: str) -> asyncio.subprocess.Process:
     # Redirect subprocess stdout/stderr to a per-agent log file so that
     # print/warning output from agent workers doesn't corrupt the TUI.
-    log_path = Path(run_root) / "agents" / agent_id / "scratch" / "worker.log"
+    log_path = agent_workspace_paths(run_root, agent_id)["worker_log"]
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_fh = open(str(log_path), "a", encoding="utf-8")
     proc = await asyncio.create_subprocess_exec(

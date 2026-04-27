@@ -25,8 +25,9 @@ from src.harness.artifacts import (
     unread_commenter_comments,
     write_text_atomic,
 )
-from src.harness.prompt_builder import build_commenter_prompt_bundle
-from src.harness.skills.core import read_file_skill, search_in_files_skill
+from src.harness.prompt_builder import COMMENTER_TOOL_NAMES, build_commenter_prompt_bundle
+from src.harness.skills.core import CORE_SKILLS, read_file_skill, search_in_files_skill
+from src.harness.tool_catalog import tool_specs_for_names
 from src.harness.transport import (
     minimax_anthropic_base_url,
     minimax_openai_base_url,
@@ -41,15 +42,12 @@ from src.shared.model_config import get_model
 COMMENTER_DEFAULT_DELAY_SECONDS = 5.0
 COMMENTER_MAX_FEED_COMMENTS = 3
 COMMENTER_MAX_TOOL_STEPS = 100
-COMMENTER_DEFAULT_READ_MAX_CHARS = 12_000
 COMMENTER_MAX_RENDERED_CHANGED_ENTRIES = 20
 COMMENTER_TERMINAL_STATUSES = {"done", "failed", "blocked", "stale", "cancelled"}
 COMMENTER_GATE_FINISHED_STATUSES = {"completed", "skipped", "failed"}
-COMMENTER_OPERATING_LOG_FILES = {
-    "journal.jsonl",
-    "tool_history.jsonl",
-    "transcript.jsonl",
-    "worker.log",
+COMMENTER_TOOL_DESCRIPTIONS = {
+    "read_file": "Read one inspectable file by display path or exact path. Use this when you need actual file content before writing the spark.",
+    "search_in_files": "Search inspectable files for a text pattern before deciding what to read. Paths may use display paths or exact paths.",
 }
 
 
@@ -286,17 +284,6 @@ def _file_entry(path: Path, *, category: str, display_path: str) -> dict[str, An
     }
 
 
-def _commenter_scratch_category(path: Path, scratch_root: Path) -> str:
-    relative = path.relative_to(scratch_root).as_posix()
-    if relative in COMMENTER_OPERATING_LOG_FILES:
-        return "operating_log"
-    if relative.startswith("llm_turns/"):
-        return "llm_trace"
-    if relative.startswith("skills/"):
-        return "tool_artifact"
-    return "scratch"
-
-
 def build_commenter_observation_manifest(run_root: str, agent_id: str) -> list[dict[str, Any]]:
     paths = agent_workspace_paths(run_root, agent_id)
     manifest: list[dict[str, Any]] = []
@@ -317,14 +304,9 @@ def build_commenter_observation_manifest(run_root: str, agent_id: str) -> list[d
     ):
         root = paths[root_key]
         for path in _iter_workspace_files(root):
-            if paths["commenter_root"] in path.parents or path == paths["commenter_latest"]:
-                continue
-            effective_category = category
-            if root_key == "scratch_root":
-                effective_category = _commenter_scratch_category(path, root)
             entry = _file_entry(
                 path,
-                category=effective_category,
+                category=category,
                 display_path=str(path.relative_to(paths["workspace"])),
             )
             if entry:
@@ -383,49 +365,6 @@ def compute_commenter_observation_fingerprint(run_root: str, agent_id: str) -> s
     return _fingerprint_manifest(build_commenter_observation_manifest(run_root, agent_id))
 
 
-def _sanitize_transcript_content(text: str) -> str:
-    rows: list[str] = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            rows.append(raw_line)
-            continue
-        if payload.get("kind") != "user_message":
-            rows.append(raw_line)
-            continue
-        message = payload.get("message")
-        if not isinstance(message, dict):
-            rows.append(raw_line)
-            continue
-        content = message.get("content")
-        text_parts: list[str] = []
-        if isinstance(content, str):
-            text_parts = [content]
-        elif isinstance(content, list):
-            for item in content:
-                if isinstance(item, dict) and isinstance(item.get("text"), str):
-                    text_parts.append(item["text"])
-        joined = "\n".join(text_parts)
-        if joined.startswith("Comment Feed"):
-            continue
-        rows.append(raw_line)
-    return "\n".join(rows)
-
-
-def _read_commenter_file_content(path: Path) -> str:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    if path.name == "transcript.jsonl":
-        text = _sanitize_transcript_content(text)
-    return text
-
-
 def _serialize_payload(payload: Any) -> Any:
     if hasattr(payload, "model_dump"):
         return payload.model_dump(mode="json")
@@ -440,28 +379,6 @@ def _serialize_payload(payload: Any) -> Any:
             if not key.startswith("_")
         }
     return payload
-
-
-def _manifest_alias_map(manifest: list[dict[str, Any]]) -> dict[str, str]:
-    aliases: dict[str, str] = {}
-    for item in manifest:
-        exact_path = str(item.get("path") or "").strip()
-        display_path = str(item.get("display_path") or "").strip()
-        if exact_path:
-            aliases[exact_path] = exact_path
-        if display_path:
-            aliases[display_path] = exact_path
-    return aliases
-
-
-def _commenter_allowed_roots(run_root: str, agent_id: str) -> list[Path]:
-    paths = agent_workspace_paths(run_root, agent_id)
-    roots = [paths["context_root"], paths["scratch_root"], paths["publish_root"]]
-    for record in latest_agent_records(run_root).values():
-        if record.parent_id != agent_id:
-            continue
-        roots.append(agent_workspace_paths(run_root, record.agent_id)["publish_root"])
-    return roots
 
 
 def _commenter_inspectable_scope(run_root: str, agent_id: str) -> list[str]:
@@ -549,41 +466,6 @@ def build_commenter_observation_snapshot(
     }
 
 
-def _resolve_commenter_target_path(
-    *,
-    raw_path: str,
-    manifest: list[dict[str, Any]],
-    workspace_root: Path,
-) -> Path:
-    normalized = raw_path.strip()
-    aliases = _manifest_alias_map(manifest)
-    if normalized in aliases:
-        return Path(aliases[normalized])
-    candidate = Path(normalized).expanduser()
-    if not candidate.is_absolute():
-        candidate = workspace_root / normalized
-    return candidate
-
-
-def _is_commenter_path_allowed(candidate: Path, *, run_root: str, agent_id: str) -> bool:
-    paths = agent_workspace_paths(run_root, agent_id)
-    try:
-        resolved = candidate.resolve(strict=False)
-    except OSError:
-        resolved = candidate
-    commenter_root = paths["commenter_root"].resolve(strict=False)
-    if resolved == commenter_root or commenter_root in resolved.parents:
-        return False
-    exact_files = {paths["task"].resolve(strict=False), paths["tools"].resolve(strict=False)}
-    if resolved in exact_files:
-        return True
-    for root in _commenter_allowed_roots(run_root, agent_id):
-        resolved_root = root.resolve(strict=False)
-        if resolved == resolved_root or resolved_root in resolved.parents:
-            return True
-    return False
-
-
 def _commenter_skill_state(run_root: str, agent_id: str, request: HarnessRequest) -> HarnessState:
     existing = load_skill_state(run_root, agent_id)
     if existing is not None:
@@ -620,54 +502,8 @@ def _commenter_read_file(
     manifest: list[dict[str, Any]],
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    workspace_root = agent_workspace_paths(run_root, agent_id)["workspace"]
-    raw_path = str(arguments.get("path") or "").strip()
-    if not raw_path:
-        return {
-            "status": "failed",
-            "summary": "read_file requires a path.",
-            "details": {"path": raw_path},
-            "output_text": None,
-            "error": "Missing path.",
-        }
-    candidate = _resolve_commenter_target_path(
-        raw_path=raw_path,
-        manifest=manifest,
-        workspace_root=workspace_root,
-    )
-    if not _is_commenter_path_allowed(candidate, run_root=run_root, agent_id=agent_id):
-        return {
-            "status": "failed",
-            "summary": f"Path '{raw_path}' is outside the commenter observation surface.",
-            "details": {"path": raw_path},
-            "output_text": None,
-            "error": "Path not allowed.",
-        }
-    max_chars = int(arguments.get("max_chars", COMMENTER_DEFAULT_READ_MAX_CHARS))
-    start_char = int(arguments.get("start_char", 0))
-    skill_result = read_file_skill(
-        {
-            "path": str(candidate),
-            "max_chars": max_chars,
-            "start_char": start_char,
-        },
-        _commenter_skill_state(run_root, agent_id, request),
-    )
-    if skill_result.status in ("ok", "truncated") and candidate.name == "transcript.jsonl":
-        full_text = _sanitize_transcript_content(_read_commenter_file_content(candidate))
-        start_char = max(0, start_char)
-        end_char = len(full_text) if max_chars <= 0 else min(len(full_text), start_char + max_chars)
-        skill_result.output_text = full_text[start_char:end_char]
-        skill_result.details = {
-            "path": str(candidate),
-            "start_char": start_char,
-            "returned_chars": len(skill_result.output_text or ""),
-            "total_chars": len(full_text),
-        }
-        skill_result.summary = (
-            f"Read {len(skill_result.output_text or '')} character(s) from {candidate} starting at offset {start_char}."
-            + (" Content was truncated." if end_char < len(full_text) else "")
-        )
+    _ = manifest
+    skill_result = read_file_skill(arguments, _commenter_skill_state(run_root, agent_id, request))
     return _compact_skill_result(skill_result)
 
 
@@ -679,72 +515,17 @@ def _commenter_search_in_files(
     manifest: list[dict[str, Any]],
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    workspace_root = agent_workspace_paths(run_root, agent_id)["workspace"]
-    raw_paths = arguments.get("paths")
-    if isinstance(raw_paths, list):
-        requested_paths = [str(item) for item in raw_paths]
-    elif raw_paths is None:
-        requested_paths = []
-    else:
-        requested_paths = [str(raw_paths)]
-    resolved_paths: list[str] = []
-    if requested_paths:
-        for item in requested_paths:
-            candidate = _resolve_commenter_target_path(
-                raw_path=item,
-                manifest=manifest,
-                workspace_root=workspace_root,
-            )
-            if _is_commenter_path_allowed(candidate, run_root=run_root, agent_id=agent_id):
-                resolved_paths.append(str(candidate))
-    else:
-        resolved_paths = [str(root) for root in _commenter_allowed_roots(run_root, agent_id)]
-        if agent_workspace_paths(run_root, agent_id)["task"].exists():
-            resolved_paths.append(str(agent_workspace_paths(run_root, agent_id)["task"]))
-        if agent_workspace_paths(run_root, agent_id)["tools"].exists():
-            resolved_paths.append(str(agent_workspace_paths(run_root, agent_id)["tools"]))
-    skill_result = search_in_files_skill(
-        {
-            "pattern": arguments.get("pattern") or arguments.get("query") or "",
-            "paths": resolved_paths,
-            "max_results": int(arguments.get("max_results", 20)),
-            "fixed_strings": bool(arguments.get("fixed_strings", True)),
-            "ignore_case": bool(arguments.get("ignore_case", True)),
-        },
-        _commenter_skill_state(run_root, agent_id, request),
-    )
+    _ = manifest
+    skill_result = search_in_files_skill(arguments, _commenter_skill_state(run_root, agent_id, request))
     return _compact_skill_result(skill_result)
 
 
 def _commenter_tool_specs() -> list[dict[str, Any]]:
-    return [
-        {
-            "name": "read_file",
-            "description": "Read one inspectable file by display path or exact path. Use this when you need actual file content before writing the spark.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "max_chars": {"type": "integer"},
-                    "start_char": {"type": "integer"},
-                },
-            },
-        },
-        {
-            "name": "search_in_files",
-            "description": "Search inspectable files for a text pattern before deciding what to read. Paths may use display paths or exact paths.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "pattern": {"type": "string"},
-                    "paths": {"type": "array", "items": {"type": "string"}},
-                    "max_results": {"type": "integer"},
-                    "fixed_strings": {"type": "boolean"},
-                    "ignore_case": {"type": "boolean"},
-                },
-            },
-        },
-    ]
+    return tool_specs_for_names(
+        COMMENTER_TOOL_NAMES,
+        available_skills=CORE_SKILLS,
+        description_overrides=COMMENTER_TOOL_DESCRIPTIONS,
+    )
 
 
 def _execute_commenter_tool_call(

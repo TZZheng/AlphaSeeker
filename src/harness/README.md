@@ -186,30 +186,34 @@ data/harness_runs/<run_id>/
         │   ├── summary.md
         │   ├── final.md
         │   └── artifact_index.md
-        ├── scratch/
-        │   ├── journal.jsonl
-        │   ├── transcript.jsonl
-        │   ├── tool_history.jsonl
-        │   ├── worker.log
-        │   ├── llm_turns/
-        │   ├── reduction/         # Created lazily by retrieval-heavy skills
-        │   └── commenter/
-        │       ├── comments.jsonl
-        │       ├── latest.md
-        │       ├── notes/
-        │       └── turns/
-        └── state/
-            ├── status.txt
-            ├── heartbeat.txt
-            ├── pid.txt
-            ├── parent.txt
-            ├── preset.txt
-            ├── events_queue.jsonl
-            ├── prompt_memory.md
-            ├── history_summary.md
-            ├── skill_state.json
-            ├── transport_state.json
-            └── commenter_state.json
+        ├── scratch/               # Agent-authored working files only
+        ├── artifacts/             # Tool outputs, readable by exact path
+        │   ├── skills/
+        │   ├── search/
+        │   └── reduction/
+        └── _harness/              # Harness-private logs and state
+            ├── state/
+            │   ├── status.txt
+            │   ├── heartbeat.txt
+            │   ├── pid.txt
+            │   ├── parent.txt
+            │   ├── preset.txt
+            │   ├── prompt_memory.md
+            │   ├── history_summary.md
+            │   ├── skill_state.json
+            │   ├── transport_state.json
+            │   └── commenter_state.json
+            ├── logs/
+            │   ├── transcript.jsonl
+            │   ├── tool_calls.jsonl
+            │   ├── worker.log
+            │   └── events_queue.jsonl
+            ├── llm_turns/
+            └── commenter/
+                ├── comments.jsonl
+                ├── latest.md
+                ├── notes/
+                └── turns/
 ```
 
 Important runtime conventions:
@@ -217,13 +221,16 @@ Important runtime conventions:
 - `tools.md` is the canonical runtime-interface artifact for normal agents and is loaded into the system prompt.
 - `task.md` is the inspectable task contract and is loaded into the per-turn user prompt, not the system prompt.
 - parents explicitly read child `publish/` files; child `scratch/` data is not auto-ingested
+- `scratch/` is only for agent-authored working files; harness logs and state live under `_harness/`, which is not LLM-readable
+- `artifacts/` stores deterministic tool outputs; artifact files are inspectable only when addressed by exact file path
 - `progress.md` is the supervisor-maintained human-readable summary used by the TUI
 - root `publish/final.md` is the latest report, while changed versions are copied to `registry/report_versions/agent_root/` and logged in `registry/final_report_versions.jsonl`
-- `scratch/transcript.jsonl` stores replayable model messages
-- `scratch/llm_turns/` stores the exact system prompt snapshot, request payload, response payload, and any extracted thinking text for each turn
-- `state/prompt_memory.md` is the optional carried-forward self-summary loaded into the agent system prompt
-- `state/history_summary.md` is the compacted semantic memory for older transcript history once raw replay is trimmed
-- `state/events_queue.jsonl` is the parent-visible completion queue used by `list_children`
+- `_harness/logs/transcript.jsonl` stores replayable model messages
+- `_harness/logs/tool_calls.jsonl` is the canonical tool-call log
+- `_harness/llm_turns/` stores the exact system prompt snapshot, request payload, response payload, and any extracted thinking text for each turn
+- `_harness/state/prompt_memory.md` is the optional carried-forward self-summary loaded into the agent system prompt
+- `_harness/state/history_summary.md` is the compacted semantic memory for older transcript history once raw replay is trimmed
+- `_harness/logs/events_queue.jsonl` is the parent-visible completion queue used by `list_children`
 
 ## Stop, Resume, And Refinement
 

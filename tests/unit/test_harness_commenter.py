@@ -24,6 +24,8 @@ from src.harness.artifacts import (
     write_text_atomic,
 )
 from src.harness.commenter import (
+    _commenter_tool_specs,
+    _execute_commenter_tool_call,
     _strip_provider_thinking,
     build_comment_feed_message,
     build_commenter_observation_manifest,
@@ -32,8 +34,10 @@ from src.harness.commenter import (
     compute_commenter_observation_fingerprint,
     refresh_commenter_for_agent,
 )
+from src.harness.executor import create_or_load_session, execute_model_tool
 from src.harness.presets import default_tool_allowlist
 from src.harness.prompt_builder import render_task_markdown, render_tools_markdown
+from src.harness.registry import build_skill_registry
 from src.harness.transport import ModelToolCall, ModelTurnResult
 from src.harness.types import HarnessRequest
 
@@ -71,6 +75,69 @@ def test_workspace_initializes_commenter_artifacts(
     assert paths["commenter_turns_root"].exists()
     assert paths["commenter_comments"].exists()
     assert paths["commenter_latest"].exists()
+
+
+def test_commenter_tool_specs_are_read_only_catalog_subset() -> None:
+    specs = _commenter_tool_specs()
+    names = [spec["name"] for spec in specs]
+    by_name = {spec["name"]: spec for spec in specs}
+
+    assert names == ["read_file", "search_in_files"]
+    assert "write_file" not in by_name
+    assert "set_status" not in by_name
+    assert "spawn_subagent" not in by_name
+    assert "inspectable file" in by_name["read_file"]["description"]
+    assert set(by_name["read_file"]["input_schema"]["properties"]) == {
+        "path",
+        "max_chars",
+        "start_char",
+        "start_line",
+        "max_lines",
+    }
+    assert by_name["search_in_files"]["input_schema"]["properties"]["paths"] == {
+        "type": "array",
+        "items": {"type": "string"},
+    }
+
+
+def test_commenter_and_main_agent_share_readable_workspace_view(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id, request = _create_workspace(tmp_path, monkeypatch)
+    paths = agent_workspace_paths(run_root, agent_id)
+    write_text_atomic(paths["scratch_root"] / "shared.md", "shared visible note\n")
+    write_text_atomic(paths["tool_calls_log"], "private runtime log\n")
+    session = create_or_load_session(
+        request=request,
+        run_root=str(run_root),
+        agent_id=agent_id,
+        preset="orchestrator",
+        registry_map=build_skill_registry(),
+    )
+
+    main_result = execute_model_tool(session, "read_file", {"path": "scratch/shared.md"})
+    commenter_result = _execute_commenter_tool_call(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        request=request,
+        manifest=build_commenter_observation_manifest(str(run_root), agent_id),
+        tool_name="read_file",
+        arguments={"path": "scratch/shared.md"},
+    )
+    private_result = _execute_commenter_tool_call(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        request=request,
+        manifest=[],
+        tool_name="read_file",
+        arguments={"path": str(paths["tool_calls_log"])},
+    )
+
+    assert main_result["content"] == "shared visible note\n"
+    assert commenter_result["output_text"] == "shared visible note\n"
+    assert private_result["status"] == "failed"
+    assert "harness-private" in private_result["summary"]
 
 
 def test_comment_feed_caps_unread_comments_and_marks_read(
@@ -133,10 +200,8 @@ def test_refresh_commenter_records_frozen_incremental_prompt_and_review_baseline
 
     write_text_atomic(paths["scratch_root"] / "draft.md", "draft v2\n")
     write_text_atomic(paths["publish_root"] / "final.md", "# Final\n\nNew version.\n")
-    write_text_atomic(paths["scratch_root"] / "journal.jsonl", '{"tool":"write_file"}\n')
-    llm_turns_root = paths["scratch_root"] / "llm_turns"
-    llm_turns_root.mkdir(parents=True, exist_ok=True)
-    write_text_atomic(llm_turns_root / "0001_request.json", '{"messages":[]}\n')
+    write_text_atomic(paths["tool_calls_log"], '{"tool":"write_file"}\n')
+    write_text_atomic(paths["llm_turns_root"] / "0001_request.json", '{"messages":[]}\n')
     (paths["publish_root"] / "old_summary.md").unlink()
     snapshot = build_commenter_observation_snapshot(
         str(run_root),
@@ -186,10 +251,11 @@ def test_refresh_commenter_records_frozen_incremental_prompt_and_review_baseline
     assert "Available Files" not in input_text
     assert "Suggested Files To Inspect First" not in input_text
     assert "- modified: scratch/draft.md [scratch]" in input_text
-    assert "- modified: scratch/journal.jsonl [operating_log]" in input_text
-    assert "- added: scratch/llm_turns/0001_request.json [llm_trace]" in input_text
     assert "- added: publish/final.md [publish]" in input_text
     assert "- deleted: publish/old_summary.md [publish]" in input_text
+    assert "_harness" not in input_text
+    assert "tool_calls.jsonl" not in input_text
+    assert "0001_request.json" not in input_text
     assert "- task.md" in input_text
     assert "- tools.md" in input_text
     assert "- scratch/" in input_text
@@ -214,19 +280,16 @@ def test_refresh_commenter_records_frozen_incremental_prompt_and_review_baseline
     ] == [("modified", "scratch/draft.md", "scratch")]
 
 
-def test_commenter_manifest_classifies_runtime_files_by_semantics(
+def test_commenter_manifest_excludes_private_runtime_files_and_default_artifacts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     run_root, agent_id, _request = _create_workspace(tmp_path, monkeypatch)
     paths = agent_workspace_paths(run_root, agent_id)
-    llm_turns_root = paths["scratch_root"] / "llm_turns"
-    llm_turns_root.mkdir(parents=True, exist_ok=True)
-    write_text_atomic(paths["scratch_root"] / "journal.jsonl", '{"kind":"tool"}\n')
-    write_text_atomic(paths["scratch_root"] / "transcript.jsonl", '{"kind":"assistant"}\n')
-    write_text_atomic(paths["scratch_root"] / "tool_history.jsonl", '{"tool":"read_file"}\n')
-    write_text_atomic(llm_turns_root / "0001_request.json", '{"messages":[]}\n')
-    skills_root = paths["scratch_root"] / "skills" / "001_read_file"
+    write_text_atomic(paths["tool_calls_log"], '{"kind":"tool"}\n')
+    write_text_atomic(paths["transcript"], '{"kind":"assistant"}\n')
+    write_text_atomic(paths["llm_turns_root"] / "0001_request.json", '{"messages":[]}\n')
+    skills_root = paths["skills_artifacts_root"] / "001_read_file"
     skills_root.mkdir(parents=True, exist_ok=True)
     write_text_atomic(skills_root / "output.md", "tool output\n")
     write_text_atomic(paths["scratch_root"] / "notes.md", "working notes\n")
@@ -234,12 +297,11 @@ def test_commenter_manifest_classifies_runtime_files_by_semantics(
     manifest = build_commenter_observation_manifest(str(run_root), agent_id)
     categories = {item["display_path"]: item["category"] for item in manifest}
 
-    assert categories["scratch/journal.jsonl"] == "operating_log"
-    assert categories["scratch/transcript.jsonl"] == "operating_log"
-    assert categories["scratch/tool_history.jsonl"] == "operating_log"
-    assert categories["scratch/llm_turns/0001_request.json"] == "llm_trace"
-    assert categories["scratch/skills/001_read_file/output.md"] == "tool_artifact"
     assert categories["scratch/notes.md"] == "scratch"
+    assert all(not path.startswith("_harness/") for path in categories)
+    assert "artifacts/skills/001_read_file/output.md" not in categories
+    assert "scratch/journal.jsonl" not in categories
+    assert "scratch/tool_history.jsonl" not in categories
 
 
 def test_refresh_commenter_skips_terminal_agents(

@@ -20,7 +20,7 @@
 
 - Use `publish/` for stable handoff files.
 - Use `scratch/` for working notes and bulky outputs.
-- Use `bash(argv=[...], cwd=...)` for repo-scoped filesystem and Unix operations such as `rg --files -g`, `cp`, `mv`, `mkdir`, and `ls`.
+- Use `bash(argv=[...], cwd=...)` for restricted visible-workspace operations such as `rg --files -g`, `cp`, `mv`, `mkdir`, and `ls`.
 - Use `search_in_files(pattern=..., paths=[...])` to locate relevant files or lines before reading larger files.
 - Use `read_file(path=..., start_line=..., max_lines=...)` when you want a line-based slice, or `read_file(path=..., max_chars=..., start_char=...)` for a character range.
 - Use `read_web_pages(urls=[...], max_chars_per_url=...)` after `search_web` or `search_news` when you want actual page content.

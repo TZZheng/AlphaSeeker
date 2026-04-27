@@ -24,7 +24,7 @@ from textual.widgets import (
 )
 
 from src.cli.backends.harness_backend import DashboardSnapshot, HarnessBackend
-from src.harness.artifacts import read_jsonl
+from src.harness.artifacts import agent_workspace_paths, read_jsonl
 from src.cli.theme import STATUS_COLORS
 
 
@@ -423,7 +423,7 @@ class DashboardScreen(Screen):
             if not agent_dir.is_dir():
                 continue
             agent_id = agent_dir.name
-            transcript_path = agent_dir / "scratch" / "transcript.jsonl"
+            transcript_path = agent_workspace_paths(self._run_root, agent_id)["transcript"]
             if not transcript_path.exists():
                 continue
             try:
@@ -453,7 +453,7 @@ class DashboardScreen(Screen):
             if not agent_dir.is_dir():
                 continue
             agent_id = agent_dir.name
-            comments_path = agent_dir / "scratch" / "commenter" / "comments.jsonl"
+            comments_path = agent_workspace_paths(self._run_root, agent_id)["commenter_comments"]
             if not comments_path.exists():
                 continue
             try:

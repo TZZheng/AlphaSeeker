@@ -15,11 +15,11 @@ from src.harness.artifacts import (
     write_status,
     write_text_atomic,
 )
-from src.harness import executor as executor_module
 from src.harness.executor import create_or_load_session, execute_model_tool
 from src.harness.presets import default_tool_allowlist, visible_skills_for_preset
 from src.harness.prompt_builder import render_task_markdown, render_tools_markdown
 from src.harness.registry import build_skill_registry, get_skills_for_packs
+from src.harness.tool_catalog import harness_tool_definitions
 from src.harness.types import HarnessRequest, SkillMetrics, SkillResult, SkillSpec
 
 
@@ -261,7 +261,7 @@ def test_publish_tools_normalize_publish_prefix(
 
 
 def test_write_file_schema_requires_path_and_content() -> None:
-    schema = executor_module._tool_definitions()["write_file"]["input_schema"]
+    schema = harness_tool_definitions()["write_file"]["input_schema"]
 
     assert schema["required"] == ["path", "content"]
 
@@ -586,7 +586,7 @@ def test_search_in_files_returns_match_locations(
             ),
         ),
     )
-    notes_dir = tmp_path / "notes"
+    notes_dir = agent_workspace_paths(run_root, root_agent_id)["scratch_root"] / "notes"
     notes_dir.mkdir()
     hit_file = notes_dir / "memo.md"
     hit_file.write_text("Apple valuation is sensitive to services mix.\n", encoding="utf-8")
@@ -647,7 +647,7 @@ def test_bash_rg_discovers_matching_paths(
             ),
         ),
     )
-    notes_dir = tmp_path / "notes"
+    notes_dir = agent_workspace_paths(run_root, root_agent_id)["scratch_root"] / "notes"
     notes_dir.mkdir()
     (notes_dir / "memo.md").write_text("memo\n", encoding="utf-8")
     (notes_dir / "draft.txt").write_text("draft\n", encoding="utf-8")
@@ -672,7 +672,106 @@ def test_bash_rg_discovers_matching_paths(
     assert "memo.md" in result["stdout"]
 
 
-def test_bash_copy_and_move_stay_inside_project_root(
+def test_search_visibility_excludes_private_and_default_artifact_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-search-visibility",
+        user_prompt="Search visible files only",
+        preset="research",
+    )
+    paths = agent_workspace_paths(run_root, root_agent_id)
+    private_file = paths["harness_logs_root"] / "private.md"
+    private_file.write_text("needle-private\n", encoding="utf-8")
+    artifact_file = paths["skills_artifacts_root"] / "001_tool" / "output.md"
+    artifact_file.parent.mkdir(parents=True, exist_ok=True)
+    artifact_file.write_text("needle-artifact\n", encoding="utf-8")
+
+    default_result = execute_model_tool(
+        session,
+        "search_in_files",
+        {"pattern": "needle-artifact", "max_results": 5},
+    )
+    exact_artifact_result = execute_model_tool(
+        session,
+        "search_in_files",
+        {"pattern": "needle-artifact", "paths": [str(artifact_file)], "max_results": 5},
+    )
+
+    read_private_result = execute_model_tool(session, "read_file", {"path": str(private_file)})
+
+    assert default_result["details"]["matches"] == []
+    assert len(exact_artifact_result["details"]["matches"]) == 1
+    assert exact_artifact_result["details"]["matches"][0]["path"] == str(artifact_file)
+    assert read_private_result["status"] == "failed"
+    assert "harness-private" in read_private_result["summary"]
+
+
+def test_bash_ls_and_rg_do_not_reveal_private_or_artifact_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-bash-visibility",
+        user_prompt="Inspect visible files",
+        preset="research",
+    )
+    paths = agent_workspace_paths(run_root, root_agent_id)
+    (paths["harness_logs_root"] / "private.md").write_text("secret-token\n", encoding="utf-8")
+    artifact_file = paths["skills_artifacts_root"] / "001_tool" / "output.md"
+    artifact_file.parent.mkdir(parents=True, exist_ok=True)
+    artifact_file.write_text("artifact-token\n", encoding="utf-8")
+
+    ls_result = execute_model_tool(session, "bash", {"argv": ["ls"]})
+    rg_result = execute_model_tool(session, "bash", {"argv": ["rg", "secret-token|artifact-token"]})
+
+    assert ls_result["ok"] is True
+    assert "_harness" not in ls_result["stdout"]
+    assert "artifacts" not in ls_result["stdout"]
+    assert "scratch/" in ls_result["stdout"]
+    assert "_harness" not in rg_result["stdout"]
+    assert "secret-token" not in rg_result["stdout"]
+    assert "artifact-token" not in rg_result["stdout"]
+
+
+def test_bash_mutations_reject_private_and_artifact_destinations(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-bash-mutation-visibility",
+        user_prompt="Reject hidden mutations",
+        preset="research",
+    )
+    paths = agent_workspace_paths(run_root, root_agent_id)
+    write_result = execute_model_tool(session, "write_file", {"path": "scratch/source.md", "content": "source\n"})
+
+    with pytest.raises(ValueError, match="harness-private"):
+        execute_model_tool(session, "bash", {"argv": ["mkdir", str(paths["harness_root"] / "new")]})
+    with pytest.raises(ValueError, match="publish/ or scratch"):
+        execute_model_tool(session, "bash", {"argv": ["mkdir", str(paths["artifacts_root"] / "new")]})
+    with pytest.raises(ValueError, match="publish/ or scratch"):
+        execute_model_tool(
+            session,
+            "bash",
+            {"argv": ["cp", write_result["path"], str(paths["artifacts_root"] / "copy.md")]},
+        )
+    with pytest.raises(ValueError, match="harness-private"):
+        execute_model_tool(
+            session,
+            "bash",
+            {"argv": ["mv", write_result["path"], str(paths["harness_root"] / "moved.md")]},
+        )
+
+
+def test_bash_copy_and_move_stay_inside_visible_workspace(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -738,7 +837,7 @@ def test_bash_copy_and_move_stay_inside_project_root(
     assert read_result["content"] == "hello\n"
 
 
-def test_bash_rejects_paths_outside_project_root(
+def test_bash_rejects_paths_outside_visible_workspace(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -773,7 +872,7 @@ def test_bash_rejects_paths_outside_project_root(
     outside = tmp_path.parent / "outside.txt"
     outside.write_text("outside\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="escapes the project root"):
+    with pytest.raises(ValueError, match="agent-visible file surface"):
         execute_model_tool(
             session,
             "bash",
@@ -787,7 +886,7 @@ def test_bash_sleep_records_standard_bash_event(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    run_root, _root_agent_id, session = _create_basic_session(
+    run_root, root_agent_id, session = _create_basic_session(
         monkeypatch,
         tmp_path,
         run_id="executor-bash-sleep",
@@ -808,7 +907,7 @@ def test_bash_sleep_records_standard_bash_event(
     assert bash_events
     assert bash_events[-1]["details"] == {
         "argv": ["sleep", "0"],
-        "cwd": str(tmp_path),
+            "cwd": str(agent_workspace_paths(run_root, root_agent_id)["workspace"]),
         "returncode": 0,
     }
 
@@ -838,7 +937,7 @@ def test_read_file_supports_line_slices(
             ),
         ),
     )
-    note = tmp_path / "note.md"
+    note = agent_workspace_paths(run_root, root_agent_id)["scratch_root"] / "note.md"
     note.write_text("line1\nline2\nline3\nline4\n", encoding="utf-8")
 
     session = create_or_load_session(

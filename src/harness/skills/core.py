@@ -9,7 +9,7 @@ import subprocess
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from src.harness.artifacts import sync_reduction_artifacts, write_json_atomic
+from src.harness.artifacts import agent_workspace_paths, sync_reduction_artifacts, write_json_atomic
 from src.harness.retrieval import (
     build_query_buckets,
     build_read_queue,
@@ -29,6 +29,12 @@ from src.harness.skills.common import (
     url_evidence,
 )
 from src.harness.types import HarnessState, SkillMetrics, SkillResult, SkillSpec
+from src.harness.visibility import (
+    VisibilityError,
+    default_search_targets,
+    resolve_visible_read_file,
+    resolve_visible_search_target,
+)
 from src.shared.text_utils import condense_context
 from src.shared.web_search import read_urls_parallel, search_news, search_web
 
@@ -55,6 +61,11 @@ RETRIEVAL_STAGES = {
 
 
 def _resolve_search_paths(state: HarnessState, raw_paths: list[str]) -> list[str]:
+    if state.run_root and state.agent_id:
+        return [
+            str(resolve_visible_search_target(state.run_root, state.agent_id, raw_path))
+            for raw_path in raw_paths
+        ]
     resolved: list[str] = []
     for raw_path in raw_paths:
         candidate = Path(raw_path).expanduser()
@@ -116,8 +127,22 @@ def search_in_files_skill(arguments: dict[str, Any], state: HarnessState) -> Ski
     else:
         fixed_strings = not any(char in pattern for char in ".^$*+?{}[]|()\\")
     ignore_case = bool(arguments.get("ignore_case", True))
-    requested_paths = ensure_str_list(arguments.get("paths")) or [state.workspace_path]
-    resolved_paths = _resolve_search_paths(state, requested_paths)
+    requested_paths = ensure_str_list(arguments.get("paths"))
+    try:
+        if requested_paths:
+            resolved_paths = _resolve_search_paths(state, requested_paths)
+        elif state.run_root and state.agent_id:
+            resolved_paths = [str(path) for path in default_search_targets(state.run_root, state.agent_id)]
+        else:
+            resolved_paths = _resolve_search_paths(state, [str(state.workspace_path or "")])
+    except VisibilityError as exc:
+        return make_result(
+            "search_in_files",
+            arguments,
+            status="failed",
+            summary=str(exc),
+            error=str(exc),
+        )
     if not resolved_paths:
         return make_result(
             "search_in_files",
@@ -299,7 +324,10 @@ def _write_search_results(state: HarnessState, results: list[dict[str, Any]], pr
 
     slug = prefix[:40].replace("/", "_").replace(" ", "_")
     filename = f"{slug}_{int(time.time() * 1000)}.json"
-    path = Path(state.workspace_path) / "scratch" / "search" / filename
+    if state.run_root and state.agent_id:
+        path = agent_workspace_paths(state.run_root, state.agent_id)["search_artifacts_root"] / filename
+    else:
+        path = Path(state.workspace_path or ".") / "artifacts" / "search" / filename
     path.parent.mkdir(parents=True, exist_ok=True)
     write_json_atomic(str(path), results)
     return str(path)
@@ -517,14 +545,26 @@ def read_file_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillRes
             error="Missing path.",
         )
 
-    file_path = Path(path).expanduser()
-    if not file_path.is_absolute() and _state.workspace_path:
-        # Resolve relative paths against the agent workspace so that
-        # read_file("publish/final.md") finds the same file that
-        # write_file("publish/final.md") wrote.
-        workspace_candidate = Path(_state.workspace_path) / file_path
-        if workspace_candidate.exists():
-            file_path = workspace_candidate
+    if _state.run_root and _state.agent_id:
+        try:
+            file_path = resolve_visible_read_file(_state.run_root, _state.agent_id, path)
+        except VisibilityError as exc:
+            return make_result(
+                "read_file",
+                arguments,
+                status="failed",
+                summary=str(exc),
+                error=str(exc),
+            )
+    else:
+        file_path = Path(path).expanduser()
+        if not file_path.is_absolute() and _state.workspace_path:
+            # Resolve relative paths against the agent workspace so that
+            # read_file("publish/final.md") finds the same file that
+            # write_file("publish/final.md") wrote.
+            workspace_candidate = Path(_state.workspace_path) / file_path
+            if workspace_candidate.exists():
+                file_path = workspace_candidate
     if not file_path.exists() or not file_path.is_file():
         return make_result(
             "read_file",

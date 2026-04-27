@@ -157,10 +157,17 @@ def agent_workspace_paths(run_root: str | Path, agent_id: str) -> dict[str, Path
     workspace = Path(run_root) / AGENTS_DIR / agent_id
     publish = workspace / "publish"
     scratch = workspace / "scratch"
-    commenter = scratch / "commenter"
+    artifacts = workspace / "artifacts"
+    skills_artifacts = artifacts / "skills"
+    search_artifacts = artifacts / "search"
+    reduction_artifacts = artifacts / "reduction"
+    harness = workspace / "_harness"
+    harness_state = harness / "state"
+    harness_logs = harness / "logs"
+    llm_turns = harness / "llm_turns"
+    commenter = harness / "commenter"
     commenter_notes = commenter / "notes"
     commenter_turns = commenter / "turns"
-    state = workspace / "state"
     context_root = workspace / "context"
     return {
         "workspace": workspace,
@@ -171,33 +178,39 @@ def agent_workspace_paths(run_root: str | Path, agent_id: str) -> dict[str, Path
         "publish_index": publish / "artifact_index.md",
         "publish_final": publish / "final.md",
         "scratch_root": scratch,
+        "artifacts_root": artifacts,
+        "skills_artifacts_root": skills_artifacts,
+        "search_artifacts_root": search_artifacts,
+        "reduction_artifacts_root": reduction_artifacts,
+        "harness_root": harness,
+        "harness_state_root": harness_state,
+        "harness_logs_root": harness_logs,
+        "llm_turns_root": llm_turns,
         "commenter_root": commenter,
         "commenter_notes_root": commenter_notes,
         "commenter_turns_root": commenter_turns,
         "commenter_comments": commenter / "comments.jsonl",
         "commenter_latest": commenter / "latest.md",
-        "journal": scratch / "journal.jsonl",
-        "transcript": scratch / "transcript.jsonl",
-        "tool_history": scratch / "tool_history.jsonl",
-        "skill_state": state / "skill_state.json",
-        "transport_state": state / "transport_state.json",
-        "commenter_state": state / "commenter_state.json",
-        "prompt_memory": state / "prompt_memory.md",
-        "history_summary": state / "history_summary.md",
-        "state_root": state,
-        "status": state / "status.txt",
-        "heartbeat": state / "heartbeat.txt",
-        "pid": state / "pid.txt",
-        "parent": state / "parent.txt",
-        "events_queue": state / "events_queue.jsonl",
-        "preset": state / "preset.txt",
+        "transcript": harness_logs / "transcript.jsonl",
+        "tool_calls_log": harness_logs / "tool_calls.jsonl",
+        "worker_log": harness_logs / "worker.log",
+        "events_queue": harness_logs / "events_queue.jsonl",
+        "skill_state": harness_state / "skill_state.json",
+        "transport_state": harness_state / "transport_state.json",
+        "commenter_state": harness_state / "commenter_state.json",
+        "prompt_memory": harness_state / "prompt_memory.md",
+        "history_summary": harness_state / "history_summary.md",
+        "status": harness_state / "status.txt",
+        "heartbeat": harness_state / "heartbeat.txt",
+        "pid": harness_state / "pid.txt",
+        "parent": harness_state / "parent.txt",
+        "preset": harness_state / "preset.txt",
         "context_root": context_root,
     }
 
 
 def build_reduction_paths(workspace: str | Path) -> dict[str, str]:
-    scratch_root = agent_workspace_paths(Path(workspace).parents[1], Path(workspace).name)["scratch_root"]
-    reduction_root = scratch_root / "reduction"
+    reduction_root = agent_workspace_paths(Path(workspace).parents[1], Path(workspace).name)["reduction_artifacts_root"]
     reduction_root.mkdir(parents=True, exist_ok=True)
     return {
         "discovered_sources": str(reduction_root / "discovered_sources.json"),
@@ -255,10 +268,17 @@ def create_agent_workspace(
         "workspace",
         "publish_root",
         "scratch_root",
+        "artifacts_root",
+        "skills_artifacts_root",
+        "search_artifacts_root",
+        "reduction_artifacts_root",
+        "harness_root",
+        "harness_state_root",
+        "harness_logs_root",
+        "llm_turns_root",
         "commenter_root",
         "commenter_notes_root",
         "commenter_turns_root",
-        "state_root",
         "context_root",
     ):
         paths[key].mkdir(parents=True, exist_ok=True)
@@ -270,9 +290,9 @@ def create_agent_workspace(
     write_text_atomic(paths["pid"], "")
     write_text_atomic(paths["parent"], (parent_id or "") + "\n")
     write_text_atomic(paths["preset"], preset + "\n")
-    write_text_atomic(paths["journal"], "")
     write_text_atomic(paths["transcript"], "")
-    write_text_atomic(paths["tool_history"], "")
+    write_text_atomic(paths["tool_calls_log"], "")
+    write_text_atomic(paths["events_queue"], "")
     write_text_atomic(paths["commenter_comments"], "")
     write_text_atomic(paths["commenter_latest"], "")
     write_text_atomic(paths["prompt_memory"], "")
@@ -750,8 +770,8 @@ def append_transcript_entry(run_root: str | Path, agent_id: str, payload: dict[s
     append_jsonl(agent_workspace_paths(run_root, agent_id)["transcript"], payload)
 
 
-def append_tool_history(run_root: str | Path, agent_id: str, payload: dict[str, Any]) -> None:
-    append_jsonl(agent_workspace_paths(run_root, agent_id)["tool_history"], payload)
+def append_tool_call_log(run_root: str | Path, agent_id: str, payload: dict[str, Any]) -> None:
+    append_jsonl(agent_workspace_paths(run_root, agent_id)["tool_calls_log"], payload)
 
 
 def promote_object(
@@ -829,7 +849,7 @@ def _first_nonempty_line(path: Path) -> str:
 
 
 def sync_reduction_artifacts(state: HarnessState) -> None:
-    """Persist retrieval reduction artifacts inside the agent scratch workspace."""
+    """Persist retrieval reduction artifacts inside the agent artifacts workspace."""
 
     if not state.workspace_path:
         return

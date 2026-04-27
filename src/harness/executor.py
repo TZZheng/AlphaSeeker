@@ -5,8 +5,8 @@ from __future__ import annotations
 import contextlib
 from dataclasses import dataclass
 import json
-import os
 from pathlib import Path
+import shutil
 import subprocess
 import time
 from typing import Any
@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from src.harness.artifacts import (
     agent_workspace_paths,
-    append_tool_history,
+    append_tool_call_log,
     append_event,
     build_reduction_paths,
     create_agent_workspace,
@@ -35,6 +35,8 @@ from src.harness.presets import default_tool_allowlist, visible_skills_for_prese
 from src.harness.prompt_builder import render_tools_markdown
 from src.harness.registry import build_skill_registry, get_skills_for_packs
 from src.harness.skills.common import json_preview
+from src.harness.tool_catalog import LEGAL_PRESET_LIST as _LEGAL_PRESET_LIST
+from src.harness.tool_catalog import tool_specs_for_names
 from src.harness.types import (
     AGENT_PRESETS,
     AgentCommand,
@@ -45,29 +47,18 @@ from src.harness.types import (
     SkillResult,
     SkillSpec,
 )
+from src.harness.visibility import (
+    VisibilityError,
+    default_search_targets,
+    resolve_visible_read_file,
+    resolve_visible_search_target,
+    resolve_visible_write_file,
+    visible_workspace_entries,
+)
 
-
-TOOL_NAMES = [
-    "spawn_subagent",
-    "list_children",
-    "list_publish_files",
-    "promote_artifact",
-    "bash",
-    "write_file",
-    "edit_file",
-    "apply_patch",
-    "set_status",
-]
 
 TERMINAL_STATUSES = {"done", "failed", "blocked", "stale", "cancelled"}
 
-_TYPE_MAP = {
-    "string": {"type": "string"},
-    "integer": {"type": "integer"},
-    "number": {"type": "number"},
-    "boolean": {"type": "boolean"},
-}
-_LEGAL_PRESET_LIST = ", ".join(f"'{preset}'" for preset in AGENT_PRESETS)
 BASH_ALLOWED_COMMANDS = {"cp", "mv", "mkdir", "ls", "rg", "sleep"}
 BASH_DEFAULT_TIMEOUT_SECONDS = 10
 BASH_DEFAULT_MAX_OUTPUT_CHARS = 12000
@@ -144,129 +135,6 @@ def create_or_load_session(
     )
 
 
-def _tool_schema_properties(input_schema: dict[str, Any]) -> dict[str, Any]:
-    properties: dict[str, Any] = {}
-    for name, raw_type in input_schema.items():
-        if isinstance(raw_type, dict) and "type" in raw_type:
-            properties[name] = raw_type
-            continue
-        type_name = str(raw_type).strip()
-        if type_name.endswith("[]"):
-            item_type = type_name[:-2]
-            properties[name] = {
-                "type": "array",
-                "items": _TYPE_MAP.get(item_type, {"type": "string"}),
-            }
-            continue
-        properties[name] = _TYPE_MAP.get(type_name, {"type": "string"})
-    return properties
-
-
-def _tool_definitions() -> dict[str, dict[str, Any]]:
-    return {
-        "spawn_subagent": {
-            "description": f"Launch one child agent for a narrower task. Legal preset values: {_LEGAL_PRESET_LIST}.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "task_name": {"type": "string"},
-                    "description": {"type": "string"},
-                    "preset": {
-                        "type": "string",
-                        "enum": list(AGENT_PRESETS),
-                        "description": f"One of: {_LEGAL_PRESET_LIST}.",
-                    },
-                    "instructions": {"type": "string"},
-                    "context_files": {"type": "array", "items": {"type": "string"}},
-                    "expected_publish_files": {"type": "array", "items": {"type": "string"}},
-                    "task_markdown": {"type": "string"},
-                },
-            },
-        },
-        "list_children": {
-            "description": "List all child agents with status. Drains the events queue so callers know which children just finished. Do not poll in a tight loop when nothing new has appeared.",
-            "input_schema": {"type": "object", "properties": {}},
-        },
-        "list_publish_files": {
-            "description": "List published files for an agent.",
-            "input_schema": {
-                "type": "object",
-                "properties": {"agent_id": {"type": "string"}},
-            },
-        },
-        "promote_artifact": {
-            "description": "Promote a local artifact into the shared run object store.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "source_path": {"type": "string"},
-                    "description": {"type": "string"},
-                },
-            },
-        },
-        "bash": {
-            "description": "Run one repo-scoped bash command from the allowlist for filesystem inspection or file movement. Do not use bash as a passive waiting mechanism; the runtime already pauses between turns.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "argv": {"type": "array", "items": {"type": "string"}},
-                    "cwd": {"type": "string"},
-                    "timeout_seconds": {"type": "integer"},
-                    "max_output_chars": {"type": "integer"},
-                },
-            },
-        },
-        "write_file": {
-            "description": "Write one file under this agent's publish/ or scratch/ tree.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "content": {"type": "string"},
-                },
-                "required": ["path", "content"],
-            },
-        },
-        "edit_file": {
-            "description": "Apply one anchored text edit to a file under this agent's publish/ or scratch/ tree.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "operation": {
-                        "type": "string",
-                        "enum": ["replace", "insert_before", "insert_after", "append", "prepend"],
-                    },
-                    "target_text": {"type": "string"},
-                    "content": {"type": "string"},
-                    "occurrence": {"type": "integer"},
-                    "replace_all": {"type": "boolean"},
-                },
-            },
-        },
-        "apply_patch": {
-            "description": "Apply one Codex-style single-file patch to an existing publish/ or scratch/ file. The patch string must use the exact markers '*** Begin Patch', one '*** Update File: ...' block, one or more '@@' hunks, and '*** End Patch'.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "patch": {"type": "string"},
-                },
-                "required": ["patch"],
-            },
-        },
-        "set_status": {
-            "description": "Set this agent's status when it is ready to stop or block.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "status": {"type": "string"},
-                    "error": {"type": "string"},
-                },
-            },
-        },
-}
-
-
 def _normalize_preset_name(raw_preset: str) -> str:
     return raw_preset.strip().lower().replace("-", "_").replace(" ", "_")
 
@@ -298,32 +166,14 @@ def _agent_budget_snapshot(session: AgentSession) -> dict[str, int]:
 
 
 def model_tool_specs(session: AgentSession) -> list[dict[str, Any]]:
-    tools: list[dict[str, Any]] = []
-    base = _tool_definitions()
-    for name in session.allowed_tools:
-        if name not in base:
-            continue
-        spec = base[name]
-        tools.append(
-            {
-                "name": name,
-                "description": spec["description"],
-                "input_schema": spec["input_schema"],
-            }
-        )
-
-    for spec in visible_skills_for_preset(preset=session.preset, available_skills=session.state.available_skills):
-        tools.append(
-            {
-                "name": spec.name,
-                "description": spec.description,
-                "input_schema": {
-                    "type": "object",
-                    "properties": _tool_schema_properties(spec.input_schema),
-                },
-            }
-        )
-    return tools
+    visible_skills = visible_skills_for_preset(
+        preset=session.preset,
+        available_skills=session.state.available_skills,
+    )
+    return tool_specs_for_names(
+        [*session.allowed_tools, *(spec.name for spec in visible_skills)],
+        available_skills=visible_skills,
+    )
 
 
 def execute_agent_command(session: AgentSession, command: AgentCommand) -> dict[str, Any]:
@@ -334,7 +184,7 @@ def execute_agent_command(session: AgentSession, command: AgentCommand) -> dict[
         raise ValueError(f"Unknown tool '{command.tool}'.")
     result = handler(session, command.arguments)
     _snapshot_final_report_after_tool(session, command.tool, result)
-    _append_journal(
+    _append_tool_call(
         session,
         {
             "tool": command.tool,
@@ -360,15 +210,14 @@ def execute_model_tool(session: AgentSession, tool_name: str, arguments: dict[st
             raise ValueError(f"Tool '{tool_name}' is not available for preset '{session.preset}'.")
         result = _run_skill(session, tool_name, arguments)
 
-    journal_row = {
+    tool_call_row = {
         "tool": tool_name,
         "arguments": arguments,
         "result": result,
         "created_at": _now_iso(),
     }
     _snapshot_final_report_after_tool(session, tool_name, result)
-    _append_journal(session, journal_row)
-    append_tool_history(session.run_root, session.agent_id, journal_row)
+    append_tool_call_log(session.run_root, session.agent_id, tool_call_row)
     save_skill_state(session.state)
     refresh_progress_view(session.run_root)
     return result
@@ -400,10 +249,8 @@ def _snapshot_final_report_after_tool(session: AgentSession, tool_name: str, res
             )
 
 
-def _append_journal(session: AgentSession, payload: dict[str, Any]) -> None:
-    journal_path = agent_workspace_paths(session.run_root, session.agent_id)["journal"]
-    with journal_path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(payload, ensure_ascii=True) + "\n")
+def _append_tool_call(session: AgentSession, payload: dict[str, Any]) -> None:
+    append_tool_call_log(session.run_root, session.agent_id, payload)
 
 
 def _now_iso() -> str:
@@ -428,7 +275,7 @@ def _assign_evidence_ids(session: AgentSession, result: SkillResult) -> None:
 
 
 def _skill_output_root(session: AgentSession, skill_name: str) -> Path:
-    root = agent_workspace_paths(session.run_root, session.agent_id)["scratch_root"] / "skills"
+    root = agent_workspace_paths(session.run_root, session.agent_id)["skills_artifacts_root"]
     root.mkdir(parents=True, exist_ok=True)
     index = len(session.state.skill_history) + 1
     dest = root / f"{index:03d}_{skill_name}"
@@ -727,90 +574,34 @@ def _publish_file_rows(run_root: str, agent_id: str) -> list[dict[str, str]]:
     return rows
 
 
-def _safe_relative_path(file_name: str) -> Path:
-    relative = Path(file_name)
-    if relative.is_absolute() or ".." in relative.parts:
-        raise ValueError("Illegal file path.")
-    return relative
-
-
 def _resolve_workspace_file_path(
     session: AgentSession,
     raw_path: str,
     *,
     must_exist: bool,
 ) -> tuple[Path, str, str]:
-    candidate = Path(raw_path).expanduser()
-    workspace_paths = agent_workspace_paths(session.run_root, session.agent_id)
-    allowed_roots = {
-        "publish": workspace_paths["publish_root"].resolve(strict=False),
-        "scratch": workspace_paths["scratch_root"].resolve(strict=False),
-    }
-
-    if candidate.is_absolute():
-        resolved = candidate.resolve(strict=False)
-        for root_name, root in allowed_roots.items():
-            if resolved == root or root in resolved.parents:
-                if must_exist and not resolved.exists():
-                    raise ValueError(f"File '{raw_path}' does not exist.")
-                relative = resolved.relative_to(root).as_posix()
-                if not relative or relative == ".":
-                    raise ValueError("Path must point to a file inside publish/ or scratch/.")
-                return resolved, root_name, relative
-        raise ValueError("Path must stay inside this agent's publish/ or scratch/ tree.")
-
-    relative = _safe_relative_path(raw_path)
-    if not relative.parts:
-        raise ValueError("Illegal file path.")
-    root_name = relative.parts[0]
-    if root_name not in allowed_roots:
-        raise ValueError("Relative paths must start with 'publish/' or 'scratch/'.")
-    sub_relative = Path(*relative.parts[1:]) if len(relative.parts) > 1 else Path()
-    if not sub_relative.parts:
-        raise ValueError("Path must point to a file inside publish/ or scratch/.")
-    resolved = allowed_roots[root_name] / sub_relative
-    if must_exist and not resolved.exists():
-        raise ValueError(f"File '{raw_path}' does not exist.")
-    return resolved, root_name, sub_relative.as_posix()
+    try:
+        return resolve_visible_write_file(
+            session.run_root,
+            session.agent_id,
+            raw_path,
+            must_exist=must_exist,
+        )
+    except VisibilityError as exc:
+        raise ValueError(str(exc)) from exc
 
 
-def _project_root_for_session(session: AgentSession) -> Path:
-    cwd = Path.cwd().resolve()
-    if (cwd / "pyproject.toml").exists() or (cwd / ".git").exists():
-        return cwd
-    run_root = Path(session.run_root).resolve(strict=False)
-    for candidate in (run_root, *run_root.parents):
-        if (candidate / "pyproject.toml").exists() or (candidate / ".git").exists():
-            return candidate
-    return cwd
-
-
-def _is_within(root: Path, candidate: Path) -> bool:
-    resolved_root = root.resolve(strict=False)
-    resolved_candidate = candidate.resolve(strict=False)
-    return resolved_candidate == resolved_root or resolved_root in resolved_candidate.parents
-
-
-def _resolve_repo_path(project_root: Path, cwd: Path, raw_path: str, *, allow_missing: bool) -> Path:
-    candidate = Path(raw_path).expanduser()
-    if not candidate.is_absolute():
-        candidate = cwd / candidate
-    resolved = candidate.resolve(strict=False)
-    if not _is_within(project_root, resolved):
-        raise ValueError(f"Path '{raw_path}' escapes the project root.")
-    if not allow_missing and not resolved.exists():
-        raise ValueError(f"Path '{raw_path}' does not exist.")
-    return resolved
-
-
-def _resolve_bash_cwd(session: AgentSession, raw_cwd: str | None) -> tuple[Path, Path]:
-    project_root = _project_root_for_session(session)
+def _resolve_bash_cwd(session: AgentSession, raw_cwd: str | None) -> Path:
+    workspace = agent_workspace_paths(session.run_root, session.agent_id)["workspace"]
     if not raw_cwd:
-        return project_root, project_root
-    resolved = _resolve_repo_path(project_root, project_root, raw_cwd, allow_missing=False)
+        return workspace
+    try:
+        resolved = resolve_visible_search_target(session.run_root, session.agent_id, raw_cwd)
+    except VisibilityError as exc:
+        raise ValueError(str(exc)) from exc
     if not resolved.is_dir():
-        raise ValueError("bash cwd must be a directory inside the project root.")
-    return project_root, resolved
+        raise ValueError("bash cwd must be a visible directory.")
+    return resolved
 
 
 def _extract_non_option_args(argv: list[str], *, options_with_values: set[str] | None = None) -> list[str]:
@@ -830,37 +621,13 @@ def _extract_non_option_args(argv: list[str], *, options_with_values: set[str] |
     return values
 
 
-def _validate_bash_cp_mv(argv: list[str], *, project_root: Path, cwd: Path, command_name: str) -> None:
-    options_with_values: set[str] = set()
-    path_args = _extract_non_option_args(argv[1:], options_with_values=options_with_values)
-    if len(path_args) < 2:
-        raise ValueError(f"{command_name} requires at least one source path and one destination path.")
-    for raw_path in path_args[:-1]:
-        _resolve_repo_path(project_root, cwd, raw_path, allow_missing=False)
-    _resolve_repo_path(project_root, cwd, path_args[-1], allow_missing=True)
-
-
-def _validate_bash_mkdir(argv: list[str], *, project_root: Path, cwd: Path) -> None:
-    path_args = _extract_non_option_args(argv[1:], options_with_values=set())
-    if not path_args:
-        raise ValueError("mkdir requires at least one path.")
-    for raw_path in path_args:
-        _resolve_repo_path(project_root, cwd, raw_path, allow_missing=True)
-
-
-def _validate_bash_ls(argv: list[str], *, project_root: Path, cwd: Path) -> None:
-    path_args = _extract_non_option_args(argv[1:], options_with_values=set())
-    for raw_path in path_args:
-        _resolve_repo_path(project_root, cwd, raw_path, allow_missing=False)
-
-
-def _validate_bash_rg(argv: list[str], *, project_root: Path, cwd: Path) -> None:
+def _rg_path_argument_indexes(argv: list[str]) -> list[int]:
     consumes_value = {"-g", "--glob", "-e", "-m", "--max-count", "--color"}
     files_mode = any(item == "--files" for item in argv[1:])
     pattern_from_flag = any(item == "-e" for item in argv[1:])
-    positional: list[str] = []
+    positional_indexes: list[int] = []
     skip_next = False
-    for item in argv[1:]:
+    for index, item in enumerate(argv[1:], start=1):
         if skip_next:
             skip_next = False
             continue
@@ -869,16 +636,250 @@ def _validate_bash_rg(argv: list[str], *, project_root: Path, cwd: Path) -> None
             continue
         if item.startswith("-"):
             continue
-        positional.append(item)
-    path_args = positional if files_mode or pattern_from_flag else positional[1:]
-    for raw_path in path_args:
-        _resolve_repo_path(project_root, cwd, raw_path, allow_missing=False)
+        positional_indexes.append(index)
+    if files_mode or pattern_from_flag:
+        return positional_indexes
+    return positional_indexes[1:]
+
+
+def _validate_rg_options(argv: list[str]) -> None:
+    allowed_flags = {
+        "--files",
+        "--json",
+        "--line-number",
+        "--no-heading",
+        "--fixed-strings",
+        "--ignore-case",
+        "--color",
+        "--glob",
+        "--max-count",
+        "-g",
+        "-e",
+        "-m",
+        "-i",
+    }
+    consumes_value = {"-g", "--glob", "-e", "-m", "--max-count", "--color"}
+    skip_next = False
+    for item in argv[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if item in consumes_value:
+            skip_next = True
+            continue
+        if item.startswith("-") and item not in allowed_flags:
+            raise ValueError(f"Unsupported rg option '{item}'.")
 
 
 def _truncate_shell_output(text: str, *, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + f"\n\n[truncated at {max_chars} chars]"
+
+
+def _record_bash_event(session: AgentSession, argv: list[str], cwd: Path, returncode: int) -> None:
+    append_event(
+        session.run_root,
+        AgentEvent(
+            event_type="bash_executed",
+            agent_id=session.agent_id,
+            details={
+                "argv": argv,
+                "cwd": str(cwd),
+                "returncode": returncode,
+            },
+        ),
+    )
+
+
+def _bash_result(
+    *,
+    session: AgentSession,
+    argv: list[str],
+    cwd: Path,
+    returncode: int,
+    stdout: str = "",
+    stderr: str = "",
+    summary: str | None = None,
+) -> dict[str, Any]:
+    _record_bash_event(session, argv, cwd, returncode)
+    return {
+        "ok": returncode == 0,
+        "argv": argv,
+        "cwd": str(cwd),
+        "project_root": str(agent_workspace_paths(session.run_root, session.agent_id)["workspace"]),
+        "returncode": returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "content": stdout,
+        "summary": summary or f"Command exited with code {returncode}.",
+    }
+
+
+def _handle_bash_sleep(session: AgentSession, argv: list[str], cwd: Path) -> dict[str, Any]:
+    seconds = float(argv[1]) if len(argv) > 1 else 30
+    time.sleep(seconds)
+    return _bash_result(
+        session=session,
+        argv=argv,
+        cwd=cwd,
+        returncode=0,
+        stdout="",
+        stderr="",
+        summary=f"Slept for {seconds} second(s).",
+    ) | {"content": f"slept {seconds}s"}
+
+
+def _handle_bash_ls(session: AgentSession, argv: list[str], cwd: Path) -> dict[str, Any]:
+    raw_paths = _extract_non_option_args(argv[1:], options_with_values=set())
+    rows: list[str] = []
+    targets = raw_paths or ["."]
+    for raw_path in targets:
+        if raw_path in {".", "./"} and cwd == agent_workspace_paths(session.run_root, session.agent_id)["workspace"]:
+            entries = visible_workspace_entries(session.run_root, session.agent_id)
+            rows.extend(path.name + ("/" if path.is_dir() else "") for path in entries)
+            continue
+        try:
+            target = resolve_visible_search_target(session.run_root, session.agent_id, raw_path, cwd=cwd)
+        except VisibilityError as exc:
+            raise ValueError(str(exc)) from exc
+        if target.is_file():
+            rows.append(str(target))
+            continue
+        for child in sorted(target.iterdir()):
+            try:
+                resolve_visible_search_target(session.run_root, session.agent_id, str(child), cwd=cwd)
+            except VisibilityError:
+                continue
+            rows.append(str(child))
+    stdout = "\n".join(rows) + ("\n" if rows else "")
+    return _bash_result(session=session, argv=argv, cwd=cwd, returncode=0, stdout=stdout)
+
+
+def _handle_bash_cp(session: AgentSession, argv: list[str], cwd: Path) -> dict[str, Any]:
+    path_args = _extract_non_option_args(argv[1:], options_with_values=set())
+    if len(path_args) != 2:
+        raise ValueError("cp requires exactly one source file and one destination file.")
+    try:
+        source = resolve_visible_read_file(session.run_root, session.agent_id, path_args[0], cwd=cwd)
+        destination, _root_name, _relative = resolve_visible_write_file(
+            session.run_root,
+            session.agent_id,
+            path_args[1],
+            cwd=cwd,
+            must_exist=False,
+        )
+    except VisibilityError as exc:
+        raise ValueError(str(exc)) from exc
+    if destination.exists() and destination.is_dir():
+        raise ValueError("cp destination must be a file path, not a directory.")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    return _bash_result(session=session, argv=argv, cwd=cwd, returncode=0)
+
+
+def _handle_bash_mv(session: AgentSession, argv: list[str], cwd: Path) -> dict[str, Any]:
+    path_args = _extract_non_option_args(argv[1:], options_with_values=set())
+    if len(path_args) != 2:
+        raise ValueError("mv requires exactly one source file and one destination file.")
+    try:
+        source, _source_root, _source_relative = resolve_visible_write_file(
+            session.run_root,
+            session.agent_id,
+            path_args[0],
+            cwd=cwd,
+            must_exist=True,
+        )
+        destination, _dest_root, _dest_relative = resolve_visible_write_file(
+            session.run_root,
+            session.agent_id,
+            path_args[1],
+            cwd=cwd,
+            must_exist=False,
+        )
+    except VisibilityError as exc:
+        raise ValueError(str(exc)) from exc
+    if source.is_dir() or (destination.exists() and destination.is_dir()):
+        raise ValueError("mv supports file paths only.")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(source), str(destination))
+    return _bash_result(session=session, argv=argv, cwd=cwd, returncode=0)
+
+
+def _handle_bash_mkdir(session: AgentSession, argv: list[str], cwd: Path) -> dict[str, Any]:
+    path_args = _extract_non_option_args(argv[1:], options_with_values=set())
+    if not path_args:
+        raise ValueError("mkdir requires at least one path.")
+    try:
+        targets = [
+            resolve_visible_write_file(
+                session.run_root,
+                session.agent_id,
+                raw_path,
+                cwd=cwd,
+                must_exist=False,
+            )[0]
+            for raw_path in path_args
+        ]
+    except VisibilityError as exc:
+        raise ValueError(str(exc)) from exc
+    for target in targets:
+        target.mkdir(parents=True, exist_ok=True)
+    return _bash_result(session=session, argv=argv, cwd=cwd, returncode=0)
+
+
+def _handle_bash_rg(session: AgentSession, argv: list[str], cwd: Path, arguments: dict[str, Any]) -> dict[str, Any]:
+    _validate_rg_options(argv)
+    path_indexes = _rg_path_argument_indexes(argv)
+    safe_argv = list(argv)
+    try:
+        if path_indexes:
+            for index in path_indexes:
+                safe_argv[index] = str(resolve_visible_search_target(session.run_root, session.agent_id, argv[index], cwd=cwd))
+        else:
+            safe_argv.extend(str(path) for path in default_search_targets(session.run_root, session.agent_id))
+    except VisibilityError as exc:
+        raise ValueError(str(exc)) from exc
+
+    timeout_seconds = max(1, min(int(arguments.get("timeout_seconds", BASH_DEFAULT_TIMEOUT_SECONDS)), 60))
+    max_output_chars = max(200, min(int(arguments.get("max_output_chars", BASH_DEFAULT_MAX_OUTPUT_CHARS)), 40000))
+    try:
+        completed = subprocess.run(
+            safe_argv,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except FileNotFoundError:
+        return _bash_result(
+            session=session,
+            argv=argv,
+            cwd=cwd,
+            returncode=127,
+            stderr="Command 'rg' is not available.",
+            summary="Command 'rg' is not available.",
+        )
+    except subprocess.TimeoutExpired:
+        return _bash_result(
+            session=session,
+            argv=argv,
+            cwd=cwd,
+            returncode=124,
+            stderr=f"Command timed out after {timeout_seconds} seconds.",
+            summary=f"Command timed out after {timeout_seconds} seconds.",
+        )
+    stdout = _truncate_shell_output(completed.stdout, max_chars=max_output_chars)
+    stderr = _truncate_shell_output(completed.stderr, max_chars=max_output_chars)
+    return _bash_result(
+        session=session,
+        argv=argv,
+        cwd=cwd,
+        returncode=completed.returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
 
 
 def _handle_bash(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -890,108 +891,20 @@ def _handle_bash(session: AgentSession, arguments: dict[str, Any]) -> dict[str, 
     if command_name not in BASH_ALLOWED_COMMANDS:
         raise ValueError(f"Illegal bash command '{command_name}'. Allowed commands: {', '.join(sorted(BASH_ALLOWED_COMMANDS))}.")
 
-    project_root, cwd = _resolve_bash_cwd(session, str(arguments.get("cwd") or "").strip() or None)
+    cwd = _resolve_bash_cwd(session, str(arguments.get("cwd") or "").strip() or None)
     if command_name == "cp":
-        _validate_bash_cp_mv(argv, project_root=project_root, cwd=cwd, command_name="cp")
+        return _handle_bash_cp(session, argv, cwd)
     elif command_name == "mv":
-        _validate_bash_cp_mv(argv, project_root=project_root, cwd=cwd, command_name="mv")
+        return _handle_bash_mv(session, argv, cwd)
     elif command_name == "mkdir":
-        _validate_bash_mkdir(argv, project_root=project_root, cwd=cwd)
+        return _handle_bash_mkdir(session, argv, cwd)
     elif command_name == "ls":
-        _validate_bash_ls(argv, project_root=project_root, cwd=cwd)
+        return _handle_bash_ls(session, argv, cwd)
     elif command_name == "rg":
-        _validate_bash_rg(argv, project_root=project_root, cwd=cwd)
+        return _handle_bash_rg(session, argv, cwd, arguments)
     elif command_name == "sleep":
-        # Handled inline without subprocess
-        seconds = float(argv[1]) if len(argv) > 1 else 30
-        time.sleep(seconds)
-        append_event(
-            session.run_root,
-            AgentEvent(
-                event_type="bash_executed",
-                agent_id=session.agent_id,
-                details={
-                    "argv": argv,
-                    "cwd": str(cwd),
-                    "returncode": 0,
-                },
-            ),
-        )
-        return {
-            "ok": True,
-            "argv": argv,
-            "cwd": str(cwd),
-            "project_root": str(project_root),
-            "returncode": 0,
-            "stdout": "",
-            "stderr": "",
-            "content": f"slept {seconds}s",
-            "summary": f"Slept for {seconds} second(s).",
-        }
-
-    timeout_seconds = max(1, min(int(arguments.get("timeout_seconds", BASH_DEFAULT_TIMEOUT_SECONDS)), 60))
-    max_output_chars = max(200, min(int(arguments.get("max_output_chars", BASH_DEFAULT_MAX_OUTPUT_CHARS)), 40000))
-    try:
-        completed = subprocess.run(
-            argv,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=False,
-            env={**os.environ, "PWD": str(cwd)},
-        )
-    except FileNotFoundError:
-        result = {
-            "ok": False,
-            "argv": argv,
-            "cwd": str(cwd),
-            "project_root": str(project_root),
-            "returncode": 127,
-            "stdout": "",
-            "stderr": f"Command '{command_name}' is not available.",
-            "content": "",
-            "summary": f"Command '{command_name}' is not available.",
-        }
-    except subprocess.TimeoutExpired:
-        result = {
-            "ok": False,
-            "argv": argv,
-            "cwd": str(cwd),
-            "project_root": str(project_root),
-            "returncode": 124,
-            "stdout": "",
-            "stderr": f"Command timed out after {timeout_seconds} seconds.",
-            "content": "",
-            "summary": f"Command timed out after {timeout_seconds} seconds.",
-        }
-    else:
-        stdout = _truncate_shell_output(completed.stdout, max_chars=max_output_chars)
-        stderr = _truncate_shell_output(completed.stderr, max_chars=max_output_chars)
-        result = {
-            "ok": completed.returncode == 0,
-            "argv": argv,
-            "cwd": str(cwd),
-            "project_root": str(project_root),
-            "returncode": completed.returncode,
-            "stdout": stdout,
-            "stderr": stderr,
-            "content": stdout,
-            "summary": f"Command exited with code {completed.returncode}.",
-        }
-    append_event(
-        session.run_root,
-        AgentEvent(
-            event_type="bash_executed",
-            agent_id=session.agent_id,
-            details={
-                "argv": argv,
-                "cwd": str(cwd),
-                "returncode": int(result["returncode"]),
-            },
-        ),
-    )
-    return result
+        return _handle_bash_sleep(session, argv, cwd)
+    raise ValueError(f"Unsupported bash command '{command_name}'.")
 
 
 def _handle_promote_artifact(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:

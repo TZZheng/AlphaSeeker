@@ -47,9 +47,20 @@ def test_initialize_run_root_and_workspace_layout(monkeypatch: pytest.MonkeyPatc
     assert Path(run_root, "request.json").exists()
     assert paths["task"].exists()
     assert paths["tools"].exists()
-    assert paths["state_root"].exists()
+    assert paths["context_root"].exists()
+    assert paths["publish_root"].exists()
+    assert paths["scratch_root"].exists()
+    assert paths["artifacts_root"].exists()
+    assert paths["harness_root"].exists()
+    assert paths["harness_state_root"].exists()
+    assert paths["harness_logs_root"].exists()
+    assert paths["llm_turns_root"].exists()
+    assert paths["commenter_root"].exists()
     assert paths["transcript"].exists()
-    assert paths["tool_history"].exists()
+    assert paths["tool_calls_log"].exists()
+    assert not (paths["workspace"] / "state").exists()
+    assert not (paths["scratch_root"] / "transcript.jsonl").exists()
+    assert not (paths["scratch_root"] / "tool_history.jsonl").exists()
     assert load_request(run_root).user_prompt == "Analyze AAPL"
     assert latest_agent_records(run_root)[root_agent_id].status == "queued"
 

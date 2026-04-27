@@ -103,8 +103,8 @@ Data sources:
 
 - agent status comes from `HarnessBackend.poll()`
 - partial results come from `<run_root>/progress.md`
-- LLM and thinking logs come from each agent's `scratch/transcript.jsonl`
-- commenter notes are merged into the LLM log stream from `scratch/commenter/comments.jsonl`
+- LLM and thinking logs come from each agent's `_harness/logs/transcript.jsonl`
+- commenter notes are merged into the LLM log stream from `_harness/commenter/comments.jsonl`
 - results are pulled from each agent's `publish/summary.md` and `publish/final.md`
 
 Interaction:

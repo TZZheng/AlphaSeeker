@@ -818,7 +818,7 @@ class BaseAgentTransport:
         save_transport_state(self.run_root, self.agent_id, meta)
 
     def _llm_turns_root(self) -> Path:
-        root = agent_workspace_paths(self.run_root, self.agent_id)["scratch_root"] / "llm_turns"
+        root = agent_workspace_paths(self.run_root, self.agent_id)["llm_turns_root"]
         root.mkdir(parents=True, exist_ok=True)
         return root
 
@@ -837,7 +837,7 @@ class BaseAgentTransport:
     def _write_thinking_block(self, *, turn_index: int, content: list[str]) -> None:
         """Write thinking block content to a human-readable text file for live observability."""
         root = self._llm_turns_root()
-        # Per-turn thinking file: scratch/llm_turns/0001_thinking.txt
+        # Per-turn thinking file: _harness/llm_turns/0001_thinking.txt
         turn_path = root / f"{turn_index:04d}_thinking.txt"
         text = "\n\n---\n\n".join(content) if content else ""
         write_text_atomic(turn_path, text)

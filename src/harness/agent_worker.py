@@ -526,82 +526,44 @@ def _execute_text_json_turn(
     )
 
 
-def _record_history_compaction_soft_overflow(
+def _record_history_compaction_overflow(
     run_root: str,
     agent_id: str,
     runtime: WorkerRuntime,
     *,
+    overflow_kind: str,
     estimated_before: int,
     estimated_after: int,
     compacted_user_turns: int,
+    previous_error: str | None = None,
 ) -> None:
+    event_type = f"history_compaction_{overflow_kind}_overflow"
+    details = {
+        "estimated_input_tokens_before": estimated_before,
+        "estimated_input_tokens_after": estimated_after,
+        "soft_budget_tokens": 170000,
+        "hard_context_window_tokens": 200000,
+        "compacted_user_turns": compacted_user_turns,
+    }
+    transcript_entry = {
+        "kind": event_type,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        **details,
+    }
+    if previous_error is not None:
+        transcript_entry["error"] = previous_error
     append_transcript_entry(
         run_root,
         agent_id,
-        {
-            "kind": "history_compaction_soft_overflow",
-            "created_at": datetime.utcnow().isoformat() + "Z",
-            "estimated_input_tokens_before": estimated_before,
-            "estimated_input_tokens_after": estimated_after,
-            "soft_budget_tokens": 170000,
-            "hard_context_window_tokens": 200000,
-            "compacted_user_turns": compacted_user_turns,
-        },
+        transcript_entry,
     )
     append_event(
         run_root,
         AgentEvent(
-            event_type="history_compaction_soft_overflow",
+            event_type=event_type,
             agent_id=agent_id,
             parent_id=runtime.record.parent_id,
-            details={
-                "estimated_input_tokens_before": estimated_before,
-                "estimated_input_tokens_after": estimated_after,
-                "soft_budget_tokens": 170000,
-                "hard_context_window_tokens": 200000,
-                "compacted_user_turns": compacted_user_turns,
-            },
-        ),
-    )
-
-
-def _record_history_compaction_hard_overflow(
-    run_root: str,
-    agent_id: str,
-    runtime: WorkerRuntime,
-    *,
-    previous_error: str,
-    estimated_before: int,
-    estimated_after: int,
-    compacted_user_turns: int,
-) -> None:
-    append_transcript_entry(
-        run_root,
-        agent_id,
-        {
-            "kind": "history_compaction_hard_overflow",
-            "created_at": datetime.utcnow().isoformat() + "Z",
-            "estimated_input_tokens_before": estimated_before,
-            "estimated_input_tokens_after": estimated_after,
-            "soft_budget_tokens": 170000,
-            "hard_context_window_tokens": 200000,
-            "compacted_user_turns": compacted_user_turns,
-            "error": previous_error,
-        },
-    )
-    append_event(
-        run_root,
-        AgentEvent(
-            event_type="history_compaction_hard_overflow",
-            agent_id=agent_id,
-            parent_id=runtime.record.parent_id,
-            details={
-                "estimated_input_tokens_before": estimated_before,
-                "estimated_input_tokens_after": estimated_after,
-                "soft_budget_tokens": 170000,
-                "hard_context_window_tokens": 200000,
-                "compacted_user_turns": compacted_user_turns,
-            },
+            details=details,
         ),
     )
 
@@ -665,10 +627,11 @@ def _prepare_native_turn(
         hard_overflow=hard_overflow,
     )
     if soft_overflow:
-        _record_history_compaction_soft_overflow(
+        _record_history_compaction_overflow(
             run_root,
             agent_id,
             runtime,
+            overflow_kind="soft",
             estimated_before=estimated_before,
             estimated_after=estimated_after,
             compacted_user_turns=compacted_user_turns,
@@ -678,10 +641,11 @@ def _prepare_native_turn(
             "Next request exceeds the hard input context window even after full transcript compaction. "
             f"Estimated input tokens: {estimated_after}. Hard window: 200000."
         )
-        _record_history_compaction_hard_overflow(
+        _record_history_compaction_overflow(
             run_root,
             agent_id,
             runtime,
+            overflow_kind="hard",
             previous_error=previous_error,
             estimated_before=estimated_before,
             estimated_after=estimated_after,

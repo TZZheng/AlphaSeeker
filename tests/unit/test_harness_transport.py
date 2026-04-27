@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from src.harness.artifacts import (
+    agent_workspace_paths,
     append_transcript_entry,
     create_agent_workspace,
     initialize_run_root,
@@ -583,7 +584,7 @@ def test_preflight_history_compaction_keeps_full_raw_replay_under_budget(
         "Turn 4",
         "Turn 5",
     ]
-    assert (run_root / "agents" / agent_id / "state" / "history_summary.md").read_text(encoding="utf-8") == ""
+    assert agent_workspace_paths(run_root, agent_id)["history_summary"].read_text(encoding="utf-8") == ""
 
 
 def test_preflight_history_compaction_compacts_oldest_turns_only_when_over_budget(
@@ -633,9 +634,7 @@ def test_preflight_history_compaction_compacts_oldest_turns_only_when_over_budge
         tool_specs=[],
     )
 
-    history_summary = (run_root / "agents" / agent_id / "state" / "history_summary.md").read_text(
-        encoding="utf-8"
-    )
+    history_summary = agent_workspace_paths(run_root, agent_id)["history_summary"].read_text(encoding="utf-8")
     replay_messages = _transcript_messages(str(run_root), agent_id)
     replay_user_messages = [message for message in replay_messages if message["role"] == "user"]
 
