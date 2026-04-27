@@ -333,6 +333,51 @@ def _write_search_results(state: HarnessState, results: list[dict[str, Any]], pr
     return str(path)
 
 
+def _search_result_url(item: dict[str, Any]) -> str:
+    return str(item.get("href") or item.get("url") or "").strip()
+
+
+def _compact_search_results(results: list[dict[str, Any]]) -> list[dict[str, str]]:
+    return [
+        {
+            "title": str(item.get("title") or "").strip(),
+            "url": _search_result_url(item),
+            "date": str(item.get("date") or "").strip(),
+        }
+        for item in results
+    ]
+
+
+def _markdown_table_cell(value: str) -> str:
+    return value.replace("\n", " ").replace("|", "\\|").strip()
+
+
+def _render_search_results_output(
+    *,
+    query: str,
+    results_path: str,
+    results: list[dict[str, str]],
+) -> str:
+    lines = [
+        "# Search Results",
+        "",
+        f"Query: {query}",
+        f"Results artifact: {results_path}",
+        "",
+    ]
+    if not results:
+        lines.append("No results found.")
+        return "\n".join(lines) + "\n"
+
+    lines.extend(["| # | Title | URL | Date |", "|---:|---|---|---|"])
+    for index, item in enumerate(results, start=1):
+        title = _markdown_table_cell(item["title"])
+        url = _markdown_table_cell(item["url"])
+        date = _markdown_table_cell(item["date"])
+        lines.append(f"| {index} | {title} | {url} | {date} |")
+    return "\n".join(lines) + "\n"
+
+
 def search_web_skill(arguments: dict[str, Any], state: HarnessState) -> SkillResult:
     query = str(arguments.get("query") or "").strip()
     max_results = int(arguments.get("max_results", DEFAULT_SEARCH_MAX_RESULTS))
@@ -347,11 +392,12 @@ def search_web_skill(arguments: dict[str, Any], state: HarnessState) -> SkillRes
 
     results = search_web(query, max_results=max_results)
     results_path = _write_search_results(state, results, query)
+    compact_results = _compact_search_results(results)
     evidence = [
         url_evidence(
             "search_web",
             item.get("title", query),
-            item.get("href", ""),
+            _search_result_url(item),
             content=item.get("body", ""),
             metadata={"query": query, "date": item.get("date", "")},
         )
@@ -367,13 +413,18 @@ def search_web_skill(arguments: dict[str, Any], state: HarnessState) -> SkillRes
             "type": "web",
             "results_path": results_path,
             "count": len(results),
+            "results": compact_results,
         },
         metrics=SkillMetrics(
             evidence_count=len(evidence),
             urls_discovered=len(results),
             dated_evidence_count=sum(1 for item in results if item.get("date")),
         ),
-        output_text=results_path,
+        output_text=_render_search_results_output(
+            query=query,
+            results_path=results_path,
+            results=compact_results,
+        ),
         artifacts=[results_path],
         evidence=evidence,
     )
@@ -782,7 +833,7 @@ CORE_SKILLS = [
     ),
     SkillSpec(
         name="search_web",
-        description="Discover web URLs and snippets for a query. Use type='news' for news results.",
+        description="Discover web URLs and dates for a query. Use type='news' for news results.",
         pack="core",
         input_schema={"query": "string", "max_results": "integer", "type": "string"},
         executor=search_web_skill,

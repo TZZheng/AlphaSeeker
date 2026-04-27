@@ -322,6 +322,7 @@ def _sanitize_replay_message(
     message: dict[str, Any],
     *,
     entry_kind: str,
+    preserve_tool_result: bool = False,
 ) -> dict[str, Any] | None:
     role = str(message.get("role") or "")
     sanitized = dict(message)
@@ -338,7 +339,7 @@ def _sanitize_replay_message(
                 filtered.append(item)
             sanitized["content"] = filtered
         sanitized = _sanitize_assistant_tool_payloads(sanitized)
-    elif entry_kind == "tool_result":
+    elif entry_kind == "tool_result" and not preserve_tool_result:
         sanitized = _sanitize_tool_result_message(sanitized)
 
     has_tool_calls = bool(sanitized.get("tool_calls")) or bool(sanitized.get("function_call"))
@@ -353,6 +354,17 @@ def _sanitize_replay_message(
         if not content and not has_tool_calls:
             return None
     return sanitized
+
+
+def _latest_unconsumed_tool_result_entry(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    latest: dict[str, Any] | None = None
+    for entry in entries:
+        kind = str(entry.get("kind") or "")
+        if kind == "tool_result":
+            latest = entry
+        elif kind == "assistant_response" and latest is not None:
+            latest = None
+    return latest
 
 
 def _user_turn_start_indices(entries: list[dict[str, Any]]) -> list[int]:
@@ -580,6 +592,7 @@ def _transcript_messages(
     else:
         replay_entries = entries
 
+    unconsumed_tool_result = _latest_unconsumed_tool_result_entry(replay_entries)
     messages: list[dict[str, Any]] = []
     for entry in _clean_replay_entries(replay_entries):
         if not isinstance(entry, dict):
@@ -587,7 +600,11 @@ def _transcript_messages(
         raw_message = entry.get("message")
         if not isinstance(raw_message, dict):
             continue
-        message = _sanitize_replay_message(raw_message, entry_kind=str(entry.get("kind") or ""))
+        message = _sanitize_replay_message(
+            raw_message,
+            entry_kind=str(entry.get("kind") or ""),
+            preserve_tool_result=entry is unconsumed_tool_result,
+        )
         if message is not None:
             messages.append(message)
     return messages

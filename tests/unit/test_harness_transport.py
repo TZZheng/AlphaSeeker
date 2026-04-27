@@ -718,3 +718,127 @@ def test_replay_drops_orphan_assistant_tool_calls_before_next_turn(
 
     assert [message["role"] for message in replay_messages] == ["user", "user"]
     assert replay_messages[-1]["content"] == "Turn 2"
+
+
+def test_replay_preserves_latest_unconsumed_tool_results_for_next_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+    transport = DummyTransport(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name="gpt-4o",
+        system_prompt="System v1",
+    )
+    transport.ensure_initialized("Turn 1")
+    append_transcript_entry(
+        run_root,
+        agent_id,
+        {
+            "kind": "assistant_response",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "call_a", "name": "read_file", "input": {"path": "a.md"}},
+                    {"type": "tool_use", "id": "call_b", "name": "read_file", "input": {"path": "b.md"}},
+                ],
+            },
+        },
+    )
+    first_body = json.dumps({"status": "ok", "content": "A" * 1600 + "A_END"}, ensure_ascii=True)
+    second_body = json.dumps({"status": "ok", "content": "B" * 1600 + "B_END"}, ensure_ascii=True)
+    append_transcript_entry(
+        run_root,
+        agent_id,
+        {
+            "kind": "tool_result",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "call_a", "content": first_body},
+                    {"type": "tool_result", "tool_use_id": "call_b", "content": second_body},
+                ],
+            },
+        },
+    )
+    transport.append_user_text("Turn 2")
+
+    replay_messages = _transcript_messages(str(run_root), agent_id)
+    result_message = next(
+        message
+        for message in replay_messages
+        if isinstance(message.get("content"), list)
+        and any(block.get("type") == "tool_result" for block in message["content"])
+    )
+    result_blocks = result_message["content"]
+
+    assert len(result_blocks) == 2
+    assert result_blocks[0]["content"] == first_body
+    assert result_blocks[1]["content"] == second_body
+    assert "A_END" in result_blocks[0]["content"]
+    assert "B_END" in result_blocks[1]["content"]
+    assert replay_messages[-1]["content"] == "Turn 2"
+
+
+def test_replay_truncates_tool_result_after_model_consumes_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+    transport = DummyTransport(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name="gpt-4o",
+        system_prompt="System v1",
+    )
+    transport.ensure_initialized("Turn 1")
+    append_transcript_entry(
+        run_root,
+        agent_id,
+        {
+            "kind": "assistant_response",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "call_a", "name": "read_file", "input": {"path": "a.md"}},
+                ],
+            },
+        },
+    )
+    full_body = json.dumps({"status": "ok", "content": "A" * 1600 + "A_END"}, ensure_ascii=True)
+    append_transcript_entry(
+        run_root,
+        agent_id,
+        {
+            "kind": "tool_result",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "call_a", "content": full_body},
+                ],
+            },
+        },
+    )
+    transport.append_user_text("Turn 2")
+    append_transcript_entry(
+        run_root,
+        agent_id,
+        {
+            "kind": "assistant_response",
+            "message": {"role": "assistant", "content": "Used the file content."},
+        },
+    )
+
+    replay_messages = _transcript_messages(str(run_root), agent_id)
+    result_message = next(
+        message
+        for message in replay_messages
+        if isinstance(message.get("content"), list)
+        and any(block.get("type") == "tool_result" for block in message["content"])
+    )
+    result_content = result_message["content"][0]["content"]
+
+    assert result_content != full_body
+    assert "A_END" not in result_content
+    assert "... [" in result_content
