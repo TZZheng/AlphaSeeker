@@ -448,50 +448,6 @@ def read_web_pages_skill(arguments: dict[str, Any], _state: HarnessState) -> Ski
     )
 
 
-def search_web_resources_skill(arguments: dict[str, Any], state: HarnessState) -> SkillResult:
-    """Run a complete deterministic web-retrieval wave without exposing internal stages."""
-
-    prompt = str(arguments.get("prompt") or arguments.get("query") or state.request.user_prompt).strip()
-    if not prompt:
-        return make_result(
-            "search_web_resources",
-            arguments,
-            status="failed",
-            summary="search_web_resources requires a non-empty prompt.",
-            error="Missing prompt.",
-        )
-
-    required_sections = ensure_str_list(arguments.get("required_sections")) or list(state.required_sections or [])
-    result = retrieve_sources_skill(
-        {
-            "stage": "run_wave",
-            "prompt": prompt,
-            "required_sections": required_sections,
-        },
-        state,
-    )
-    return result.model_copy(
-        update={
-            "skill_name": "search_web_resources",
-            "arguments": dict(arguments),
-            "summary": (
-                f"Completed a full web-resource search wave for '{prompt}' with "
-                f"{result.metrics.urls_read} successful reads."
-                if result.status == "ok"
-                else result.summary
-            ),
-            "metrics": result.metrics.model_copy(
-                update={
-                    "extra": {
-                        **dict(result.metrics.extra),
-                        "internal_stage": "run_wave",
-                    }
-                }
-            ),
-        }
-    )
-
-
 def condense_context_skill(arguments: dict[str, Any], state: HarnessState) -> SkillResult:
     text = str(arguments.get("text") or "").strip()
     if not text and state.skill_history:

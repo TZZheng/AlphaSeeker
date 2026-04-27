@@ -888,7 +888,7 @@ def refresh_reduction_state(state: HarnessState) -> None:
 def merge_skill_result_into_corpus(state: HarnessState, result: SkillResult) -> None:
     """Map non-retrieval skill outputs into the same normalized source corpus."""
 
-    if result.skill_name in {"retrieve_sources", "search_web_resources"} or not result.evidence:
+    if result.skill_name == "retrieve_sources" or not result.evidence:
         return
 
     existing_ids = {card.source_id for card in state.source_cards}

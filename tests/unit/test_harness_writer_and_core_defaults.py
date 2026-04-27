@@ -117,7 +117,6 @@ def test_render_tools_markdown_lists_visible_runtime_surface() -> None:
     assert "write_file(path=..., content=...)" in text
     assert "replacing most of a file or creating a new one" in text
     assert "fetch_company_profile" in text
-    assert "search_web_resources" not in text
     assert "retrieve_sources" not in text
     assert "Response Mode" in text
 

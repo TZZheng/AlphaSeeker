@@ -81,7 +81,6 @@ PRESET_EXPLANATIONS: dict[str, str] = {
 
 AGENT_HIDDEN_SKILLS = {
     "retrieve_sources",
-    "search_web_resources",
     "search_and_read",
     "read_artifact",
     "research_earnings_call",
