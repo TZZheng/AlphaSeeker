@@ -365,149 +365,170 @@ def _commenter_delay_for_request(request: HarnessRequest) -> float:
 STOP_REQUESTED_FILE = "stop_requested"
 
 
+def _advance_soft_stop(shared: SupervisorState, now_epoch: float) -> bool:
+    elapsed = now_epoch - shared.run_started_at
+
+    # Check for an externally-written stop-request sentinel (e.g. from the TUI).
+    stop_file = Path(shared.run_root) / STOP_REQUESTED_FILE
+    if stop_file.exists() and not shared.soft_stop_requested:
+        elapsed = shared.request.wall_clock_budget_seconds  # trigger soft-stop block below
+
+    if elapsed >= shared.request.wall_clock_budget_seconds and not shared.soft_stop_requested:
+        shared.soft_stop_requested = True
+        shared.soft_stop_started_at = now_epoch
+        append_event(
+            shared.run_root,
+            AgentEvent(
+                event_type="run_soft_stop_requested",
+                agent_id=shared.root_agent_id,
+                details={
+                    "reason": "wall_clock_budget_reached" if not stop_file.exists() else "user_requested_stop",
+                    "grace_seconds": SOFT_STOP_GRACE_SECONDS,
+                },
+            ),
+        )
+    if shared.soft_stop_requested and shared.soft_stop_started_at is not None:
+        if now_epoch - shared.soft_stop_started_at >= SOFT_STOP_GRACE_SECONDS:
+            shared.stop_reason = "wall_clock_budget_exhausted"
+            shared.error = "Harness wall-clock budget exhausted."
+            shared.stop_requested = True
+            return True
+    return False
+
+
+async def _mark_stale_agents(shared: SupervisorState, now_epoch: float) -> None:
+    for stale_id in stale_agents(
+        shared.run_root,
+        stale_after_seconds=shared.request.stale_heartbeat_seconds,
+        now_epoch=now_epoch,
+    ):
+        if read_status(shared.run_root, stale_id) == "stale":
+            continue
+        write_status(shared.run_root, stale_id, "stale")
+        update_agent_record(
+            shared.run_root,
+            agent_id=stale_id,
+            status="stale",
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            error="Heartbeat stale.",
+        )
+        append_event(
+            shared.run_root,
+            AgentEvent(
+                event_type="heartbeat_stale",
+                agent_id=stale_id,
+                details={"heartbeat": read_heartbeat(shared.run_root, stale_id)},
+            ),
+        )
+        await asyncio.to_thread(
+            _push_child_done_to_parent_queue,
+            shared.run_root,
+            stale_id,
+            "stale",
+            "Heartbeat stale.",
+        )
+        managed = shared.live.pop(stale_id, None)
+        if managed is not None:
+            await _terminate_process(managed)
+
+
+async def _reap_exited_agents(shared: SupervisorState) -> None:
+    for agent_id, managed in list(shared.live.items()):
+        process = managed.process
+        if process.returncode is None:
+            continue
+        shared.live.pop(agent_id, None)
+        current_status = read_status(shared.run_root, agent_id)
+        if current_status not in TERMINAL_STATUSES:
+            write_status(shared.run_root, agent_id, "failed")
+            update_agent_record(
+                shared.run_root,
+                agent_id=agent_id,
+                status="failed",
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                error=f"Worker exited with code {process.returncode}.",
+            )
+            terminal_status = "failed"
+            terminal_error = f"Worker exited with code {process.returncode}."
+        else:
+            terminal_status = current_status
+            terminal_error = ""
+        append_event(
+            shared.run_root,
+            AgentEvent(
+                event_type="worker_exited",
+                agent_id=agent_id,
+                details={"returncode": process.returncode},
+            ),
+        )
+        await asyncio.to_thread(
+            _push_child_done_to_parent_queue,
+            shared.run_root,
+            agent_id,
+            terminal_status,
+            terminal_error,
+        )
+
+
+async def _relaunch_root_for_refinement(shared: SupervisorState, now_epoch: float, current_fp: str) -> None:
+    shared.root_last_reviewed_fingerprint = current_fp
+    write_status(shared.run_root, shared.root_agent_id, "queued")
+    process = await shared.launcher(shared.run_root, shared.root_agent_id)
+    shared.live[shared.root_agent_id] = ManagedProcess(
+        agent_id=shared.root_agent_id,
+        process=process,
+        launched_at_epoch=now_epoch,
+    )
+    write_status(shared.run_root, shared.root_agent_id, "running")
+    update_agent_record(
+        shared.run_root,
+        agent_id=shared.root_agent_id,
+        status="running",
+        pid=process.pid,
+        started_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+async def _maybe_refine_or_stop_root(shared: SupervisorState, now_epoch: float) -> bool:
+    root_status = read_status(shared.run_root, shared.root_agent_id)
+    if root_status == "refining" and shared.root_agent_id not in shared.live:
+        # Root finished a pass and is waiting for commenter feedback from that pass.
+        if shared.root_refinement_gate_id is not None:
+            state = load_commenter_state(shared.run_root, shared.root_agent_id) or {}
+            gate = commenter_gate_payload(state, shared.root_refinement_gate_id)
+            if gate is not None and str(gate.get("status") or "") in {"completed", "failed", "skipped"}:
+                current_fp = _read_last_commented_fingerprint(shared.run_root, shared.root_agent_id)
+                if int(gate.get("comments_written") or 0) > 0 and current_fp != shared.root_last_reviewed_fingerprint:
+                    await _relaunch_root_for_refinement(shared, now_epoch, current_fp)
+                shared.root_refinement_gate_id = None
+    elif root_status in TERMINAL_STATUSES and shared.root_agent_id not in shared.live:
+        if root_status == "done" and shared.request.continuous_refinement:
+            # Root finished a pass — enter refinement wait state
+            fp = _read_last_commented_fingerprint(shared.run_root, shared.root_agent_id)
+            shared.root_last_reviewed_fingerprint = fp
+            state = load_commenter_state(shared.run_root, shared.root_agent_id) or {}
+            gate = state.get("pending_commenter_gate")
+            shared.root_refinement_gate_id = str(gate.get("gate_id") or "") if isinstance(gate, dict) else None
+            write_status(shared.run_root, shared.root_agent_id, "refining")
+            # Do NOT stop — wait for commenter to produce new comments
+        else:
+            shared.stop_reason = root_status
+            shared.stop_requested = True
+            return True
+    return False
+
+
 async def _monitor_agents(shared: SupervisorState) -> None:
     while not shared.stop_requested:
         now_epoch = time.time()
-        elapsed = now_epoch - shared.run_started_at
+        if _advance_soft_stop(shared, now_epoch):
+            break
 
-        # Check for an externally-written stop-request sentinel (e.g. from the TUI).
-        stop_file = Path(shared.run_root) / STOP_REQUESTED_FILE
-        if stop_file.exists() and not shared.soft_stop_requested:
-            elapsed = shared.request.wall_clock_budget_seconds  # trigger soft-stop block below
-
-        if elapsed >= shared.request.wall_clock_budget_seconds and not shared.soft_stop_requested:
-            shared.soft_stop_requested = True
-            shared.soft_stop_started_at = now_epoch
-            append_event(
-                shared.run_root,
-                AgentEvent(
-                    event_type="run_soft_stop_requested",
-                    agent_id=shared.root_agent_id,
-                    details={
-                        "reason": "wall_clock_budget_reached" if not stop_file.exists() else "user_requested_stop",
-                        "grace_seconds": SOFT_STOP_GRACE_SECONDS,
-                    },
-                ),
-            )
-        if shared.soft_stop_requested and shared.soft_stop_started_at is not None:
-            if now_epoch - shared.soft_stop_started_at >= SOFT_STOP_GRACE_SECONDS:
-                shared.stop_reason = "wall_clock_budget_exhausted"
-                shared.error = "Harness wall-clock budget exhausted."
-                shared.stop_requested = True
-                break
-
-        snapshot = _sync_registry_from_files(shared.run_root)["records"]
-
-        for stale_id in stale_agents(
-            shared.run_root,
-            stale_after_seconds=shared.request.stale_heartbeat_seconds,
-            now_epoch=now_epoch,
-        ):
-            if read_status(shared.run_root, stale_id) != "stale":
-                write_status(shared.run_root, stale_id, "stale")
-                update_agent_record(
-                    shared.run_root,
-                    agent_id=stale_id,
-                    status="stale",
-                    finished_at=datetime.now(timezone.utc).isoformat(),
-                    error="Heartbeat stale.",
-                )
-                append_event(
-                    shared.run_root,
-                    AgentEvent(
-                        event_type="heartbeat_stale",
-                        agent_id=stale_id,
-                        details={"heartbeat": read_heartbeat(shared.run_root, stale_id)},
-                    ),
-                )
-                await asyncio.to_thread(
-                    _push_child_done_to_parent_queue,
-                    shared.run_root,
-                    stale_id,
-                    "stale",
-                    "Heartbeat stale.",
-                )
-                managed = shared.live.pop(stale_id, None)
-                if managed is not None:
-                    await _terminate_process(managed)
-
-        for agent_id, managed in list(shared.live.items()):
-            process = managed.process
-            if process.returncode is None:
-                continue
-            shared.live.pop(agent_id, None)
-            current_status = read_status(shared.run_root, agent_id)
-            if current_status not in TERMINAL_STATUSES:
-                write_status(shared.run_root, agent_id, "failed")
-                update_agent_record(
-                    shared.run_root,
-                    agent_id=agent_id,
-                    status="failed",
-                    finished_at=datetime.now(timezone.utc).isoformat(),
-                    error=f"Worker exited with code {process.returncode}.",
-                )
-                terminal_status = "failed"
-                terminal_error = f"Worker exited with code {process.returncode}."
-            else:
-                terminal_status = current_status
-                terminal_error = ""
-            append_event(
-                shared.run_root,
-                AgentEvent(
-                    event_type="worker_exited",
-                    agent_id=agent_id,
-                    details={"returncode": process.returncode},
-                ),
-            )
-            await asyncio.to_thread(
-                _push_child_done_to_parent_queue,
-                shared.run_root,
-                agent_id,
-                terminal_status,
-                terminal_error,
-            )
-
-        # Handle root agent completion and refinement loop
-        root_status = read_status(shared.run_root, shared.root_agent_id)
-        if root_status == "refining" and shared.root_agent_id not in shared.live:
-            # Root finished a pass and is waiting for commenter feedback from that pass.
-            if shared.root_refinement_gate_id is not None:
-                state = load_commenter_state(shared.run_root, shared.root_agent_id) or {}
-                gate = commenter_gate_payload(state, shared.root_refinement_gate_id)
-                if gate is not None and str(gate.get("status") or "") in {"completed", "failed", "skipped"}:
-                    current_fp = _read_last_commented_fingerprint(shared.run_root, shared.root_agent_id)
-                    if int(gate.get("comments_written") or 0) > 0 and current_fp != shared.root_last_reviewed_fingerprint:
-                        shared.root_last_reviewed_fingerprint = current_fp
-                        write_status(shared.run_root, shared.root_agent_id, "queued")
-                        process = await shared.launcher(shared.run_root, shared.root_agent_id)
-                        shared.live[shared.root_agent_id] = ManagedProcess(
-                            agent_id=shared.root_agent_id,
-                            process=process,
-                            launched_at_epoch=now_epoch,
-                        )
-                        write_status(shared.run_root, shared.root_agent_id, "running")
-                        update_agent_record(
-                            shared.run_root,
-                            agent_id=shared.root_agent_id,
-                            status="running",
-                            pid=process.pid,
-                            started_at=datetime.now(timezone.utc).isoformat(),
-                        )
-                    shared.root_refinement_gate_id = None
-        elif root_status in TERMINAL_STATUSES and shared.root_agent_id not in shared.live:
-            if root_status == "done" and shared.request.continuous_refinement:
-                # Root finished a pass — enter refinement wait state
-                fp = _read_last_commented_fingerprint(shared.run_root, shared.root_agent_id)
-                shared.root_last_reviewed_fingerprint = fp
-                state = load_commenter_state(shared.run_root, shared.root_agent_id) or {}
-                gate = state.get("pending_commenter_gate")
-                shared.root_refinement_gate_id = str(gate.get("gate_id") or "") if isinstance(gate, dict) else None
-                write_status(shared.run_root, shared.root_agent_id, "refining")
-                # Do NOT stop — wait for commenter to produce new comments
-            else:
-                shared.stop_reason = root_status
-                shared.stop_requested = True
-                break
+        _sync_registry_from_files(shared.run_root)
+        await _mark_stale_agents(shared, now_epoch)
+        await _reap_exited_agents(shared)
+        if await _maybe_refine_or_stop_root(shared, now_epoch):
+            break
 
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
@@ -568,105 +589,112 @@ async def _run_commenter_refresh(
         )
 
 
+async def _collect_finished_commenter_tasks(shared: SupervisorState) -> None:
+    for agent_id, task in list(shared.commenter_tasks.items()):
+        if not task.done():
+            continue
+        shared.commenter_tasks.pop(agent_id, None)
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+def _schedule_commenter_gates(shared: SupervisorState, now_epoch: float, commenter_delay: float) -> None:
+    events = read_jsonl(registry_paths(shared.run_root)["events_registry"])
+    for row in events:
+        if row.get("event_type") != "agent_turn_finished":
+            continue
+        details = row.get("details") if isinstance(row.get("details"), dict) else {}
+        gate_id = str(details.get("commenter_gate_id") or "")
+        agent_id = str(row.get("agent_id") or "")
+        if not gate_id or not agent_id or gate_id in shared.processed_commenter_gate_ids:
+            continue
+        shared.processed_commenter_gate_ids.add(gate_id)
+        state = load_commenter_state(shared.run_root, agent_id) or {}
+        gate = commenter_gate_payload(state, gate_id)
+        if gate is None or str(gate.get("status") or "") in {"completed", "failed", "skipped"}:
+            continue
+        turn_index = int(details.get("turn_index") or gate.get("turn_index") or 0)
+        shared.commenter_schedules[agent_id] = PendingCommenterRefresh(
+            agent_id=agent_id,
+            gate_id=gate_id,
+            turn_index=turn_index,
+            due_epoch=now_epoch + commenter_delay,
+        )
+
+
+async def _skip_commenter_gate(shared: SupervisorState, agent_id: str, gate_id: str, reason: str) -> None:
+    await asyncio.to_thread(
+        complete_commenter_gate,
+        shared.run_root,
+        agent_id,
+        gate_id,
+        status="skipped",
+        reason=reason,
+    )
+
+
+async def _start_due_commenter_refreshes(shared: SupervisorState, now_epoch: float) -> None:
+    snapshot = latest_agent_records(shared.run_root)
+    for agent_id, schedule in list(shared.commenter_schedules.items()):
+        if agent_id in shared.commenter_tasks:
+            continue
+        if now_epoch < schedule.due_epoch:
+            continue
+        record = snapshot.get(agent_id)
+        current_status = read_status(shared.run_root, agent_id)
+        root_done_for_refinement = (
+            agent_id == shared.root_agent_id
+            and current_status == "done"
+            and shared.request.continuous_refinement
+        )
+        if record is None or (current_status in TERMINAL_STATUSES and not root_done_for_refinement):
+            await _skip_commenter_gate(shared, agent_id, schedule.gate_id, "agent_terminal")
+            shared.commenter_schedules.pop(agent_id, None)
+            continue
+
+        fingerprint = compute_commenter_observation_fingerprint(shared.run_root, agent_id)
+        state = load_commenter_state(shared.run_root, agent_id) or {}
+        last_commented = str(state.get("last_commented_fingerprint") or "")
+        if not fingerprint or fingerprint == last_commented:
+            await _skip_commenter_gate(shared, agent_id, schedule.gate_id, "no_observation_change")
+            append_event(
+                shared.run_root,
+                AgentEvent(
+                    event_type="commenter_skipped",
+                    agent_id=agent_id,
+                    details={"commenter_gate_id": schedule.gate_id, "reason": "no_observation_change"},
+                ),
+            )
+            shared.commenter_schedules.pop(agent_id, None)
+            continue
+
+        observation_snapshot = build_commenter_observation_snapshot(
+            shared.run_root,
+            agent_id,
+            base_manifest=state.get("last_commented_manifest"),
+        )
+        state["last_attempted_at"] = datetime.now(timezone.utc).isoformat()
+        save_commenter_state(shared.run_root, agent_id, state)
+        await asyncio.to_thread(mark_commenter_gate_running, shared.run_root, agent_id, schedule.gate_id)
+        shared.commenter_schedules.pop(agent_id, None)
+        shared.commenter_tasks[agent_id] = asyncio.create_task(
+            _run_commenter_refresh(
+                shared,
+                agent_id,
+                observation_snapshot,
+                gate_id=schedule.gate_id,
+            )
+        )
+
+
 async def _monitor_commenters(shared: SupervisorState) -> None:
     while not shared.stop_requested:
         now_epoch = time.time()
         commenter_delay = _commenter_delay_for_request(shared.request)
 
-        for agent_id, task in list(shared.commenter_tasks.items()):
-            if not task.done():
-                continue
-            shared.commenter_tasks.pop(agent_id, None)
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-
-        events = read_jsonl(registry_paths(shared.run_root)["events_registry"])
-        for row in events:
-            if row.get("event_type") != "agent_turn_finished":
-                continue
-            details = row.get("details") if isinstance(row.get("details"), dict) else {}
-            gate_id = str(details.get("commenter_gate_id") or "")
-            agent_id = str(row.get("agent_id") or "")
-            if not gate_id or not agent_id or gate_id in shared.processed_commenter_gate_ids:
-                continue
-            shared.processed_commenter_gate_ids.add(gate_id)
-            state = load_commenter_state(shared.run_root, agent_id) or {}
-            gate = commenter_gate_payload(state, gate_id)
-            if gate is None or str(gate.get("status") or "") in {"completed", "failed", "skipped"}:
-                continue
-            turn_index = int(details.get("turn_index") or gate.get("turn_index") or 0)
-            shared.commenter_schedules[agent_id] = PendingCommenterRefresh(
-                agent_id=agent_id,
-                gate_id=gate_id,
-                turn_index=turn_index,
-                due_epoch=now_epoch + commenter_delay,
-            )
-
-        snapshot = latest_agent_records(shared.run_root)
-        for agent_id, schedule in list(shared.commenter_schedules.items()):
-            if agent_id in shared.commenter_tasks:
-                continue
-            if now_epoch < schedule.due_epoch:
-                continue
-            record = snapshot.get(agent_id)
-            current_status = read_status(shared.run_root, agent_id)
-            root_done_for_refinement = (
-                agent_id == shared.root_agent_id
-                and current_status == "done"
-                and shared.request.continuous_refinement
-            )
-            if record is None or (current_status in TERMINAL_STATUSES and not root_done_for_refinement):
-                await asyncio.to_thread(
-                    complete_commenter_gate,
-                    shared.run_root,
-                    agent_id,
-                    schedule.gate_id,
-                    status="skipped",
-                    reason="agent_terminal",
-                )
-                shared.commenter_schedules.pop(agent_id, None)
-                continue
-
-            fingerprint = compute_commenter_observation_fingerprint(shared.run_root, agent_id)
-            state = load_commenter_state(shared.run_root, agent_id) or {}
-            last_commented = str(state.get("last_commented_fingerprint") or "")
-            if not fingerprint or fingerprint == last_commented:
-                await asyncio.to_thread(
-                    complete_commenter_gate,
-                    shared.run_root,
-                    agent_id,
-                    schedule.gate_id,
-                    status="skipped",
-                    reason="no_observation_change",
-                )
-                append_event(
-                    shared.run_root,
-                    AgentEvent(
-                        event_type="commenter_skipped",
-                        agent_id=agent_id,
-                        details={"commenter_gate_id": schedule.gate_id, "reason": "no_observation_change"},
-                    ),
-                )
-                shared.commenter_schedules.pop(agent_id, None)
-                continue
-
-            observation_snapshot = build_commenter_observation_snapshot(
-                shared.run_root,
-                agent_id,
-                base_manifest=state.get("last_commented_manifest"),
-            )
-            state["last_attempted_at"] = datetime.now(timezone.utc).isoformat()
-            save_commenter_state(shared.run_root, agent_id, state)
-            await asyncio.to_thread(mark_commenter_gate_running, shared.run_root, agent_id, schedule.gate_id)
-            shared.commenter_schedules.pop(agent_id, None)
-            shared.commenter_tasks[agent_id] = asyncio.create_task(
-                _run_commenter_refresh(
-                    shared,
-                    agent_id,
-                    observation_snapshot,
-                    gate_id=schedule.gate_id,
-                )
-            )
+        await _collect_finished_commenter_tasks(shared)
+        _schedule_commenter_gates(shared, now_epoch, commenter_delay)
+        await _start_due_commenter_refreshes(shared, now_epoch)
 
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
