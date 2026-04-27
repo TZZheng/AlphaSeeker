@@ -290,10 +290,11 @@ def test_prompt_bundle_soft_stop_appends_role_specific_guidance(
     )
     root_text = (
         "Spend the remaining turns improving publish/final.md, publish/summary.md, "
-        "and publish/artifact_index.md so they stay readable if execution stops at any time."
+        "and publish/artifact_index.md with current materials and call set_status to done "
+        "so they stay readable if execution stops at any time."
     )
     child_text = (
-        "Spend the remaining turns improving your current publish/ outputs so your parent "
+        "Spend the remaining turns improving your current publish/ outputs with current materials so your parent "
         "can use them if execution stops at any time."
     )
 
@@ -364,6 +365,22 @@ def test_commenter_prompt_bundle_uses_commenter_specific_layers_only(
     assert "COMMENTER ROLE FILE" in bundle.system_prompt
     assert "COMMENTER INTERFACE FILE" in bundle.system_prompt
     assert "`read_file`" in bundle.system_prompt
+
+
+def test_commenter_prompt_keeps_tool_boundary_rule_near_commenter_tools() -> None:
+    bundle = build_commenter_prompt_bundle(
+        tools_available=True,
+        user_prompt="Review the latest draft.",
+    )
+    text = bundle.system_prompt
+
+    commenter_tools_index = text.index("## Commenter Tools")
+    reviewer_only_index = text.index("These are reviewer-only tools for your commenter session.")
+    source_of_truth_index = text.index("`tools.md` is the source of truth for the main agent's visible tools.")
+    no_mentions_index = text.index("Your final comment must not mention tools, commands, file names")
+
+    assert commenter_tools_index < reviewer_only_index < source_of_truth_index < no_mentions_index
+    assert no_mentions_index - commenter_tools_index < 500
 
 
 def test_runtime_history_changes_user_prompt_not_system_prompt(

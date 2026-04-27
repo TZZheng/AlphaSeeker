@@ -282,9 +282,9 @@ def _render_runtime_history(
         is_root = record is None or not record.parent_id
         guidance = (
             "Spend the remaining turns improving publish/final.md, publish/summary.md, "
-            "and publish/artifact_index.md so they stay readable if execution stops at any time."
+            "and publish/artifact_index.md with current materials and call set_status to done so they stay readable if execution stops at any time."
             if is_root
-            else "Spend the remaining turns improving your current publish/ outputs so your parent "
+            else "Spend the remaining turns improving your current publish/ outputs with current materials so your parent "
             "can use them if execution stops at any time."
         )
         sections.extend(
