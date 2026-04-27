@@ -806,7 +806,8 @@ def test_worker_soft_stop_second_prompt_contains_finalization_guidance(
     )
     root_text = (
         "Spend the remaining turns improving publish/final.md, publish/summary.md, "
-        "and publish/artifact_index.md so they stay readable if execution stops at any time."
+        "and publish/artifact_index.md with current materials and call set_status to done "
+        "so they stay readable if execution stops at any time."
     )
 
     assert result == 0
