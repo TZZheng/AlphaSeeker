@@ -15,12 +15,12 @@ from src.harness.artifacts import (
     write_status,
     write_text_atomic,
 )
-from src.harness.executor import create_or_load_session, execute_model_tool
+from src.harness.executor import _HANDLERS, create_or_load_session, execute_model_tool
 from src.harness.presets import default_tool_allowlist, visible_skills_for_preset
 from src.harness.prompt_builder import render_task_markdown, render_tools_markdown
 from src.harness.registry import build_skill_registry, get_skills_for_packs
 from src.harness.tool_catalog import harness_tool_definitions
-from src.harness.types import HarnessRequest, SkillMetrics, SkillResult, SkillSpec
+from src.harness.types import AGENT_PRESETS, HarnessRequest, SkillMetrics, SkillResult, SkillSpec
 
 
 def _create_basic_session(
@@ -61,6 +61,14 @@ def _create_basic_session(
 
 def _final_report_snapshot_rows(run_root: Path) -> list[dict[str, object]]:
     return read_jsonl(registry_paths(run_root)["final_report_versions"])
+
+
+def test_all_executor_handlers_are_exposed_by_a_preset_allowlist() -> None:
+    exposed_tools: set[str] = set()
+    for preset in AGENT_PRESETS:
+        exposed_tools.update(default_tool_allowlist(preset))
+
+    assert set(_HANDLERS) <= exposed_tools
 
 
 def test_spawn_subagent_rejects_unknown_preset_and_lists_legal_presets(

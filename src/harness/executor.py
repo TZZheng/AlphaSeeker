@@ -360,14 +360,6 @@ def _run_skill(session: AgentSession, skill_name: str, skill_args: dict[str, Any
     }
 
 
-def _handle_call_skill(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
-    skill_name = str(arguments.get("skill_name") or arguments.get("name") or "").strip()
-    skill_args = arguments.get("arguments") or {}
-    if not skill_name:
-        raise ValueError("call_skill requires skill_name.")
-    return _run_skill(session, skill_name, skill_args)
-
-
 def _render_child_task_markdown(
     task_name: str,
     description: str,
@@ -1207,9 +1199,7 @@ def _handle_set_status(session: AgentSession, arguments: dict[str, Any]) -> dict
 
 
 _HANDLERS = {
-    "call_skill": _handle_call_skill,
     "spawn_subagent": _handle_spawn_subagent,
-    "spawn_agent": _handle_spawn_subagent,
     "list_children": _handle_list_children,
     "list_publish_files": _handle_list_publish_files,
     "promote_artifact": _handle_promote_artifact,
