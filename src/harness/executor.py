@@ -296,32 +296,22 @@ def _run_skill(session: AgentSession, skill_name: str, skill_args: dict[str, Any
     _record_observation(session, f"skill:{skill_name}", result.summary)
 
     output_root = _skill_output_root(session, skill_name)
-    output_files: list[str] = []
     if result.output_text:
         output_path = output_root / "output.md"
         write_text_atomic(output_path, result.output_text)
-        output_files.append(str(output_path))
     summary_path = output_root / "summary.md"
     write_text_atomic(summary_path, result.summary + "\n")
-    output_files.append(str(summary_path))
     details_path = output_root / "details.json"
     write_text_atomic(details_path, json_preview(result.details))
-    output_files.append(str(details_path))
-    evidence_path: str | None = None
     if result.evidence:
         evidence_file = output_root / "evidence.json"
         write_text_atomic(
             evidence_file,
             json.dumps([item.model_dump(mode="json") for item in result.evidence], indent=2, ensure_ascii=True),
         )
-        evidence_path = str(evidence_file)
-        output_files.append(evidence_path)
-    artifact_manifest_path: str | None = None
     if result.artifacts:
         artifact_manifest = output_root / "artifacts.txt"
         write_text_atomic(artifact_manifest, "\n".join(result.artifacts) + "\n")
-        artifact_manifest_path = str(artifact_manifest)
-        output_files.append(artifact_manifest_path)
 
     append_event(
         session.run_root,
@@ -336,28 +326,23 @@ def _run_skill(session: AgentSession, skill_name: str, skill_args: dict[str, Any
             },
         ),
     )
-    return {
+    response: dict[str, Any] = {
         "skill_name": skill_name,
         "status": result.status,
         "summary": result.summary,
-        "output_root": str(output_root),
-        "artifact_paths": list(result.artifacts),
-        "output_files": output_files,
-        "primary_artifact_path": result.artifacts[0] if result.artifacts else "",
-        "summary_path": str(summary_path),
-        "details_path": str(details_path),
-        "evidence_path": evidence_path or "",
-        "artifacts_manifest_path": artifact_manifest_path or "",
-        "artifact_count": len(result.artifacts),
-        "evidence_count": len(result.evidence),
-        "error": result.error,
-        "content": (
-            result.output_text
-            if skill_name in {"read_file", "read_web_pages", "condense_context"}
-            else ""
-        ),
-        "details": result.details,
     }
+    if skill_name == "search_web":
+        response["results"] = result.details.get("results", [])
+        results_path = result.details.get("results_path")
+        if results_path:
+            response["results_path"] = results_path
+    elif result.output_text:
+        response["content"] = result.output_text
+    if result.artifacts:
+        response["artifact_paths"] = list(result.artifacts)
+    if result.error:
+        response["error"] = result.error
+    return response
 
 
 def _render_child_task_markdown(

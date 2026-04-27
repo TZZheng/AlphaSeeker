@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -157,7 +158,7 @@ def test_spawn_subagent_can_record_expected_publish_files(
     assert "`publish/financials_valuation.md`" in child_task
 
 
-def test_skill_results_return_exact_artifact_and_output_paths(
+def test_skill_results_return_lean_content_and_artifact_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -212,14 +213,79 @@ def test_skill_results_return_exact_artifact_and_output_paths(
     )
 
     result = execute_model_tool(session, "fake_skill", {})
+    skill_output_root = next(agent_workspace_paths(run_root, root_agent_id)["skills_artifacts_root"].glob("*_fake_skill"))
 
-    assert result["primary_artifact_path"] == str(external_artifact)
-    assert result["artifact_paths"] == [str(external_artifact)]
-    assert result["summary_path"].endswith("summary.md")
-    assert result["details_path"].endswith("details.json")
-    assert any(path.endswith("output.md") for path in result["output_files"])
-    assert any(path.endswith("summary.md") for path in result["output_files"])
-    assert any(path.endswith("details.json") for path in result["output_files"])
+    assert result == {
+        "skill_name": "fake_skill",
+        "status": "ok",
+        "summary": "Fake skill completed.",
+        "content": "Hello from fake skill.",
+        "artifact_paths": [str(external_artifact)],
+    }
+    assert (skill_output_root / "output.md").read_text(encoding="utf-8") == "Hello from fake skill."
+    assert (skill_output_root / "summary.md").read_text(encoding="utf-8") == "Fake skill completed.\n"
+    assert (skill_output_root / "details.json").exists()
+
+
+def test_search_web_result_exposes_compact_urls_without_snippets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-search-web",
+        user_prompt="Search for XOM macro sources.",
+        preset="research",
+    )
+    search_results = [
+        {
+            "title": "Fed policy update",
+            "href": "https://example.com/fed",
+            "date": "2025-01-02",
+            "body": "Long preview text that should stay out of compact rows.",
+        },
+        {
+            "title": "Oil outlook",
+            "href": "https://example.com/oil",
+            "body": "Another preview.",
+        },
+    ]
+    monkeypatch.setattr(
+        "src.harness.skills.core.search_web",
+        lambda _query, max_results=8: search_results[:max_results],
+    )
+
+    result = execute_model_tool(session, "search_web", {"query": "xom macro", "max_results": 2})
+
+    assert result["results"] == [
+        {"title": "Fed policy update", "url": "https://example.com/fed", "date": "2025-01-02"},
+        {"title": "Oil outlook", "url": "https://example.com/oil", "date": ""},
+    ]
+    assert all("snippet" not in row for row in result["results"])
+    artifact_path = Path(result["results_path"])
+    output_path = next(agent_workspace_paths(run_root, root_agent_id)["skills_artifacts_root"].glob("*_search_web/output.md"))
+    output_text = output_path.read_text(encoding="utf-8")
+
+    assert artifact_path.exists()
+    assert json.loads(artifact_path.read_text(encoding="utf-8")) == search_results
+    assert result["artifact_paths"] == [str(artifact_path)]
+    assert not {
+        "primary_artifact_path",
+        "output_files",
+        "output_root",
+        "summary_path",
+        "details_path",
+        "evidence_path",
+        "artifacts_manifest_path",
+        "artifact_count",
+        "evidence_count",
+        "details",
+    } & set(result)
+    assert f"Results artifact: {artifact_path}" in output_text
+    assert "| 1 | Fed policy update | https://example.com/fed | 2025-01-02 |" in output_text
+    assert "| 2 | Oil outlook | https://example.com/oil |  |" in output_text
+    assert "Long preview text" not in output_text
 
 
 def test_publish_tools_normalize_publish_prefix(
@@ -621,9 +687,10 @@ def test_search_in_files_returns_match_locations(
 
     assert result["status"] == "ok"
     assert result["summary"].startswith("Found 1 match")
-    assert result["details_path"].endswith("details.json")
-    assert result["output_root"].endswith("search_in_files")
-    assert any(path.endswith("output.md") for path in result["output_files"])
+    assert "services mix" in result["content"]
+    assert str(hit_file) in result["content"]
+    assert "output_files" not in result
+    assert "details_path" not in result
 
 
 def test_bash_rg_discovers_matching_paths(
@@ -711,9 +778,10 @@ def test_search_visibility_excludes_private_and_default_artifact_roots(
 
     read_private_result = execute_model_tool(session, "read_file", {"path": str(private_file)})
 
-    assert default_result["details"]["matches"] == []
-    assert len(exact_artifact_result["details"]["matches"]) == 1
-    assert exact_artifact_result["details"]["matches"][0]["path"] == str(artifact_file)
+    assert default_result["summary"].startswith("Found 0 match")
+    assert default_result.get("content", "") == ""
+    assert exact_artifact_result["summary"].startswith("Found 1 match")
+    assert str(artifact_file) in exact_artifact_result["content"]
     assert read_private_result["status"] == "failed"
     assert "harness-private" in read_private_result["summary"]
 
