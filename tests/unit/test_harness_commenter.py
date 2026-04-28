@@ -880,14 +880,12 @@ def test_worker_soft_stop_second_prompt_contains_finalization_guidance(
 
     result = run_agent_worker(str(run_root), agent_id)
 
-    shared_text = (
-        "Soft-stop mode is active. Stop exploration and do not open new workstreams unless strictly necessary."
-    )
+    shared_text = "Soft-stop mode is active. Treat this as your final model turn before shutdown."
     root_text = (
-        "Spend the remaining turns improving publish/final.md, publish/summary.md, "
-        "and publish/artifact_index.md with current materials and call status to done "
-        "so they stay readable if execution stops at any time."
+        "Use current materials to write or patch publish/final.md, publish/summary.md, "
+        "and publish/artifact_index.md now."
     )
+    finish_text = 'Before this response ends, call the status tool with status="done".'
 
     assert result == 0
     assert len(transport.user_messages) == 2
@@ -898,6 +896,7 @@ def test_worker_soft_stop_second_prompt_contains_finalization_guidance(
     assert "# Runtime Snapshot" not in transport.user_messages[1]
     assert shared_text in transport.user_messages[1]
     assert root_text in transport.user_messages[1]
+    assert finish_text in transport.user_messages[1]
 
 
 def test_worker_calls_immediately_when_previous_turn_already_used_full_deadline(

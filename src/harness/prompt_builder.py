@@ -280,19 +280,11 @@ def _render_runtime_history(
     if soft_stop_active:
         record = latest_agent_records(run_root).get(agent_id)
         is_root = record is None or not record.parent_id
-        guidance = (
-            "Spend the remaining turns improving publish/final.md, publish/summary.md, "
-            "and publish/artifact_index.md with current materials and call status to done so they stay readable if execution stops at any time."
-            if is_root
-            else "Spend the remaining turns improving your current publish/ outputs with current materials so your parent "
-            "can use them if execution stops at any time."
-        )
         sections.extend(
             [
                 "",
                 "## Soft-Stop Mode",
-                "Soft-stop mode is active. Stop exploration and do not open new workstreams unless strictly necessary.",
-                guidance,
+                *_soft_stop_guidance_lines(is_root=is_root),
             ]
         )
     return "\n".join(sections)
@@ -318,22 +310,32 @@ def build_agent_runtime_delta_prompt(
         has_content = True
         record = latest_agent_records(run_root).get(agent_id)
         is_root = record is None or not record.parent_id
-        guidance = (
-            "Spend the remaining turns improving publish/final.md, publish/summary.md, "
-            "and publish/artifact_index.md with current materials and call status to done so they stay readable if execution stops at any time."
-            if is_root
-            else "Spend the remaining turns improving your current publish/ outputs with current materials so your parent "
-            "can use them if execution stops at any time."
-        )
         sections.extend(
             [
                 "",
                 "## Soft-Stop Mode",
-                "Soft-stop mode is active. Stop exploration and do not open new workstreams unless strictly necessary.",
-                guidance,
+                *_soft_stop_guidance_lines(is_root=is_root),
             ]
         )
     return "\n".join(sections) if has_content else ""
+
+
+def _soft_stop_guidance_lines(*, is_root: bool) -> list[str]:
+    shared = [
+        "Soft-stop mode is active. Treat this as your final model turn before shutdown.",
+        "Finish the job in this same response: do not start new research, delegate work, search the web, or inspect more files unless the next tool call is strictly required to write the final publish files.",
+    ]
+    if is_root:
+        return [
+            *shared,
+            "Use current materials to write or patch publish/final.md, publish/summary.md, and publish/artifact_index.md now.",
+            "Before this response ends, call the status tool with status=\"done\". If the deliverable is imperfect, publish the best available version with caveats and still finish; use status=\"blocked\" only when no usable deliverable can be written.",
+        ]
+    return [
+        *shared,
+        "Use current materials to write or patch your publish/summary.md and publish/artifact_index.md now so your parent can use them.",
+        "Before this response ends, call the status tool with status=\"done\". If your research is incomplete, publish the best available summary with caveats and still finish; use status=\"blocked\" only when no usable handoff can be written.",
+    ]
 
 
 def build_agent_prompt_bundle(

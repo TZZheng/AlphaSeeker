@@ -288,26 +288,26 @@ def test_prompt_bundle_soft_stop_appends_role_specific_guidance(
         soft_stop_active=True,
     )
 
-    shared_text = (
-        "Soft-stop mode is active. Stop exploration and do not open new workstreams unless strictly necessary."
-    )
+    shared_text = "Soft-stop mode is active. Treat this as your final model turn before shutdown."
     root_text = (
-        "Spend the remaining turns improving publish/final.md, publish/summary.md, "
-        "and publish/artifact_index.md with current materials and call status to done "
-        "so they stay readable if execution stops at any time."
+        "Use current materials to write or patch publish/final.md, publish/summary.md, "
+        "and publish/artifact_index.md now."
     )
     child_text = (
-        "Spend the remaining turns improving your current publish/ outputs with current materials so your parent "
-        "can use them if execution stops at any time."
+        "Use current materials to write or patch your publish/summary.md and publish/artifact_index.md "
+        "now so your parent can use them."
     )
+    finish_text = 'Before this response ends, call the status tool with status="done".'
 
     assert "## Soft-Stop Mode" in root_bundle.user_prompt
     assert shared_text in root_bundle.user_prompt
     assert root_text in root_bundle.user_prompt
+    assert finish_text in root_bundle.user_prompt
     assert child_text not in root_bundle.user_prompt
     assert "## Soft-Stop Mode" in child_bundle.user_prompt
     assert shared_text in child_bundle.user_prompt
     assert child_text in child_bundle.user_prompt
+    assert finish_text in child_bundle.user_prompt
     assert root_text not in child_bundle.user_prompt
 
 
@@ -437,6 +437,8 @@ def test_runtime_delta_prompt_only_includes_out_of_band_changes(
     assert "Need to call a valid tool." in delta
     assert "Comment Feed" in delta
     assert "Soft-stop mode is active" in delta
+    assert "final model turn" in delta
+    assert 'status tool with status="done"' in delta
 
 
 def test_tools_markdown_changes_system_prompt(
