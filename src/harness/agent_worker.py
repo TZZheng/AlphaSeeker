@@ -21,6 +21,7 @@ from src.harness.artifacts import (
     latest_agent_records,
     load_commenter_state,
     load_transport_state,
+    load_transcript_entries,
     load_request,
     mark_commenter_comments_read,
     read_status,
@@ -35,7 +36,7 @@ from src.harness.commenter import build_comment_feed_message
 from src.harness.commenter import commenter_gate_finished, open_commenter_gate
 from src.harness.executor import TERMINAL_STATUSES, create_or_load_session, execute_agent_command, execute_model_tool, model_tool_specs
 from src.harness.presets import visible_skills_for_preset
-from src.harness.prompt_builder import build_agent_prompt_bundle
+from src.harness.prompt_builder import build_agent_prompt_bundle, build_agent_runtime_delta_prompt
 from src.harness.types import AgentCommand, AgentEvent
 from src.shared.llm_manager import get_llm
 from src.shared.model_config import get_model
@@ -76,12 +77,17 @@ class WorkerLoopState:
     last_soft_time_limit_active: bool = False
     successful_turn_index: int = 0
     pending_commenter_gate_id: str | None = None
+    native_initial_prompt_sent: bool = False
+    soft_stop_delta_sent: bool = False
 
 
 @dataclass
 class TurnPrompt:
     system_prompt: str
     user_prompt: str
+    native_user_prompt: str | None
+    native_user_prompt_is_initial: bool
+    previous_error: str | None
     comment_feed: str | None
     injected_comment_count: int
 
@@ -89,7 +95,8 @@ class TurnPrompt:
 @dataclass
 class NativeTurnPreparation:
     system_prompt: str
-    user_prompt: str
+    user_prompt: str | None
+    user_prompt_is_initial: bool
     tool_specs: list[dict[str, Any]]
     hard_overflow: bool
     previous_error: str | None = None
@@ -159,6 +166,34 @@ def _current_prompt_bundle(
         comment_feed=comment_feed,
         soft_stop_active=soft_stop_active,
     )
+
+
+def _transcript_has_user_message(run_root: str, agent_id: str) -> bool:
+    return any(entry.get("kind") == "user_message" for entry in load_transcript_entries(run_root, agent_id))
+
+
+def _native_pending_user_prompt(
+    runtime: WorkerRuntime,
+    state: WorkerLoopState,
+    *,
+    full_user_prompt: str,
+    previous_error: str | None,
+    comment_feed: str | None,
+    soft_stop_active: bool,
+) -> tuple[str | None, bool]:
+    if not state.native_initial_prompt_sent and not _transcript_has_user_message(
+        runtime.session.run_root,
+        runtime.session.agent_id,
+    ):
+        return full_user_prompt, True
+    delta_prompt = build_agent_runtime_delta_prompt(
+        run_root=runtime.session.run_root,
+        agent_id=runtime.session.agent_id,
+        previous_error=previous_error,
+        comment_feed=comment_feed,
+        soft_stop_active=soft_stop_active and not state.soft_stop_delta_sent,
+    ).strip()
+    return (delta_prompt or None), False
 
 
 def _root_publish_files_exist(run_root: str, agent_id: str) -> bool:
@@ -449,9 +484,24 @@ def _build_turn_prompt(runtime: WorkerRuntime, state: WorkerLoopState, *, soft_s
         comment_feed=comment_feed,
         soft_stop_active=soft_stop_active,
     )
+    native_user_prompt, native_user_prompt_is_initial = (
+        _native_pending_user_prompt(
+            runtime,
+            state,
+            full_user_prompt=prompt_bundle.user_prompt,
+            previous_error=state.previous_error,
+            comment_feed=comment_feed,
+            soft_stop_active=soft_stop_active,
+        )
+        if runtime.transport_name != "text_json"
+        else (None, False)
+    )
     return TurnPrompt(
         system_prompt=prompt_bundle.system_prompt,
         user_prompt=prompt_bundle.user_prompt,
+        native_user_prompt=native_user_prompt,
+        native_user_prompt_is_initial=native_user_prompt_is_initial,
+        previous_error=state.previous_error,
         comment_feed=comment_feed,
         injected_comment_count=injected_comment_count,
     )
@@ -585,7 +635,8 @@ def _prepare_native_turn(
     soft_overflow = False
     hard_overflow = False
     system_prompt = prompt.system_prompt
-    user_prompt = prompt.user_prompt
+    user_prompt = prompt.native_user_prompt
+    user_prompt_is_initial = prompt.native_user_prompt_is_initial
 
     while True:
         preflight = preflight_history_compaction(
@@ -609,12 +660,19 @@ def _prepare_native_turn(
         prompt_bundle = _current_prompt_bundle(
             runtime.session,
             transport_name=runtime.transport_name,
-            previous_error=state.previous_error,
+            previous_error=prompt.previous_error,
             comment_feed=prompt.comment_feed,
             soft_stop_active=soft_time_limit_active,
         )
         system_prompt = prompt_bundle.system_prompt
-        user_prompt = prompt_bundle.user_prompt
+        user_prompt, user_prompt_is_initial = _native_pending_user_prompt(
+            runtime,
+            state,
+            full_user_prompt=prompt_bundle.user_prompt,
+            previous_error=prompt.previous_error,
+            comment_feed=prompt.comment_feed,
+            soft_stop_active=soft_time_limit_active,
+        )
 
     _persist_history_compaction_state(
         run_root,
@@ -655,6 +713,7 @@ def _prepare_native_turn(
         return NativeTurnPreparation(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
+            user_prompt_is_initial=user_prompt_is_initial,
             tool_specs=tool_specs,
             hard_overflow=True,
             previous_error=previous_error,
@@ -663,6 +722,7 @@ def _prepare_native_turn(
     return NativeTurnPreparation(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
+        user_prompt_is_initial=user_prompt_is_initial,
         tool_specs=tool_specs,
         hard_overflow=False,
     )
@@ -749,7 +809,12 @@ def _execute_native_turn(
     soft_time_limit_active: bool,
 ) -> str:
     runtime.transport.update_system_prompt(prepared.system_prompt)
-    runtime.transport.append_user_text(prepared.user_prompt)
+    if prepared.user_prompt:
+        runtime.transport.append_user_text(prepared.user_prompt)
+        if prepared.user_prompt_is_initial:
+            state.native_initial_prompt_sent = True
+        if soft_time_limit_active:
+            state.soft_stop_delta_sent = True
     _record_turn_start(state, soft_time_limit_active=soft_time_limit_active)
     turn = runtime.transport.execute_turn(prepared.tool_specs)
     if prompt.injected_comment_count:

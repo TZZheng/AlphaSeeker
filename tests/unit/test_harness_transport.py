@@ -587,6 +587,41 @@ def test_preflight_history_compaction_keeps_full_raw_replay_under_budget(
     assert agent_workspace_paths(run_root, agent_id)["history_summary"].read_text(encoding="utf-8") == ""
 
 
+def test_preflight_history_compaction_allows_transcript_only_next_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+    transport = DummyTransport(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name="minimax/MiniMax-M2.7",
+        system_prompt="System v1",
+    )
+    transport.ensure_initialized("Initial prompt")
+
+    def _estimate(payload: dict[str, object]) -> int:
+        rendered = json.dumps(payload, ensure_ascii=True)
+        assert "Pending prompt" not in rendered
+        return 120_000
+
+    monkeypatch.setattr("src.harness.transport.estimate_payload_input_tokens", _estimate)
+
+    result = preflight_history_compaction(
+        transport_name="openai",
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name="gpt-4o",
+        system_prompt="System v1",
+        pending_user_prompt=None,
+        tool_specs=[],
+    )
+
+    assert not result.compaction_changed
+    assert result.estimated_input_tokens_before == 120_000
+    assert result.estimated_input_tokens_after == 120_000
+
+
 def test_preflight_history_compaction_compacts_oldest_turns_only_when_over_budget(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

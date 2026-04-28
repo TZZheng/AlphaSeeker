@@ -721,7 +721,7 @@ def preflight_history_compaction(
     agent_id: str,
     model_name: str,
     system_prompt: str,
-    pending_user_prompt: str,
+    pending_user_prompt: str | None,
     tool_specs: list[dict[str, Any]],
 ) -> HistoryCompactionPreflightResult:
     entries = load_transcript_entries(run_root, agent_id)

@@ -11,6 +11,7 @@ from src.harness.agent_worker import run_agent_worker
 from src.harness.artifacts import (
     agent_workspace_paths,
     append_commenter_comments,
+    append_transcript_entry,
     create_agent_workspace,
     initialize_run_root,
     load_commenter_comments,
@@ -38,7 +39,7 @@ from src.harness.executor import create_or_load_session, execute_model_tool
 from src.harness.presets import default_tool_allowlist
 from src.harness.prompt_builder import render_task_markdown, render_tools_markdown
 from src.harness.registry import build_skill_registry
-from src.harness.transport import ModelToolCall, ModelTurnResult
+from src.harness.transport import ModelToolCall, ModelTurnResult, _transcript_messages
 from src.harness.types import HarnessRequest
 
 
@@ -523,6 +524,21 @@ class _SequencedTransport:
         return None
 
 
+class _TranscriptRecordingSequencedTransport(_SequencedTransport):
+    def __init__(self, run_root: Path, agent_id: str, turns: list[ModelTurnResult], clock: _FakeClock) -> None:
+        super().__init__(turns, clock)
+        self._run_root = run_root
+        self._agent_id = agent_id
+
+    def append_user_text(self, text: str) -> None:
+        super().append_user_text(text)
+        append_transcript_entry(
+            self._run_root,
+            self._agent_id,
+            {"kind": "user_message", "message": {"role": "user", "content": text}},
+        )
+
+
 def _scratch_write_turn() -> ModelTurnResult:
     return ModelTurnResult(
         tool_calls=[
@@ -535,6 +551,10 @@ def _scratch_write_turn() -> ModelTurnResult:
         text_blocks=["work locally"],
         stop_reason="tool_use",
     )
+
+
+def _idle_turn() -> ModelTurnResult:
+    return ModelTurnResult(tool_calls=[], text_blocks=[], stop_reason=None)
 
 
 def _finish_turn() -> ModelTurnResult:
@@ -617,6 +637,59 @@ def _turn_finished_events(run_root: Path) -> list[dict[str, object]]:
         for row in read_jsonl(registry_paths(run_root)["events_registry"])
         if row.get("event_type") == "agent_turn_finished"
     ]
+
+
+def test_worker_native_prompt_appends_full_assignment_once_then_no_routine_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id, _request = _create_workspace(tmp_path, monkeypatch)
+    clock = _FakeClock()
+    transport = _TranscriptRecordingSequencedTransport(run_root, agent_id, [_scratch_write_turn(), _finish_turn()], clock)
+
+    _install_fake_worker_timing(monkeypatch, clock)
+    _install_fake_transport(monkeypatch, transport)
+    _auto_complete_commenter_gate(clock, run_root, agent_id)
+    monkeypatch.setattr(agent_worker_module, "TURN_MAX_PROMPT_GAP_SECONDS", 0.0)
+    monkeypatch.setattr(agent_worker_module, "TURN_PACING_POLL_SECONDS", 0.0)
+    monkeypatch.setattr(agent_worker_module, "remaining_agent_seconds", lambda *_args, **_kwargs: 9999)
+
+    result = run_agent_worker(str(run_root), agent_id)
+    replay_task_prompts = [
+        message
+        for message in _transcript_messages(str(run_root), agent_id)
+        if message["role"] == "user" and "# Task Assignment" in str(message["content"])
+    ]
+
+    assert result == 0
+    assert len(transport.user_messages) == 1
+    assert "# Task Assignment" in transport.user_messages[0]
+    assert len(replay_task_prompts) == 1
+
+
+def test_worker_previous_error_uses_runtime_delta_without_replaying_assignment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id, _request = _create_workspace(tmp_path, monkeypatch)
+    clock = _FakeClock()
+    transport = _SequencedTransport([_idle_turn(), _finish_turn()], clock)
+
+    _install_fake_worker_timing(monkeypatch, clock)
+    _install_fake_transport(monkeypatch, transport)
+    monkeypatch.setattr(agent_worker_module, "TURN_MAX_PROMPT_GAP_SECONDS", 0.0)
+    monkeypatch.setattr(agent_worker_module, "TURN_PACING_POLL_SECONDS", 0.0)
+    monkeypatch.setattr(agent_worker_module, "remaining_agent_seconds", lambda *_args, **_kwargs: 9999)
+
+    result = run_agent_worker(str(run_root), agent_id)
+
+    assert result == 0
+    assert len(transport.user_messages) == 2
+    assert "# Task Assignment" in transport.user_messages[0]
+    assert transport.user_messages[1].startswith("# Runtime Delta")
+    assert "# Task Assignment" not in transport.user_messages[1]
+    assert "# Runtime Snapshot" not in transport.user_messages[1]
+    assert "Model returned no tool call" in transport.user_messages[1]
 
 
 def test_worker_first_turn_is_immediate_and_self_writes_do_not_wake_early(
@@ -745,6 +818,12 @@ def test_worker_wakes_early_when_commenter_adds_new_feedback(
 
     assert result == 0
     assert transport.call_times[1] == transport.call_times[0] + 4.0
+    assert len(transport.user_messages) == 2
+    assert "# Task Assignment" in transport.user_messages[0]
+    assert transport.user_messages[1].startswith("# Runtime Delta")
+    assert "# Task Assignment" not in transport.user_messages[1]
+    assert "# Runtime Snapshot" not in transport.user_messages[1]
+    assert "New outside-angle comment." in transport.user_messages[1]
 
 
 def test_worker_wakes_early_when_soft_time_limit_activates(
@@ -814,6 +893,9 @@ def test_worker_soft_stop_second_prompt_contains_finalization_guidance(
     assert len(transport.user_messages) == 2
     assert shared_text not in transport.user_messages[0]
     assert root_text not in transport.user_messages[0]
+    assert transport.user_messages[1].startswith("# Runtime Delta")
+    assert "# Task Assignment" not in transport.user_messages[1]
+    assert "# Runtime Snapshot" not in transport.user_messages[1]
     assert shared_text in transport.user_messages[1]
     assert root_text in transport.user_messages[1]
 

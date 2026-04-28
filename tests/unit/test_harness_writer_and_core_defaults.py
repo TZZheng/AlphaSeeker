@@ -8,7 +8,12 @@ from src.harness.agent_worker import _publish_outputs_satisfy_completion
 from src.harness.artifacts import agent_workspace_paths, create_agent_workspace, initialize_run_root, write_text_atomic
 from src.harness import prompt_builder as prompt_builder_module
 from src.harness.presets import default_tool_allowlist, visible_skills_for_preset
-from src.harness.prompt_builder import build_agent_prompt_bundle, render_task_markdown, render_tools_markdown
+from src.harness.prompt_builder import (
+    build_agent_prompt_bundle,
+    build_agent_runtime_delta_prompt,
+    render_task_markdown,
+    render_tools_markdown,
+)
 from src.harness.prompt_builder import build_commenter_prompt_bundle
 from src.harness.registry import build_skill_registry, get_skills_for_packs
 from src.harness.types import HarnessRequest
@@ -402,6 +407,36 @@ def test_runtime_history_changes_user_prompt_not_system_prompt(
     assert "Need to call a valid tool." in changed.user_prompt
     assert "Comment Feed" in changed.user_prompt
     assert "- tool=" not in changed.user_prompt
+
+
+def test_runtime_delta_prompt_only_includes_out_of_band_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id, _request = _create_workspace(monkeypatch, tmp_path, preset="research")
+
+    empty_delta = build_agent_runtime_delta_prompt(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        previous_error=None,
+        comment_feed=None,
+        soft_stop_active=False,
+    )
+    delta = build_agent_runtime_delta_prompt(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        previous_error="Need to call a valid tool.",
+        comment_feed="Comment Feed\nCheck the weaker source.\n",
+        soft_stop_active=True,
+    )
+
+    assert empty_delta == ""
+    assert delta.startswith("# Runtime Delta")
+    assert "# Task Assignment" not in delta
+    assert "# Runtime Snapshot" not in delta
+    assert "Need to call a valid tool." in delta
+    assert "Comment Feed" in delta
+    assert "Soft-stop mode is active" in delta
 
 
 def test_tools_markdown_changes_system_prompt(

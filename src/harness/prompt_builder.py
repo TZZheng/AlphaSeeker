@@ -298,6 +298,44 @@ def _render_runtime_history(
     return "\n".join(sections)
 
 
+def build_agent_runtime_delta_prompt(
+    *,
+    run_root: str,
+    agent_id: str,
+    previous_error: str | None,
+    comment_feed: str | None,
+    soft_stop_active: bool,
+) -> str:
+    sections = ["# Runtime Delta"]
+    has_content = False
+    if previous_error:
+        has_content = True
+        sections.extend(["", "## Previous Error To Fix", previous_error])
+    if comment_feed:
+        has_content = True
+        sections.extend(["", comment_feed])
+    if soft_stop_active:
+        has_content = True
+        record = latest_agent_records(run_root).get(agent_id)
+        is_root = record is None or not record.parent_id
+        guidance = (
+            "Spend the remaining turns improving publish/final.md, publish/summary.md, "
+            "and publish/artifact_index.md with current materials and call status to done so they stay readable if execution stops at any time."
+            if is_root
+            else "Spend the remaining turns improving your current publish/ outputs with current materials so your parent "
+            "can use them if execution stops at any time."
+        )
+        sections.extend(
+            [
+                "",
+                "## Soft-Stop Mode",
+                "Soft-stop mode is active. Stop exploration and do not open new workstreams unless strictly necessary.",
+                guidance,
+            ]
+        )
+    return "\n".join(sections) if has_content else ""
+
+
 def build_agent_prompt_bundle(
     *,
     request: HarnessRequest,
