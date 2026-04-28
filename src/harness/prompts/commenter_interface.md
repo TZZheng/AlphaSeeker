@@ -2,6 +2,11 @@
 
 ## Commenter Tools
 
+These are reviewer-only tools for your commenter session.
+They are not the main agent's tools and do not define what the main agent can call.
+`tools.md` is the source of truth for the main agent's visible tools.
+Your final comment must not mention tools, commands, file names, commenter, runtime, or system.
+
 {{commenter_tools}}
 
 ## Path Semantics
