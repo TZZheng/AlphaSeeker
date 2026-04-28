@@ -222,3 +222,6 @@ charts/
 .agent/
 .claude/
 /CLAUDE.md
+/AGENTS.md
+.lingtai
+.recipe
