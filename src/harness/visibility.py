@@ -159,5 +159,4 @@ def resolve_visible_write_file(
                 raise VisibilityError(f"File '{raw_path}' does not exist.")
             relative = candidate.relative_to(root).as_posix()
             return candidate, root_name, relative
-    raise VisibilityError("Write paths must stay inside this agent's publish/ or scratch/ tree.")
-
+    raise VisibilityError("Write paths must be relative paths and stay inside publish/ or scratch/.")
