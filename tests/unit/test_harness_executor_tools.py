@@ -102,7 +102,7 @@ def test_delegate_rejects_unknown_preset_and_lists_legal_presets(
         registry_map=registry,
     )
 
-    with pytest.raises(ValueError, match="Legal presets: 'orchestrator', 'research', 'source_triage', 'writer', 'synthesizer', 'evaluator'"):
+    with pytest.raises(ValueError, match="Legal presets: 'orchestrator', 'research', 'writer', 'synthesizer', 'evaluator'"):
         execute_model_tool(
             session,
             "delegate",

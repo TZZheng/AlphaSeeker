@@ -129,7 +129,7 @@ Base model-visible tools come from `executor.py`:
 - `delegate`
 - `agents`
 - `files`
-- `promote` for `research` and `source_triage`
+- `promote` for `research`
 - `bash`
 - `write`
 - `edit`
@@ -155,7 +155,6 @@ Skill packs are registered in `registry.py` and `skills/`:
 Visibility is preset-dependent:
 
 - `research` sees the broadest visible skill surface from the enabled packs; internal helper skills can still stay hidden
-- `source_triage` only sees `core`
 - other presets get a reduced core read/search surface plus the file/status tools above
 
 ## On-Disk Run Layout

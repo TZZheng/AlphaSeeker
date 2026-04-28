@@ -27,16 +27,6 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
         "patch",
         "status",
     ],
-    "source_triage": [
-        "delegate",
-        "files",
-        "promote",
-        "bash",
-        "write",
-        "edit",
-        "patch",
-        "status",
-    ],
     "writer": [
         "delegate",
         "agents",
@@ -73,7 +63,6 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
 PRESET_EXPLANATIONS: dict[str, str] = {
     "orchestrator": "delegate focused work, wait for child results, and synthesize the final answer",
     "research": "gather evidence, call deterministic research tools, and finish the assigned research task yourself",
-    "source_triage": "review noisy candidate material and separate useful sources from noise",
     "writer": "draft or revise polished prose from published/context files",
     "synthesizer": "combine child outputs into a coherent published deliverable",
     "evaluator": "critique evidence quality, find contradictions, and publish concrete revision feedback",
@@ -106,8 +95,6 @@ def visible_skills_for_preset(
     ]
     if preset == "research":
         return visible
-    if preset == "source_triage":
-        return [spec for spec in visible if spec.pack == "core"]
     return primitive_core
 
 

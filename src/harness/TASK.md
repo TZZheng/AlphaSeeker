@@ -22,7 +22,7 @@ The harness is a file-based multi-agent kernel.
 - Deterministic skills are exposed as first-class child-agent tools.
 - Agents should see high-level research tools, not hidden internal retrieval-stage controls.
 - The root agent should prefer `delegate` over direct work.
-- The only legal child presets are `orchestrator`, `research`, `source_triage`, `writer`, `synthesizer`, and `evaluator`.
+- The only legal child presets are `orchestrator`, `research`, `writer`, `synthesizer`, and `evaluator`.
 - Published child handoff must include canonical file paths so parents can read those files explicitly.
 
 ## Engineering Quality Bar

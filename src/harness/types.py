@@ -277,7 +277,7 @@ class SkillSpec(BaseModel):
     )
 
 
-AGENT_PRESETS = ("orchestrator", "research", "source_triage", "writer", "synthesizer", "evaluator")
+AGENT_PRESETS = ("orchestrator", "research", "writer", "synthesizer", "evaluator")
 AGENT_STATUSES = (
     "queued",
     "running",
@@ -311,7 +311,7 @@ class AgentRecord(BaseModel):
 
     agent_id: str
     parent_id: str = ""
-    preset: Literal["orchestrator", "research", "source_triage", "writer", "synthesizer", "evaluator"] = "research"
+    preset: Literal["orchestrator", "research", "writer", "synthesizer", "evaluator"] = "research"
     workspace_path: str
     task_name: str
     description: str
@@ -356,7 +356,7 @@ class HarnessRequest(BaseModel):
     user_prompt: str
     runtime: str = "harness"
     run_id: str | None = None
-    root_preset: Literal["orchestrator", "research", "source_triage", "writer", "synthesizer", "evaluator"] = "orchestrator"
+    root_preset: Literal["orchestrator", "research", "writer", "synthesizer", "evaluator"] = "orchestrator"
     agent_transport: Literal["auto", "minimax_anthropic", "minimax_openai", "anthropic", "openai", "text_json"] = "auto"
     wall_clock_budget_seconds: int = 1200
     root_wall_clock_seconds: int | None = None

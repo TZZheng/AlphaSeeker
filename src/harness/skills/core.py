@@ -840,7 +840,7 @@ CORE_SKILLS = [
     ),
     SkillSpec(
         name="read_web_pages",
-        description="Read extracted text from specific web URLs returned by prior search results.",
+        description="Read extracted text from specific web URLs returned by search_web results.",
         pack="core",
         input_schema={
             "urls": "string[]",
