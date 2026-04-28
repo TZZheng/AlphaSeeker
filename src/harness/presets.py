@@ -9,7 +9,6 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
     "orchestrator": [
         "delegate",
         "agents",
-        "files",
         "bash",
         "write",
         "edit",
@@ -19,7 +18,6 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
     "research": [
         "delegate",
         "agents",
-        "files",
         "bash",
         "write",
         "edit",
@@ -29,7 +27,6 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
     "writer": [
         "delegate",
         "agents",
-        "files",
         "bash",
         "write",
         "edit",
@@ -39,7 +36,6 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
     "synthesizer": [
         "delegate",
         "agents",
-        "files",
         "bash",
         "write",
         "edit",
@@ -49,7 +45,6 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
     "evaluator": [
         "delegate",
         "agents",
-        "files",
         "bash",
         "write",
         "edit",

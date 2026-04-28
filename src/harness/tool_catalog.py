@@ -11,7 +11,6 @@ from src.harness.types import AGENT_PRESETS, SkillSpec
 HARNESS_TOOL_NAMES = [
     "delegate",
     "agents",
-    "files",
     "bash",
     "write",
     "edit",
@@ -71,13 +70,6 @@ def harness_tool_definitions() -> dict[str, dict[str, Any]]:
         "agents": {
             "description": "List all child agents with status. Drains the events queue so callers know which children just finished. Do not poll in a tight loop when nothing new has appeared.",
             "input_schema": {"type": "object", "properties": {}},
-        },
-        "files": {
-            "description": "List published files for an agent.",
-            "input_schema": {
-                "type": "object",
-                "properties": {"agent_id": {"type": "string"}},
-            },
         },
         "bash": {
             "description": "Run one repo-scoped bash command from the allowlist for filesystem inspection or file movement.",

@@ -530,11 +530,6 @@ def _describe_file(path: Path) -> str:
     return ""
 
 
-def _handle_list_publish_files(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
-    target_agent = str(arguments.get("agent_id") or session.agent_id).strip()
-    return {"agent_id": target_agent, "files": _publish_file_rows(session.run_root, target_agent)}
-
-
 def _publish_file_rows(run_root: str, agent_id: str) -> list[dict[str, str]]:
     publish_root = agent_workspace_paths(run_root, agent_id)["publish_root"]
     rows: list[dict[str, str]] = []
@@ -1251,7 +1246,6 @@ def _handle_set_status(session: AgentSession, arguments: dict[str, Any]) -> dict
 _HANDLERS = {
     "delegate": _handle_spawn_subagent,
     "agents": _handle_list_children,
-    "files": _handle_list_publish_files,
     "bash": _handle_bash,
     "write": _handle_write_file,
     "edit": _handle_edit_file,

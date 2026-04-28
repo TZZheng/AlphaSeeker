@@ -128,7 +128,6 @@ Base model-visible tools come from `executor.py`:
 
 - `delegate`
 - `agents`
-- `files`
 - `bash`
 - `write`
 - `edit`
