@@ -20,7 +20,6 @@ PRESET_TOOL_ALLOWLIST: dict[str, list[str]] = {
         "delegate",
         "agents",
         "files",
-        "promote",
         "bash",
         "write",
         "edit",

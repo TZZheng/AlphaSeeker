@@ -12,7 +12,6 @@ HARNESS_TOOL_NAMES = [
     "delegate",
     "agents",
     "files",
-    "promote",
     "bash",
     "write",
     "edit",
@@ -78,16 +77,6 @@ def harness_tool_definitions() -> dict[str, dict[str, Any]]:
             "input_schema": {
                 "type": "object",
                 "properties": {"agent_id": {"type": "string"}},
-            },
-        },
-        "promote": {
-            "description": "Promote a local artifact into the shared run object store.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "source_path": {"type": "string"},
-                    "description": {"type": "string"},
-                },
             },
         },
         "bash": {

@@ -22,7 +22,6 @@ from src.harness.artifacts import (
     latest_agent_records,
     load_skill_state,
     load_object_manifest,
-    promote_object,
     read_jsonl,
     read_status,
     read_text,
@@ -886,21 +885,6 @@ def _handle_bash(session: AgentSession, arguments: dict[str, Any]) -> dict[str, 
     raise ValueError(f"Unsupported bash command '{command_name}'.")
 
 
-def _handle_promote_artifact(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
-    source_path = str(arguments.get("source_path") or "").strip()
-    if not source_path:
-        raise ValueError("promote requires source_path.")
-    description = str(arguments.get("description") or Path(source_path).name).strip()
-    promoted = promote_object(
-        session.run_root,
-        source_path=source_path,
-        description=description,
-        agent_id=session.agent_id,
-    )
-    promoted["source_path"] = source_path
-    return promoted
-
-
 def _handle_write_file(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
     raw_path = str(arguments.get("path") or "").strip()
     if not raw_path:
@@ -1268,7 +1252,6 @@ _HANDLERS = {
     "delegate": _handle_spawn_subagent,
     "agents": _handle_list_children,
     "files": _handle_list_publish_files,
-    "promote": _handle_promote_artifact,
     "bash": _handle_bash,
     "write": _handle_write_file,
     "edit": _handle_edit_file,

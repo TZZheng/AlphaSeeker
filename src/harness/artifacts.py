@@ -758,40 +758,6 @@ def append_tool_call_log(run_root: str | Path, agent_id: str, payload: dict[str,
     append_jsonl(agent_workspace_paths(run_root, agent_id)["tool_calls_log"], payload)
 
 
-def promote_object(
-    run_root: str | Path,
-    *,
-    source_path: str,
-    description: str,
-    agent_id: str,
-) -> dict[str, str]:
-    source = Path(source_path)
-    if not source.exists() or not source.is_file():
-        raise FileNotFoundError(source_path)
-    object_id = f"obj_{uuid4().hex[:12]}"
-    registry = registry_paths(run_root)
-    target = registry["objects_root"] / f"{object_id}_{source.name}"
-    _copy_or_link(source, target)
-    manifest_row = {
-        "object_id": object_id,
-        "agent_id": agent_id,
-        "description": description,
-        "source_path": str(source),
-        "object_path": str(target),
-        "created_at": _utc_now_iso(),
-    }
-    append_jsonl(registry["objects_manifest"], manifest_row)
-    append_event(
-        run_root,
-        AgentEvent(
-            event_type="artifact_promoted",
-            agent_id=agent_id,
-            details={"object_id": object_id, "object_path": str(target), "description": description},
-        ),
-    )
-    return {"object_id": object_id, "object_path": str(target), "description": description}
-
-
 def load_object_manifest(run_root: str | Path) -> list[dict[str, Any]]:
     return read_jsonl(registry_paths(run_root)["objects_manifest"])
 
