@@ -82,19 +82,19 @@ def test_commenter_tool_specs_are_read_only_catalog_subset() -> None:
     names = [spec["name"] for spec in specs]
     by_name = {spec["name"]: spec for spec in specs}
 
-    assert names == ["read_file", "search_in_files"]
-    assert "write_file" not in by_name
-    assert "set_status" not in by_name
-    assert "spawn_subagent" not in by_name
-    assert "inspectable file" in by_name["read_file"]["description"]
-    assert set(by_name["read_file"]["input_schema"]["properties"]) == {
+    assert names == ["read", "grep"]
+    assert "write" not in by_name
+    assert "status" not in by_name
+    assert "delegate" not in by_name
+    assert "inspectable file" in by_name["read"]["description"]
+    assert set(by_name["read"]["input_schema"]["properties"]) == {
         "path",
         "max_chars",
         "start_char",
         "start_line",
         "max_lines",
     }
-    assert by_name["search_in_files"]["input_schema"]["properties"]["paths"] == {
+    assert by_name["grep"]["input_schema"]["properties"]["paths"] == {
         "type": "array",
         "items": {"type": "string"},
     }
@@ -116,13 +116,13 @@ def test_commenter_and_main_agent_share_readable_workspace_view(
         registry_map=build_skill_registry(),
     )
 
-    main_result = execute_model_tool(session, "read_file", {"path": "scratch/shared.md"})
+    main_result = execute_model_tool(session, "read", {"path": "scratch/shared.md"})
     commenter_result = _execute_commenter_tool_call(
         run_root=str(run_root),
         agent_id=agent_id,
         request=request,
         manifest=build_commenter_observation_manifest(str(run_root), agent_id),
-        tool_name="read_file",
+        tool_name="read",
         arguments={"path": "scratch/shared.md"},
     )
     private_result = _execute_commenter_tool_call(
@@ -130,7 +130,7 @@ def test_commenter_and_main_agent_share_readable_workspace_view(
         agent_id=agent_id,
         request=request,
         manifest=[],
-        tool_name="read_file",
+        tool_name="read",
         arguments={"path": str(paths["tool_calls_log"])},
     )
 
@@ -200,7 +200,7 @@ def test_refresh_commenter_records_frozen_incremental_prompt_and_review_baseline
 
     write_text_atomic(paths["scratch_root"] / "draft.md", "draft v2\n")
     write_text_atomic(paths["publish_root"] / "final.md", "# Final\n\nNew version.\n")
-    write_text_atomic(paths["tool_calls_log"], '{"tool":"write_file"}\n')
+    write_text_atomic(paths["tool_calls_log"], '{"tool":"write"}\n')
     write_text_atomic(paths["llm_turns_root"] / "0001_request.json", '{"messages":[]}\n')
     (paths["publish_root"] / "old_summary.md").unlink()
     snapshot = build_commenter_observation_snapshot(
@@ -289,7 +289,7 @@ def test_commenter_manifest_excludes_private_runtime_files_and_default_artifacts
     write_text_atomic(paths["tool_calls_log"], '{"kind":"tool"}\n')
     write_text_atomic(paths["transcript"], '{"kind":"assistant"}\n')
     write_text_atomic(paths["llm_turns_root"] / "0001_request.json", '{"messages":[]}\n')
-    skills_root = paths["skills_artifacts_root"] / "001_read_file"
+    skills_root = paths["skills_artifacts_root"] / "001_read"
     skills_root.mkdir(parents=True, exist_ok=True)
     write_text_atomic(skills_root / "output.md", "tool output\n")
     write_text_atomic(paths["scratch_root"] / "notes.md", "working notes\n")
@@ -299,7 +299,7 @@ def test_commenter_manifest_excludes_private_runtime_files_and_default_artifacts
 
     assert categories["scratch/notes.md"] == "scratch"
     assert all(not path.startswith("_harness/") for path in categories)
-    assert "artifacts/skills/001_read_file/output.md" not in categories
+    assert "artifacts/skills/001_read/output.md" not in categories
     assert "scratch/journal.jsonl" not in categories
     assert "scratch/tool_history.jsonl" not in categories
 
@@ -401,20 +401,20 @@ class _SuccessTransport:
             tool_calls=[
                 ModelToolCall(
                     call_id="call_1",
-                    name="write_file",
+                    name="write",
                     arguments={"path": "publish/summary.md", "content": "# Summary\n"},
                 ),
                 ModelToolCall(
                     call_id="call_2",
-                    name="write_file",
+                    name="write",
                     arguments={"path": "publish/artifact_index.md", "content": "# Artifact Index\n"},
                 ),
                 ModelToolCall(
                     call_id="call_3",
-                    name="write_file",
+                    name="write",
                     arguments={"path": "publish/final.md", "content": "# Final\n\nDone.\n"},
                 ),
-                ModelToolCall(call_id="call_4", name="set_status", arguments={"status": "done"}),
+                ModelToolCall(call_id="call_4", name="status", arguments={"status": "done"}),
             ],
             text_blocks=["finish now"],
             stop_reason="tool_use",
@@ -528,7 +528,7 @@ def _scratch_write_turn() -> ModelTurnResult:
         tool_calls=[
             ModelToolCall(
                 call_id="call_work",
-                name="write_file",
+                name="write",
                 arguments={"path": "scratch/notes.md", "content": "working\n"},
             )
         ],
@@ -542,20 +542,20 @@ def _finish_turn() -> ModelTurnResult:
         tool_calls=[
             ModelToolCall(
                 call_id="call_summary",
-                name="write_file",
+                name="write",
                 arguments={"path": "publish/summary.md", "content": "# Summary\n"},
             ),
             ModelToolCall(
                 call_id="call_index",
-                name="write_file",
+                name="write",
                 arguments={"path": "publish/artifact_index.md", "content": "# Artifact Index\n"},
             ),
             ModelToolCall(
                 call_id="call_final",
-                name="write_file",
+                name="write",
                 arguments={"path": "publish/final.md", "content": "# Final\n\nDone.\n"},
             ),
-            ModelToolCall(call_id="call_done", name="set_status", arguments={"status": "done"}),
+            ModelToolCall(call_id="call_done", name="status", arguments={"status": "done"}),
         ],
         text_blocks=["finish now"],
         stop_reason="tool_use",
@@ -806,7 +806,7 @@ def test_worker_soft_stop_second_prompt_contains_finalization_guidance(
     )
     root_text = (
         "Spend the remaining turns improving publish/final.md, publish/summary.md, "
-        "and publish/artifact_index.md with current materials and call set_status to done "
+        "and publish/artifact_index.md with current materials and call status to done "
         "so they stay readable if execution stops at any time."
     )
 

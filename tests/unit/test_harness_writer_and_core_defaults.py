@@ -102,19 +102,23 @@ def test_render_tools_markdown_lists_visible_runtime_surface() -> None:
     )
 
     assert "# Runtime Interface" in text
-    assert "`spawn_subagent`" in text
+    assert "`delegate`" in text
     assert "`bash`" in text
-    assert "`apply_patch`" in text
-    assert "edit_file(path=..., ...)" in text
+    assert "`patch`" in text
+    assert "edit(path=..., ...)" in text
     assert "short exact replacements or inserts" in text
-    assert "apply_patch(patch=...)" in text
+    assert "patch(patch=...)" in text
     assert "localized multi-line edits" in text
     assert "*** Begin Patch" in text
     assert "*** Update File: publish/example.md" in text
+    assert "-old line" in text
+    assert "+new line" in text
+    assert "-### Bear Case" in text
+    assert "Do not add a separator space after the prefix" in text
     assert "space for unchanged context lines" in text
-    assert "If `apply_patch` fails because the context is missing or ambiguous" in text
-    assert "read_file(path=...)" in text
-    assert "write_file(path=..., content=...)" in text
+    assert "If `patch` fails because the context is missing or ambiguous" in text
+    assert "read(path=...)" in text
+    assert "write(path=..., content=...)" in text
     assert "replacing most of a file or creating a new one" in text
     assert "fetch_company_profile" in text
     assert "retrieve_sources" not in text
@@ -134,8 +138,8 @@ def test_orchestrator_tools_markdown_hides_direct_skills() -> None:
     )
 
     assert "fetch_company_profile" not in text
-    assert "read_file" in text
-    assert "search_in_files" in text
+    assert "read" in text
+    assert "grep" in text
     assert "`evaluator`" in text
 
 
@@ -148,8 +152,8 @@ def test_evaluator_preset_gets_primitive_core_skills() -> None:
 
     names = {spec.name for spec in skills}
 
-    assert "read_file" in names
-    assert "search_in_files" in names
+    assert "read" in names
+    assert "grep" in names
     assert "get_current_datetime" in names
     assert "search_web" in names
     assert "read_web_pages" in names
@@ -229,7 +233,7 @@ def test_agent_user_prompt_lists_context_as_artifact_paths(
     bundle = _build_bundle(request, run_root, "agent_context", preset="research")
 
     assert str(run_root / "agents" / "agent_context" / "context") in bundle.user_prompt
-    assert "Read listed context file paths with `read_file(path=...)`." in bundle.user_prompt
+    assert "Read listed context file paths with `read(path=...)`." in bundle.user_prompt
 
 
 def test_prompt_bundle_explicit_false_soft_stop_matches_default(
@@ -290,7 +294,7 @@ def test_prompt_bundle_soft_stop_appends_role_specific_guidance(
     )
     root_text = (
         "Spend the remaining turns improving publish/final.md, publish/summary.md, "
-        "and publish/artifact_index.md with current materials and call set_status to done "
+        "and publish/artifact_index.md with current materials and call status to done "
         "so they stay readable if execution stops at any time."
     )
     child_text = (
@@ -335,7 +339,7 @@ def test_agent_system_prompt_loads_markdown_files(
     assert "ROLE FILE" in bundle.system_prompt
     assert "TOOLS FILE" in bundle.system_prompt
     assert "NATIVE MODE FILE" in bundle.system_prompt
-    assert "`spawn_subagent`" in bundle.system_prompt
+    assert "`delegate`" in bundle.system_prompt
 
 
 def test_commenter_prompt_bundle_uses_commenter_specific_layers_only(
@@ -364,7 +368,7 @@ def test_commenter_prompt_bundle_uses_commenter_specific_layers_only(
     assert "COMMENTER BASE FILE" in bundle.system_prompt
     assert "COMMENTER ROLE FILE" in bundle.system_prompt
     assert "COMMENTER INTERFACE FILE" in bundle.system_prompt
-    assert "`read_file`" in bundle.system_prompt
+    assert "`read`" in bundle.system_prompt
 
 
 def test_commenter_prompt_keeps_tool_boundary_rule_near_commenter_tools() -> None:

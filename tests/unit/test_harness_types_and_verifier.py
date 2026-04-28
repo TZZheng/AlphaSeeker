@@ -8,15 +8,15 @@ from src.harness.types import AgentCommand, HarnessResponse
 
 
 def test_agent_command_requires_known_shape() -> None:
-    command = AgentCommand(tool="set_status", arguments={"status": "done"}, note="stop")
+    command = AgentCommand(tool="status", arguments={"status": "done"}, note="stop")
 
-    assert command.tool == "set_status"
+    assert command.tool == "status"
     assert command.arguments["status"] == "done"
 
 
 def test_agent_command_rejects_unknown_fields() -> None:
     with pytest.raises(ValidationError):
-        AgentCommand.model_validate({"tool": "set_status", "arguments": {}, "extra": True})
+        AgentCommand.model_validate({"tool": "status", "arguments": {}, "extra": True})
 
 
 def test_harness_response_uses_kernel_fields() -> None:

@@ -72,7 +72,7 @@ def test_all_executor_handlers_are_exposed_by_a_preset_allowlist() -> None:
     assert set(_HANDLERS) <= exposed_tools
 
 
-def test_spawn_subagent_rejects_unknown_preset_and_lists_legal_presets(
+def test_delegate_rejects_unknown_preset_and_lists_legal_presets(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -105,12 +105,12 @@ def test_spawn_subagent_rejects_unknown_preset_and_lists_legal_presets(
     with pytest.raises(ValueError, match="Legal presets: 'orchestrator', 'research', 'source_triage', 'writer', 'synthesizer', 'evaluator'"):
         execute_model_tool(
             session,
-            "spawn_subagent",
+            "delegate",
             {"task_name": "child", "description": "Do work", "preset": "analysis"},
         )
 
 
-def test_spawn_subagent_can_record_expected_publish_files(
+def test_delegate_can_record_expected_publish_files(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -142,7 +142,7 @@ def test_spawn_subagent_can_record_expected_publish_files(
 
     result = execute_model_tool(
         session,
-        "spawn_subagent",
+        "delegate",
         {
             "task_name": "child",
             "description": "Do focused work",
@@ -320,12 +320,12 @@ def test_publish_tools_normalize_publish_prefix(
 
     write_result = execute_model_tool(
         session,
-        "write_file",
+        "write",
         {"path": "publish/summary.md", "content": "Hello\n"},
     )
     read_result = execute_model_tool(
         session,
-        "read_file",
+        "read",
         {"path": write_result["path"]},
     )
 
@@ -334,13 +334,13 @@ def test_publish_tools_normalize_publish_prefix(
     assert read_result["content"].startswith("Hello")
 
 
-def test_write_file_schema_requires_path_and_content() -> None:
-    schema = harness_tool_definitions()["write_file"]["input_schema"]
+def test_write_schema_requires_path_and_content() -> None:
+    schema = harness_tool_definitions()["write"]["input_schema"]
 
     assert schema["required"] == ["path", "content"]
 
 
-def test_write_file_rejects_missing_publish_content(
+def test_write_rejects_missing_publish_content(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -351,15 +351,15 @@ def test_write_file_rejects_missing_publish_content(
         user_prompt="Publish a final memo",
     )
 
-    with pytest.raises(ValueError, match="write_file requires content"):
+    with pytest.raises(ValueError, match="write requires content"):
         execute_model_tool(
             session,
-            "write_file",
+            "write",
             {"path": "publish/final.md"},
         )
 
 
-def test_write_file_rejects_empty_publish_content(
+def test_write_rejects_empty_publish_content(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -373,12 +373,35 @@ def test_write_file_rejects_empty_publish_content(
     with pytest.raises(ValueError, match="non-empty content for publish paths"):
         execute_model_tool(
             session,
-            "write_file",
+            "write",
             {"path": "publish/final.md", "content": ""},
         )
 
 
-def test_write_file_allows_empty_scratch_content(
+def test_write_rejects_absolute_paths_with_clear_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-write-file-absolute-path",
+        user_prompt="Publish a final memo",
+    )
+    absolute_path = Path(run_root) / root_agent_id / "publish" / "final.md"
+
+    with pytest.raises(
+        ValueError,
+        match="relative paths and stay inside publish/ or scratch/",
+    ):
+        execute_model_tool(
+            session,
+            "write",
+            {"path": str(absolute_path), "content": "# Final\n"},
+        )
+
+
+def test_write_allows_empty_scratch_content(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -391,7 +414,7 @@ def test_write_file_allows_empty_scratch_content(
 
     result = execute_model_tool(
         session,
-        "write_file",
+        "write",
         {"path": "scratch/notes.md", "content": ""},
     )
 
@@ -401,7 +424,7 @@ def test_write_file_allows_empty_scratch_content(
     assert note_path.read_text(encoding="utf-8") == ""
 
 
-def test_root_write_file_snapshots_final_report(
+def test_root_write_snapshots_final_report(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -415,7 +438,7 @@ def test_root_write_file_snapshots_final_report(
 
     write_result = execute_model_tool(
         session,
-        "write_file",
+        "write",
         {"path": "publish/final.md", "content": content},
     )
 
@@ -427,7 +450,7 @@ def test_root_write_file_snapshots_final_report(
     assert row["source_path"] == write_result["path"]
     assert row["sha256"] == hashlib.sha256(content.encode("utf-8")).hexdigest()
     assert row["chars"] == len(content)
-    assert row["trigger_tool"] == "write_file"
+    assert row["trigger_tool"] == "write"
     assert row["trigger_operation"] == ""
     assert Path(str(row["snapshot_path"])).read_text(encoding="utf-8") == content
     events = read_jsonl(registry_paths(run_root)["events_registry"])
@@ -446,8 +469,8 @@ def test_identical_root_final_write_does_not_create_duplicate_snapshot(
     )
     content = "# Final\n\nSame memo.\n"
 
-    execute_model_tool(session, "write_file", {"path": "publish/final.md", "content": content})
-    execute_model_tool(session, "write_file", {"path": "publish/final.md", "content": content})
+    execute_model_tool(session, "write", {"path": "publish/final.md", "content": content})
+    execute_model_tool(session, "write", {"path": "publish/final.md", "content": content})
 
     rows = _final_report_snapshot_rows(run_root)
     assert len(rows) == 1
@@ -466,10 +489,10 @@ def test_editing_root_final_creates_next_snapshot(
         preset="writer",
     )
 
-    execute_model_tool(session, "write_file", {"path": "publish/final.md", "content": "# Final\n\nDraft.\n"})
+    execute_model_tool(session, "write", {"path": "publish/final.md", "content": "# Final\n\nDraft.\n"})
     execute_model_tool(
         session,
-        "edit_file",
+        "edit",
         {
             "path": "publish/final.md",
             "operation": "replace",
@@ -482,7 +505,7 @@ def test_editing_root_final_creates_next_snapshot(
     assert [row["version"] for row in rows] == [1, 2]
     assert Path(str(rows[1]["snapshot_path"])).name == "v0002.md"
     assert Path(str(rows[1]["snapshot_path"])).read_text(encoding="utf-8") == "# Final\n\nRevised.\n"
-    assert rows[1]["trigger_tool"] == "edit_file"
+    assert rows[1]["trigger_tool"] == "edit"
     assert rows[1]["trigger_operation"] == "replace"
 
 
@@ -497,7 +520,7 @@ def test_updating_publish_summary_does_not_snapshot_final_report(
         user_prompt="Publish a summary",
     )
 
-    execute_model_tool(session, "write_file", {"path": "publish/summary.md", "content": "# Summary\n"})
+    execute_model_tool(session, "write", {"path": "publish/summary.md", "content": "# Summary\n"})
 
     assert _final_report_snapshot_rows(run_root) == []
 
@@ -514,7 +537,7 @@ def test_child_final_write_does_not_snapshot_report_versions(
     )
     child = execute_model_tool(
         session,
-        "spawn_subagent",
+        "delegate",
         {
             "task_name": "Child final",
             "description": "Publish child final.",
@@ -529,7 +552,7 @@ def test_child_final_write_does_not_snapshot_report_versions(
         registry_map=session.registry_map,
     )
 
-    execute_model_tool(child_session, "write_file", {"path": "publish/final.md", "content": "# Child\n"})
+    execute_model_tool(child_session, "write", {"path": "publish/final.md", "content": "# Child\n"})
 
     assert _final_report_snapshot_rows(run_root) == []
 
@@ -545,12 +568,12 @@ def test_failed_final_edits_do_not_create_new_snapshot(
         user_prompt="Revise a final memo",
         preset="writer",
     )
-    execute_model_tool(session, "write_file", {"path": "publish/final.md", "content": "# Final\n\nStable.\n"})
+    execute_model_tool(session, "write", {"path": "publish/final.md", "content": "# Final\n\nStable.\n"})
 
     with pytest.raises(ValueError, match="target_text not found"):
         execute_model_tool(
             session,
-            "edit_file",
+            "edit",
             {
                 "path": "publish/final.md",
                 "operation": "replace",
@@ -561,7 +584,7 @@ def test_failed_final_edits_do_not_create_new_snapshot(
     with pytest.raises(ValueError, match="context was not found"):
         execute_model_tool(
             session,
-            "apply_patch",
+            "patch",
             {
                 "patch": "\n".join(
                     [
@@ -582,7 +605,7 @@ def test_failed_final_edits_do_not_create_new_snapshot(
     assert Path(str(rows[0]["snapshot_path"])).read_text(encoding="utf-8") == "# Final\n\nStable.\n"
 
 
-def test_context_files_are_copied_for_read_file(
+def test_context_files_are_copied_for_read(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -619,7 +642,7 @@ def test_context_files_are_copied_for_read_file(
 
     result = execute_model_tool(
         session,
-        "spawn_subagent",
+        "delegate",
         {
             "task_name": "child",
             "description": "Read passed context",
@@ -635,7 +658,7 @@ def test_context_files_are_copied_for_read_file(
     assert copied[0].read_text(encoding="utf-8") == "AlphaSeeker context note\n"
 
 
-def test_search_in_files_returns_match_locations(
+def test_grep_returns_match_locations(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -677,7 +700,7 @@ def test_search_in_files_returns_match_locations(
 
     result = execute_model_tool(
         session,
-        "search_in_files",
+        "grep",
         {
             "pattern": "services mix",
             "paths": [str(notes_dir)],
@@ -767,16 +790,16 @@ def test_search_visibility_excludes_private_and_default_artifact_roots(
 
     default_result = execute_model_tool(
         session,
-        "search_in_files",
+        "grep",
         {"pattern": "needle-artifact", "max_results": 5},
     )
     exact_artifact_result = execute_model_tool(
         session,
-        "search_in_files",
+        "grep",
         {"pattern": "needle-artifact", "paths": [str(artifact_file)], "max_results": 5},
     )
 
-    read_private_result = execute_model_tool(session, "read_file", {"path": str(private_file)})
+    read_private_result = execute_model_tool(session, "read", {"path": str(private_file)})
 
     assert default_result["summary"].startswith("Found 0 match")
     assert default_result.get("content", "") == ""
@@ -827,7 +850,7 @@ def test_bash_mutations_reject_private_and_artifact_destinations(
         preset="research",
     )
     paths = agent_workspace_paths(run_root, root_agent_id)
-    write_result = execute_model_tool(session, "write_file", {"path": "scratch/source.md", "content": "source\n"})
+    write_result = execute_model_tool(session, "write", {"path": "scratch/source.md", "content": "source\n"})
 
     with pytest.raises(ValueError, match="harness-private"):
         execute_model_tool(session, "bash", {"argv": ["mkdir", str(paths["harness_root"] / "new")]})
@@ -882,7 +905,7 @@ def test_bash_copy_and_move_stay_inside_visible_workspace(
 
     written = execute_model_tool(
         session,
-        "write_file",
+        "write",
         {"path": "publish/summary.md", "content": "hello\n"},
     )
     copied_path = Path(agent_workspace_paths(run_root, root_agent_id)["scratch_root"] / "summary_copy.md")
@@ -904,7 +927,7 @@ def test_bash_copy_and_move_stay_inside_visible_workspace(
     )
     read_result = execute_model_tool(
         session,
-        "read_file",
+        "read",
         {"path": str(moved_path)},
     )
 
@@ -988,7 +1011,7 @@ def test_bash_sleep_records_standard_bash_event(
     }
 
 
-def test_read_file_supports_line_slices(
+def test_read_supports_line_slices(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1026,7 +1049,7 @@ def test_read_file_supports_line_slices(
 
     result = execute_model_tool(
         session,
-        "read_file",
+        "read",
         {
             "path": str(note),
             "start_line": 2,
@@ -1038,7 +1061,7 @@ def test_read_file_supports_line_slices(
     assert result["content"] == "line2\nline3\n"
 
 
-def test_edit_file_replaces_anchored_text_in_publish(
+def test_edit_replaces_anchored_text_in_publish(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1073,12 +1096,12 @@ def test_edit_file_replaces_anchored_text_in_publish(
 
     write_result = execute_model_tool(
         session,
-        "write_file",
+        "write",
         {"path": "publish/summary.md", "content": "alpha\nbeta\ngamma\n"},
     )
     edit_result = execute_model_tool(
         session,
-        "edit_file",
+        "edit",
         {
             "path": "publish/summary.md",
             "operation": "replace",
@@ -1088,7 +1111,7 @@ def test_edit_file_replaces_anchored_text_in_publish(
     )
     read_result = execute_model_tool(
         session,
-        "read_file",
+        "read",
         {"path": write_result["path"]},
     )
 
@@ -1096,7 +1119,7 @@ def test_edit_file_replaces_anchored_text_in_publish(
     assert read_result["content"] == "alpha\nBETA\ngamma\n"
 
 
-def test_edit_file_inserts_into_scratch_without_full_rewrite(
+def test_edit_inserts_into_scratch_without_full_rewrite(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1131,12 +1154,12 @@ def test_edit_file_inserts_into_scratch_without_full_rewrite(
 
     write_result = execute_model_tool(
         session,
-        "write_file",
+        "write",
         {"path": "scratch/notes.md", "content": "top\nbottom\n"},
     )
     execute_model_tool(
         session,
-        "edit_file",
+        "edit",
         {
             "path": "scratch/notes.md",
             "operation": "insert_before",
@@ -1146,14 +1169,14 @@ def test_edit_file_inserts_into_scratch_without_full_rewrite(
     )
     read_result = execute_model_tool(
         session,
-        "read_file",
+        "read",
         {"path": write_result["path"]},
     )
 
     assert read_result["content"] == "top\nmiddle\nbottom\n"
 
 
-def test_apply_patch_replaces_multiline_paragraph_in_publish(
+def test_patch_replaces_multiline_paragraph_in_publish(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1166,7 +1189,7 @@ def test_apply_patch_replaces_multiline_paragraph_in_publish(
     )
     write_result = execute_model_tool(
         session,
-        "write_file",
+        "write",
         {
             "path": "publish/summary.md",
             "content": "Intro\nThe old thesis line 1.\nThe old thesis line 2.\nOutro\n",
@@ -1175,7 +1198,7 @@ def test_apply_patch_replaces_multiline_paragraph_in_publish(
 
     patch_result = execute_model_tool(
         session,
-        "apply_patch",
+        "patch",
         {
             "patch": "\n".join(
                 [
@@ -1193,7 +1216,7 @@ def test_apply_patch_replaces_multiline_paragraph_in_publish(
             ),
         },
     )
-    read_result = execute_model_tool(session, "read_file", {"path": write_result["path"]})
+    read_result = execute_model_tool(session, "read", {"path": write_result["path"]})
 
     assert patch_result["operation"] == "patch"
     assert patch_result["hunks_applied"] == 1
@@ -1201,7 +1224,7 @@ def test_apply_patch_replaces_multiline_paragraph_in_publish(
     assert patch_result["description"] == "Intro"
 
 
-def test_apply_patch_supports_two_hunks_in_one_file(
+def test_patch_supports_two_hunks_in_one_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1214,7 +1237,7 @@ def test_apply_patch_supports_two_hunks_in_one_file(
     )
     write_result = execute_model_tool(
         session,
-        "write_file",
+        "write",
         {
             "path": "scratch/notes.md",
             "content": "alpha\nbeta\ngamma\ndelta\nepsilon\n",
@@ -1223,7 +1246,7 @@ def test_apply_patch_supports_two_hunks_in_one_file(
 
     patch_result = execute_model_tool(
         session,
-        "apply_patch",
+        "patch",
         {
             "patch": "\n".join(
                 [
@@ -1243,13 +1266,265 @@ def test_apply_patch_supports_two_hunks_in_one_file(
             ),
         },
     )
-    read_result = execute_model_tool(session, "read_file", {"path": write_result["path"]})
+    read_result = execute_model_tool(session, "read", {"path": write_result["path"]})
 
     assert patch_result["hunks_applied"] == 2
     assert read_result["content"] == "alpha\nBETA\ngamma\ndelta\nEPSILON\n"
 
 
-def test_apply_patch_rejects_ambiguous_context(
+def test_patch_accepts_fenced_patch_and_labeled_hunk(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-apply-patch-fenced",
+        user_prompt="Patch fenced output",
+        preset="research",
+    )
+    write_result = execute_model_tool(
+        session,
+        "write",
+        {"path": "publish/final.md", "content": "Intro\nold line\nOutro\n"},
+    )
+
+    patch_result = execute_model_tool(
+        session,
+        "patch",
+        {
+            "patch": """
+```patch
+*** Begin Patch
+*** Update File: publish/final.md
+@@ section: intro
+ Intro
+-old line
++new line
+ Outro
+*** End Patch
+```
+""",
+        },
+    )
+    read_result = execute_model_tool(session, "read", {"path": write_result["path"]})
+
+    assert patch_result["patch_mode"] == "strict"
+    assert read_result["content"] == "Intro\nnew line\nOutro\n"
+
+
+def test_patch_normalizes_separator_space_for_markdown_heading(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-apply-patch-separator-space",
+        user_prompt="Patch heading output",
+        preset="research",
+    )
+    write_result = execute_model_tool(
+        session,
+        "write",
+        {"path": "publish/final.md", "content": "Intro\n### Bear Case\nold\nOutro\n"},
+    )
+
+    patch_result = execute_model_tool(
+        session,
+        "patch",
+        {
+            "patch": "\n".join(
+                [
+                    "*** Begin Patch",
+                    "*** Update File: publish/final.md",
+                    "@@",
+                    " Intro",
+                    "- ### Bear Case",
+                    "- old",
+                    "+ ### Downside Case",
+                    "+ updated",
+                    " Outro",
+                    "*** End Patch",
+                ]
+            ),
+        },
+    )
+    read_result = execute_model_tool(session, "read", {"path": write_result["path"]})
+
+    assert patch_result["patch_mode"] == "normalized_separator_space"
+    assert read_result["content"] == "Intro\n### Downside Case\nupdated\nOutro\n"
+
+
+def test_patch_strict_match_wins_for_indented_lines(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-apply-patch-strict-indented",
+        user_prompt="Patch indented output",
+        preset="research",
+    )
+    write_result = execute_model_tool(
+        session,
+        "write",
+        {"path": "publish/final.md", "content": "Intro\n ### Bear Case\n old\nOutro\n"},
+    )
+
+    patch_result = execute_model_tool(
+        session,
+        "patch",
+        {
+            "patch": "\n".join(
+                [
+                    "*** Begin Patch",
+                    "*** Update File: publish/final.md",
+                    "@@",
+                    " Intro",
+                    "- ### Bear Case",
+                    "- old",
+                    "+ ### Downside Case",
+                    "+ updated",
+                    " Outro",
+                    "*** End Patch",
+                ]
+            ),
+        },
+    )
+    read_result = execute_model_tool(session, "read", {"path": write_result["path"]})
+
+    assert patch_result["patch_mode"] == "strict"
+    assert read_result["content"] == "Intro\n ### Downside Case\n updated\nOutro\n"
+
+
+def test_patch_normalized_separator_space_still_rejects_ambiguous_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-apply-patch-normalized-ambiguous",
+        user_prompt="Patch ambiguous heading",
+        preset="research",
+    )
+    write_result = execute_model_tool(
+        session,
+        "write",
+        {
+            "path": "scratch/notes.md",
+            "content": "### Bear Case\nold\nmiddle\n### Bear Case\nold\n",
+        },
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        execute_model_tool(
+            session,
+            "patch",
+            {
+                "patch": "\n".join(
+                    [
+                        "*** Begin Patch",
+                        "*** Update File: scratch/notes.md",
+                        "@@",
+                        "- ### Bear Case",
+                        "- old",
+                        "+ ### Bear Case",
+                        "+ new",
+                        "*** End Patch",
+                    ]
+                ),
+            },
+        )
+
+    message = str(exc_info.value)
+    assert "matched multiple locations" in message
+    assert "more specific surrounding lines" in message
+    read_result = execute_model_tool(session, "read", {"path": write_result["path"]})
+    assert read_result["content"] == "### Bear Case\nold\nmiddle\n### Bear Case\nold\n"
+
+
+def test_patch_rejects_missing_end_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-apply-patch-missing-end",
+        user_prompt="Patch missing end marker",
+        preset="research",
+    )
+    execute_model_tool(
+        session,
+        "write",
+        {"path": "scratch/notes.md", "content": "alpha\nbeta\n"},
+    )
+
+    with pytest.raises(ValueError, match="Patch must end with"):
+        execute_model_tool(
+            session,
+            "patch",
+            {
+                "patch": "\n".join(
+                    [
+                        "*** Begin Patch",
+                        "*** Update File: scratch/notes.md",
+                        "@@",
+                        " alpha",
+                        "-beta",
+                        "+BETA",
+                    ]
+                ),
+            },
+        )
+
+
+def test_patch_rejects_compacted_replay_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-apply-patch-replay-marker",
+        user_prompt="Patch compacted replay",
+        preset="research",
+    )
+    execute_model_tool(
+        session,
+        "write",
+        {"path": "scratch/notes.md", "content": "alpha\nbeta\n"},
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        execute_model_tool(
+            session,
+            "patch",
+            {
+                "patch": "\n".join(
+                    [
+                        "*** Begin Patch",
+                        "*** Update File: scratch/notes.md",
+                        "@@",
+                        " alpha",
+                        "-beta",
+                        "+BETA",
+                        "... [3485 chars]",
+                        "*** End Patch",
+                    ]
+                ),
+            },
+        )
+
+    message = str(exc_info.value)
+    assert "compacted replay truncation marker" in message
+    assert "Read a smaller file slice" in message
+
+
+def test_patch_rejects_ambiguous_context(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1262,7 +1537,7 @@ def test_apply_patch_rejects_ambiguous_context(
     )
     execute_model_tool(
         session,
-        "write_file",
+        "write",
         {
             "path": "scratch/notes.md",
             "content": "start\nshared\nold\nend\nstart\nshared\nold\nend\n",
@@ -1272,7 +1547,7 @@ def test_apply_patch_rejects_ambiguous_context(
     with pytest.raises(ValueError) as exc_info:
         execute_model_tool(
             session,
-            "apply_patch",
+            "patch",
             {
                 "patch": "\n".join(
                     [
@@ -1291,11 +1566,11 @@ def test_apply_patch_rejects_ambiguous_context(
         )
     message = str(exc_info.value)
     assert "matched multiple locations" in message
-    assert "read_file(path='scratch/notes.md')" in message
+    assert "read(path='scratch/notes.md')" in message
     assert "more specific surrounding lines" in message
 
 
-def test_apply_patch_rejects_missing_context(
+def test_patch_rejects_missing_context(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1308,14 +1583,14 @@ def test_apply_patch_rejects_missing_context(
     )
     execute_model_tool(
         session,
-        "write_file",
+        "write",
         {"path": "scratch/notes.md", "content": "alpha\nbeta\ngamma\n"},
     )
 
     with pytest.raises(ValueError) as exc_info:
         execute_model_tool(
             session,
-            "apply_patch",
+            "patch",
             {
                 "patch": "\n".join(
                     [
@@ -1333,11 +1608,11 @@ def test_apply_patch_rejects_missing_context(
         )
     message = str(exc_info.value)
     assert "context was not found" in message
-    assert "read_file(path='scratch/notes.md')" in message
+    assert "read(path='scratch/notes.md')" in message
     assert "exact current lines" in message
 
 
-def test_apply_patch_is_atomic_when_a_later_hunk_fails(
+def test_patch_is_atomic_when_a_later_hunk_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1350,14 +1625,14 @@ def test_apply_patch_is_atomic_when_a_later_hunk_fails(
     )
     write_result = execute_model_tool(
         session,
-        "write_file",
+        "write",
         {"path": "scratch/notes.md", "content": "alpha\nbeta\ngamma\nomega\n"},
     )
 
     with pytest.raises(ValueError, match="context was not found"):
         execute_model_tool(
             session,
-            "apply_patch",
+            "patch",
             {
                 "patch": "\n".join(
                     [
@@ -1377,5 +1652,5 @@ def test_apply_patch_is_atomic_when_a_later_hunk_fails(
             },
         )
 
-    read_result = execute_model_tool(session, "read_file", {"path": write_result["path"]})
+    read_result = execute_model_tool(session, "read", {"path": write_result["path"]})
     assert read_result["content"] == "alpha\nbeta\ngamma\nomega\n"

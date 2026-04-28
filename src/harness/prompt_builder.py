@@ -18,7 +18,7 @@ from src.harness.types import AGENT_PRESETS, HarnessRequest, SkillSpec
 
 
 PROMPTS_ROOT = Path(__file__).with_name("prompts")
-COMMENTER_TOOL_NAMES = ("read_file", "search_in_files")
+COMMENTER_TOOL_NAMES = ("read", "grep")
 
 
 @dataclass(frozen=True)
@@ -248,7 +248,7 @@ def _render_runtime_snapshot(*, request: HarnessRequest, run_root: str, agent_id
         "",
         "## Context Files",
         _list_context_files(run_root, agent_id),
-        "- Read listed context file paths with `read_file(path=...)`.",
+        "- Read listed context file paths with `read(path=...)`.",
         "",
         "## Published Files",
         _list_publish_files(run_root, agent_id),
@@ -282,7 +282,7 @@ def _render_runtime_history(
         is_root = record is None or not record.parent_id
         guidance = (
             "Spend the remaining turns improving publish/final.md, publish/summary.md, "
-            "and publish/artifact_index.md with current materials and call set_status to done so they stay readable if execution stops at any time."
+            "and publish/artifact_index.md with current materials and call status to done so they stay readable if execution stops at any time."
             if is_root
             else "Spend the remaining turns improving your current publish/ outputs with current materials so your parent "
             "can use them if execution stops at any time."

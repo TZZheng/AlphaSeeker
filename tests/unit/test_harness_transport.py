@@ -704,7 +704,7 @@ def test_replay_drops_orphan_assistant_tool_calls_before_next_turn(
                         "id": "call_stale",
                         "type": "function",
                         "function": {
-                            "name": "edit_file",
+                            "name": "edit",
                             "arguments": '{"path":"publish/final.md","target_text":"stale body"}',
                         },
                     }
@@ -740,8 +740,8 @@ def test_replay_preserves_latest_unconsumed_tool_results_for_next_turn(
             "message": {
                 "role": "assistant",
                 "content": [
-                    {"type": "tool_use", "id": "call_a", "name": "read_file", "input": {"path": "a.md"}},
-                    {"type": "tool_use", "id": "call_b", "name": "read_file", "input": {"path": "b.md"}},
+                    {"type": "tool_use", "id": "call_a", "name": "read", "input": {"path": "a.md"}},
+                    {"type": "tool_use", "id": "call_b", "name": "read", "input": {"path": "b.md"}},
                 ],
             },
         },
@@ -801,7 +801,7 @@ def test_replay_truncates_tool_result_after_model_consumes_it(
             "message": {
                 "role": "assistant",
                 "content": [
-                    {"type": "tool_use", "id": "call_a", "name": "read_file", "input": {"path": "a.md"}},
+                    {"type": "tool_use", "id": "call_a", "name": "read", "input": {"path": "a.md"}},
                 ],
             },
         },

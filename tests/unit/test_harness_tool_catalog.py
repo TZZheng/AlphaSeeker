@@ -9,24 +9,33 @@ from src.harness.tool_catalog import (
 
 
 def test_harness_base_tool_schema_is_available_by_name() -> None:
-    specs = tool_specs_for_names(["write_file"])
+    specs = tool_specs_for_names(["write"])
 
     assert specs == [
         {
-            "name": "write_file",
+            "name": "write",
             "description": "Write one file under this agent's publish/ or scratch/ tree.",
-            "input_schema": harness_tool_definitions()["write_file"]["input_schema"],
+            "input_schema": harness_tool_definitions()["write"]["input_schema"],
         }
     ]
 
 
+def test_patch_tool_description_explains_prefix_spacing() -> None:
+    spec = tool_specs_for_names(["patch"])[0]
+
+    assert spec["input_schema"] == harness_tool_definitions()["patch"]["input_schema"]
+    assert "-### Heading" in spec["description"]
+    assert "- ### Heading" in spec["description"]
+    assert "starts with a space" in spec["description"]
+
+
 def test_skill_specs_convert_compact_schema_to_json_schema() -> None:
-    specs = tool_specs_for_names(["read_file", "search_in_files"], available_skills=CORE_SKILLS)
+    specs = tool_specs_for_names(["read", "grep"], available_skills=CORE_SKILLS)
     by_name = {spec["name"]: spec for spec in specs}
 
-    assert by_name["read_file"]["input_schema"]["properties"]["path"] == {"type": "string"}
-    assert by_name["read_file"]["input_schema"]["properties"]["max_chars"] == {"type": "integer"}
-    assert by_name["search_in_files"]["input_schema"]["properties"]["paths"] == {
+    assert by_name["read"]["input_schema"]["properties"]["path"] == {"type": "string"}
+    assert by_name["read"]["input_schema"]["properties"]["max_chars"] == {"type": "integer"}
+    assert by_name["grep"]["input_schema"]["properties"]["paths"] == {
         "type": "array",
         "items": {"type": "string"},
     }
@@ -34,11 +43,11 @@ def test_skill_specs_convert_compact_schema_to_json_schema() -> None:
 
 def test_description_and_schema_overrides_apply_to_named_tools() -> None:
     specs = tool_specs_for_names(
-        ["read_file"],
+        ["read"],
         available_skills=CORE_SKILLS,
-        description_overrides={"read_file": "Read only files surfaced to the commenter."},
+        description_overrides={"read": "Read only files surfaced to the commenter."},
         schema_overrides={
-            "read_file": {
+            "read": {
                 "type": "object",
                 "properties": {"path": {"type": "string"}},
             }
@@ -50,9 +59,9 @@ def test_description_and_schema_overrides_apply_to_named_tools() -> None:
 
 
 def test_unknown_tool_names_are_skipped() -> None:
-    specs = tool_specs_for_names(["write_file", "missing_tool"], available_skills=CORE_SKILLS)
+    specs = tool_specs_for_names(["write", "missing_tool"], available_skills=CORE_SKILLS)
 
-    assert [spec["name"] for spec in specs] == ["write_file"]
+    assert [spec["name"] for spec in specs] == ["write"]
 
 
 def test_tool_schema_properties_accepts_nested_json_schema_fragments() -> None:

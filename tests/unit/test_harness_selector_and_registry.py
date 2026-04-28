@@ -12,8 +12,8 @@ pytestmark = pytest.mark.unit
 def test_registry_exposes_core_and_domain_skills() -> None:
     registry = build_skill_registry()
 
-    assert "read_file" in registry
-    assert registry["read_file"].pack == "core"
+    assert "read" in registry
+    assert registry["read"].pack == "core"
     assert "get_current_datetime" in registry
     assert registry["get_current_datetime"].pack == "core"
     assert "read_web_pages" in registry
@@ -32,7 +32,7 @@ def test_get_skills_for_packs_filters_to_enabled_packs() -> None:
     enabled = get_skills_for_packs(registry, ["core", "macro"])
     enabled_names = {spec.name for spec in enabled}
 
-    assert "read_file" in enabled_names
+    assert "read" in enabled_names
     assert "get_current_datetime" in enabled_names
     assert "read_web_pages" in enabled_names
     assert "fetch_macro_indicators" in enabled_names

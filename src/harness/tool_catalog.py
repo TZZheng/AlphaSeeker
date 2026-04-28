@@ -9,15 +9,15 @@ from src.harness.types import AGENT_PRESETS, SkillSpec
 
 
 HARNESS_TOOL_NAMES = [
-    "spawn_subagent",
-    "list_children",
-    "list_publish_files",
-    "promote_artifact",
+    "delegate",
+    "agents",
+    "files",
+    "promote",
     "bash",
-    "write_file",
-    "edit_file",
-    "apply_patch",
-    "set_status",
+    "write",
+    "edit",
+    "patch",
+    "status",
 ]
 
 LEGAL_PRESET_LIST = ", ".join(f"'{preset}'" for preset in AGENT_PRESETS)
@@ -50,7 +50,7 @@ def tool_schema_properties(input_schema: dict[str, Any]) -> dict[str, Any]:
 
 def harness_tool_definitions() -> dict[str, dict[str, Any]]:
     return {
-        "spawn_subagent": {
+        "delegate": {
             "description": f"Launch one child agent for a narrower task. Legal preset values: {LEGAL_PRESET_LIST}.",
             "input_schema": {
                 "type": "object",
@@ -69,18 +69,18 @@ def harness_tool_definitions() -> dict[str, dict[str, Any]]:
                 },
             },
         },
-        "list_children": {
+        "agents": {
             "description": "List all child agents with status. Drains the events queue so callers know which children just finished. Do not poll in a tight loop when nothing new has appeared.",
             "input_schema": {"type": "object", "properties": {}},
         },
-        "list_publish_files": {
+        "files": {
             "description": "List published files for an agent.",
             "input_schema": {
                 "type": "object",
                 "properties": {"agent_id": {"type": "string"}},
             },
         },
-        "promote_artifact": {
+        "promote": {
             "description": "Promote a local artifact into the shared run object store.",
             "input_schema": {
                 "type": "object",
@@ -102,7 +102,7 @@ def harness_tool_definitions() -> dict[str, dict[str, Any]]:
                 },
             },
         },
-        "write_file": {
+        "write": {
             "description": "Write one file under this agent's publish/ or scratch/ tree.",
             "input_schema": {
                 "type": "object",
@@ -113,7 +113,7 @@ def harness_tool_definitions() -> dict[str, dict[str, Any]]:
                 "required": ["path", "content"],
             },
         },
-        "edit_file": {
+        "edit": {
             "description": "Apply one anchored text edit to a file under this agent's publish/ or scratch/ tree.",
             "input_schema": {
                 "type": "object",
@@ -130,8 +130,8 @@ def harness_tool_definitions() -> dict[str, dict[str, Any]]:
                 },
             },
         },
-        "apply_patch": {
-            "description": "Apply one Codex-style single-file patch to an existing publish/ or scratch/ file. The patch string must use the exact markers '*** Begin Patch', one '*** Update File: ...' block, one or more '@@' hunks, and '*** End Patch'.",
+        "patch": {
+            "description": "Apply one Codex-style single-file patch to an existing publish/ or scratch/ file. The patch string must use the exact markers '*** Begin Patch', one '*** Update File: ...' block, one or more '@@' hunks, and '*** End Patch'. In hunk lines the first character is the patch prefix; write '-### Heading' to remove '### Heading', not '- ### Heading' unless the target line really starts with a space.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -140,7 +140,7 @@ def harness_tool_definitions() -> dict[str, dict[str, Any]]:
                 "required": ["patch"],
             },
         },
-        "set_status": {
+        "status": {
             "description": "Set this agent's status when it is ready to stop or block.",
             "input_schema": {
                 "type": "object",

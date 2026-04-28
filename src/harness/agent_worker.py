@@ -670,7 +670,7 @@ def _prepare_native_turn(
 
 def _record_idle_turn(run_root: str, agent_id: str, runtime: WorkerRuntime, state: WorkerLoopState, turn) -> str:
     state.idle_retries += 1
-    state.previous_error = "Model returned no tool call. Use an available tool or set_status."
+    state.previous_error = "Model returned no tool call. Use an available tool or status."
     append_event(
         run_root,
         AgentEvent(

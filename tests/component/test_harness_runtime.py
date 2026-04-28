@@ -224,12 +224,12 @@ def test_run_harness_records_root_final_report_versions(
             )
             execute_model_tool(
                 session,
-                "write_file",
+                "write",
                 {"path": "publish/final.md", "content": "# Final\n\nFirst version.\n"},
             )
             execute_model_tool(
                 session,
-                "edit_file",
+                "edit",
                 {
                     "path": "publish/final.md",
                     "operation": "replace",

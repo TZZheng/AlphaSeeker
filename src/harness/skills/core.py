@@ -110,14 +110,14 @@ def _python_search_fallback(
     return results
 
 
-def search_in_files_skill(arguments: dict[str, Any], state: HarnessState) -> SkillResult:
+def grep_skill(arguments: dict[str, Any], state: HarnessState) -> SkillResult:
     pattern = str(arguments.get("pattern") or arguments.get("query") or "").strip()
     if not pattern:
         return make_result(
-            "search_in_files",
+            "grep",
             arguments,
             status="failed",
-            summary="search_in_files requires a non-empty pattern.",
+            summary="grep requires a non-empty pattern.",
             error="Missing pattern.",
         )
 
@@ -137,7 +137,7 @@ def search_in_files_skill(arguments: dict[str, Any], state: HarnessState) -> Ski
             resolved_paths = _resolve_search_paths(state, [str(state.workspace_path or "")])
     except VisibilityError as exc:
         return make_result(
-            "search_in_files",
+            "grep",
             arguments,
             status="failed",
             summary=str(exc),
@@ -145,10 +145,10 @@ def search_in_files_skill(arguments: dict[str, Any], state: HarnessState) -> Ski
         )
     if not resolved_paths:
         return make_result(
-            "search_in_files",
+            "grep",
             arguments,
             status="failed",
-            summary="search_in_files could not find any readable target paths.",
+            summary="grep could not find any readable target paths.",
             error="No readable files or directories were provided.",
         )
 
@@ -218,7 +218,7 @@ def search_in_files_skill(arguments: dict[str, Any], state: HarnessState) -> Ski
     if matches:
         evidence.append(
             note_evidence(
-                "search_in_files",
+                "grep",
                 f"Found {len(matches)} file match(es) for '{pattern}'.",
                 content="\n\n".join(output_lines),
                 metadata={
@@ -229,7 +229,7 @@ def search_in_files_skill(arguments: dict[str, Any], state: HarnessState) -> Ski
             )
         )
     return make_result(
-        "search_in_files",
+        "grep",
         arguments,
         status="ok",
         summary=(
@@ -536,7 +536,7 @@ def condense_context_skill(arguments: dict[str, Any], state: HarnessState) -> Sk
     )
 
 
-def read_file_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillResult:
+def read_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillResult:
     path = str(arguments.get("path") or "").strip()
     max_chars_raw = arguments.get("max_chars")
     max_chars = int(max_chars_raw) if max_chars_raw is not None else DEFAULT_MAX_CHARS_PER_URL
@@ -545,10 +545,10 @@ def read_file_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillRes
     max_lines_raw = arguments.get("max_lines")
     if not path:
         return make_result(
-            "read_file",
+            "read",
             arguments,
             status="failed",
-            summary="read_file requires a file path.",
+            summary="read requires a file path.",
             error="Missing path.",
         )
 
@@ -557,7 +557,7 @@ def read_file_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillRes
             file_path = resolve_visible_read_file(_state.run_root, _state.agent_id, path)
         except VisibilityError as exc:
             return make_result(
-                "read_file",
+                "read",
                 arguments,
                 status="failed",
                 summary=str(exc),
@@ -567,14 +567,14 @@ def read_file_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillRes
         file_path = Path(path).expanduser()
         if not file_path.is_absolute() and _state.workspace_path:
             # Resolve relative paths against the agent workspace so that
-            # read_file("publish/final.md") finds the same file that
-            # write_file("publish/final.md") wrote.
+            # read("publish/final.md") finds the same file that
+            # write("publish/final.md") wrote.
             workspace_candidate = Path(_state.workspace_path) / file_path
             if workspace_candidate.exists():
                 file_path = workspace_candidate
     if not file_path.exists() or not file_path.is_file():
         return make_result(
-            "read_file",
+            "read",
             arguments,
             status="failed",
             summary=f"Could not read file at {path}.",
@@ -587,7 +587,7 @@ def read_file_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillRes
         full_text = file_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return make_result(
-            "read_file",
+            "read",
             arguments,
             status="failed",
             summary=f"Could not read file at {path}.",
@@ -606,7 +606,7 @@ def read_file_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillRes
         text = "".join(lines[start_index:end_index])
         truncated = end_index < len(lines)
         return make_result(
-            "read_file",
+            "read",
             arguments,
             status="truncated" if truncated else "ok",
             summary=(
@@ -622,7 +622,7 @@ def read_file_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillRes
             metrics=SkillMetrics(evidence_count=1, artifact_count=1),
             output_text=text,
             artifacts=[path],
-            evidence=[note_evidence("read_file", f"File contents from {path}.", content=text)],
+            evidence=[note_evidence("read", f"File contents from {path}.", content=text)],
         )
 
     if max_chars <= 0:
@@ -633,7 +633,7 @@ def read_file_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillRes
     truncated = end_char < len(full_text)
 
     return make_result(
-        "read_file",
+        "read",
         arguments,
         status="truncated" if truncated else "ok",
         summary=(
@@ -649,7 +649,7 @@ def read_file_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillRes
         metrics=SkillMetrics(evidence_count=1, artifact_count=1),
         output_text=text,
         artifacts=[path],
-        evidence=[note_evidence("read_file", f"File contents from {path}.", content=text)],
+        evidence=[note_evidence("read", f"File contents from {path}.", content=text)],
     )
 
 
@@ -812,7 +812,7 @@ def retrieve_sources_skill(arguments: dict[str, Any], state: HarnessState) -> Sk
 
 CORE_SKILLS = [
     SkillSpec(
-        name="search_in_files",
+        name="grep",
         description="Search local files or directories for a keyword or exact text match, returning file paths, line numbers, and snippets.",
         pack="core",
         input_schema={
@@ -822,7 +822,7 @@ CORE_SKILLS = [
             "fixed_strings": "boolean",
             "ignore_case": "boolean",
         },
-        executor=search_in_files_skill,
+        executor=grep_skill,
     ),
     SkillSpec(
         name="get_current_datetime",
@@ -862,7 +862,7 @@ CORE_SKILLS = [
         executor=condense_context_skill,
     ),
     SkillSpec(
-        name="read_file",
+        name="read",
         description="Read an exact local file path and return its content directly without hidden summarization.",
         pack="core",
         input_schema={
@@ -873,7 +873,7 @@ CORE_SKILLS = [
             "max_lines": "integer",
         },
         produces_artifacts=False,
-        executor=read_file_skill,
+        executor=read_skill,
     ),
     SkillSpec(
         name="retrieve_sources",

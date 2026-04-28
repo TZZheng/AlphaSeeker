@@ -26,7 +26,7 @@ from src.harness.artifacts import (
     write_text_atomic,
 )
 from src.harness.prompt_builder import COMMENTER_TOOL_NAMES, build_commenter_prompt_bundle
-from src.harness.skills.core import CORE_SKILLS, read_file_skill, search_in_files_skill
+from src.harness.skills.core import CORE_SKILLS, grep_skill, read_skill
 from src.harness.tool_catalog import tool_specs_for_names
 from src.harness.transport import (
     minimax_anthropic_base_url,
@@ -46,8 +46,8 @@ COMMENTER_MAX_RENDERED_CHANGED_ENTRIES = 20
 COMMENTER_TERMINAL_STATUSES = {"done", "failed", "blocked", "stale", "cancelled"}
 COMMENTER_GATE_FINISHED_STATUSES = {"completed", "skipped", "failed"}
 COMMENTER_TOOL_DESCRIPTIONS = {
-    "read_file": "Read one inspectable file by display path or exact path. Use this when you need actual file content before writing the spark.",
-    "search_in_files": "Search inspectable files for a text pattern before deciding what to read. Paths may use display paths or exact paths.",
+    "read": "Read one inspectable file by display path or exact path. Use this when you need actual file content before writing the spark.",
+    "grep": "Search inspectable files for a text pattern before deciding what to read. Paths may use display paths or exact paths.",
 }
 
 
@@ -494,7 +494,7 @@ def _compact_skill_result(result: SkillResult) -> dict[str, Any]:
     }
 
 
-def _commenter_read_file(
+def _commenter_read(
     *,
     run_root: str,
     agent_id: str,
@@ -503,11 +503,11 @@ def _commenter_read_file(
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
     _ = manifest
-    skill_result = read_file_skill(arguments, _commenter_skill_state(run_root, agent_id, request))
+    skill_result = read_skill(arguments, _commenter_skill_state(run_root, agent_id, request))
     return _compact_skill_result(skill_result)
 
 
-def _commenter_search_in_files(
+def _commenter_grep(
     *,
     run_root: str,
     agent_id: str,
@@ -516,7 +516,7 @@ def _commenter_search_in_files(
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
     _ = manifest
-    skill_result = search_in_files_skill(arguments, _commenter_skill_state(run_root, agent_id, request))
+    skill_result = grep_skill(arguments, _commenter_skill_state(run_root, agent_id, request))
     return _compact_skill_result(skill_result)
 
 
@@ -537,16 +537,16 @@ def _execute_commenter_tool_call(
     tool_name: str,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    if tool_name == "read_file":
-        return _commenter_read_file(
+    if tool_name == "read":
+        return _commenter_read(
             run_root=run_root,
             agent_id=agent_id,
             request=request,
             manifest=manifest,
             arguments=arguments,
         )
-    if tool_name == "search_in_files":
-        return _commenter_search_in_files(
+    if tool_name == "grep":
+        return _commenter_grep(
             run_root=run_root,
             agent_id=agent_id,
             request=request,
@@ -564,12 +564,12 @@ def _execute_commenter_tool_call(
 
 def _summarize_tool_call(tool_name: str, arguments: dict[str, Any], result: dict[str, Any]) -> str:
     """Lightweight summary of a commenter tool call for message history (not the trace)."""
-    if tool_name == "read_file":
+    if tool_name == "read":
         path = arguments.get("path", "?")
         output_text = result.get("output_text") or ""
         char_count = len(output_text)
         return f"read {path}: {char_count} chars"
-    if tool_name == "search_in_files":
+    if tool_name == "grep":
         pattern = arguments.get("pattern", "?")
         paths = arguments.get("paths", [])
         output_text = result.get("output_text") or ""

@@ -126,15 +126,15 @@ Current defaults:
 
 Base model-visible tools come from `executor.py`:
 
-- `spawn_subagent`
-- `list_children`
-- `list_publish_files`
-- `promote_artifact` for `research` and `source_triage`
+- `delegate`
+- `agents`
+- `files`
+- `promote` for `research` and `source_triage`
 - `bash`
-- `write_file`
-- `edit_file`
-- `apply_patch`
-- `set_status`
+- `write`
+- `edit`
+- `patch`
+- `status`
 
 `bash` is intentionally small. The current allowlist is:
 
@@ -230,7 +230,7 @@ Important runtime conventions:
 - `_harness/llm_turns/` stores the exact system prompt snapshot, request payload, response payload, and any extracted thinking text for each turn
 - `_harness/state/prompt_memory.md` is the optional carried-forward self-summary loaded into the agent system prompt
 - `_harness/state/history_summary.md` is the compacted semantic memory for older transcript history once raw replay is trimmed
-- `_harness/logs/events_queue.jsonl` is the parent-visible completion queue used by `list_children`
+- `_harness/logs/events_queue.jsonl` is the parent-visible completion queue used by `agents`
 
 ## Stop, Resume, And Refinement
 

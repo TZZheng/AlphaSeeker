@@ -6,6 +6,7 @@ import contextlib
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import time
@@ -65,6 +66,7 @@ BASH_DEFAULT_MAX_OUTPUT_CHARS = 12000
 PATCH_BEGIN_MARKER = "*** Begin Patch"
 PATCH_END_MARKER = "*** End Patch"
 PATCH_UPDATE_FILE_PREFIX = "*** Update File: "
+PATCH_TRUNCATION_MARKER_RE = re.compile(r"\.\.\. \[\d+ chars\]")
 
 
 @dataclass
@@ -887,7 +889,7 @@ def _handle_bash(session: AgentSession, arguments: dict[str, Any]) -> dict[str, 
 def _handle_promote_artifact(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
     source_path = str(arguments.get("source_path") or "").strip()
     if not source_path:
-        raise ValueError("promote_artifact requires source_path.")
+        raise ValueError("promote requires source_path.")
     description = str(arguments.get("description") or Path(source_path).name).strip()
     promoted = promote_object(
         session.run_root,
@@ -902,13 +904,13 @@ def _handle_promote_artifact(session: AgentSession, arguments: dict[str, Any]) -
 def _handle_write_file(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
     raw_path = str(arguments.get("path") or "").strip()
     if not raw_path:
-        raise ValueError("write_file requires path.")
+        raise ValueError("write requires path.")
     if "content" not in arguments or arguments.get("content") is None:
-        raise ValueError("write_file requires content.")
+        raise ValueError("write requires content.")
     content = str(arguments["content"])
     path, root_name, relative = _resolve_workspace_file_path(session, raw_path, must_exist=False)
     if root_name == "publish" and not content.strip():
-        raise ValueError("write_file requires non-empty content for publish paths.")
+        raise ValueError("write requires non-empty content for publish paths.")
     write_text_atomic(path, content)
     event_type = "publish_updated" if root_name == "publish" else "scratch_updated"
     append_event(
@@ -951,20 +953,37 @@ def _parse_patch_hunk(lines: list[str], *, hunk_number: int) -> PatchHunk:
     return PatchHunk(entries=entries)
 
 
+def _unwrap_patch_text(patch_text: str) -> str:
+    if PATCH_TRUNCATION_MARKER_RE.search(patch_text):
+        raise ValueError(
+            "Patch contains a compacted replay truncation marker like '... [3485 chars]'. "
+            "Read a smaller file slice with read(path=..., start_line=..., max_lines=...) "
+            "or read(path=..., start_char=..., max_chars=...) and rebuild the full patch."
+        )
+
+    text = patch_text.strip()
+    lines = text.splitlines()
+    if lines and lines[0].strip().startswith("```"):
+        if len(lines) < 2 or not lines[-1].strip().startswith("```"):
+            raise ValueError("Patch code fence must close after the '*** End Patch' line.")
+        text = "\n".join(lines[1:-1]).strip()
+    return text
+
+
 def _parse_apply_patch_text(patch_text: str) -> ParsedPatch:
-    lines = patch_text.splitlines()
+    lines = _unwrap_patch_text(patch_text).splitlines()
     if not lines:
-        raise ValueError("apply_patch requires a non-empty patch.")
-    if lines[0] != PATCH_BEGIN_MARKER:
+        raise ValueError("patch requires a non-empty patch.")
+    if lines[0].strip() != PATCH_BEGIN_MARKER:
         raise ValueError("Patch must start with '*** Begin Patch'.")
-    if lines[-1] != PATCH_END_MARKER:
+    if lines[-1].strip() != PATCH_END_MARKER:
         raise ValueError("Patch must end with '*** End Patch'.")
     if len(lines) < 4:
         raise ValueError("Patch must include one file update and at least one hunk.")
 
-    file_line = lines[1]
+    file_line = lines[1].strip()
     if not file_line.startswith(PATCH_UPDATE_FILE_PREFIX):
-        raise ValueError("v1 apply_patch only supports a single '*** Update File: ...' block.")
+        raise ValueError("v1 patch only supports a single '*** Update File: ...' block.")
     path = file_line[len(PATCH_UPDATE_FILE_PREFIX):].strip()
     if not path:
         raise ValueError("Patch update file path cannot be empty.")
@@ -980,7 +999,7 @@ def _parse_apply_patch_text(patch_text: str) -> ParsedPatch:
             hunk_number += 1
             continue
         if line.startswith("*** "):
-            raise ValueError("v1 apply_patch only supports one updated file and no nested patch directives.")
+            raise ValueError("v1 patch only supports one updated file and no nested patch directives.")
         if hunk_number == 0:
             raise ValueError("Patch must include '@@' before hunk lines.")
         current_hunk_lines.append(line)
@@ -1007,7 +1026,36 @@ def _find_unique_line_match(lines: list[str], expected_lines: list[str], *, hunk
     return match_indexes[0]
 
 
-def _apply_line_patch(original: str, parsed_patch: ParsedPatch) -> tuple[str, dict[str, Any]]:
+def _normalize_separator_space_hunk(hunk: PatchHunk) -> PatchHunk:
+    return PatchHunk(
+        entries=[
+            (prefix, text[1:] if text.startswith(" ") else text)
+            for prefix, text in hunk.entries
+        ]
+    )
+
+
+def _patch_uses_separator_space(parsed_patch: ParsedPatch) -> bool:
+    return any(
+        text.startswith(" ")
+        for hunk in parsed_patch.hunks
+        for _prefix, text in hunk.entries
+    )
+
+
+def _normalized_separator_space_patch(parsed_patch: ParsedPatch) -> ParsedPatch:
+    return ParsedPatch(
+        path=parsed_patch.path,
+        hunks=[_normalize_separator_space_hunk(hunk) for hunk in parsed_patch.hunks],
+    )
+
+
+def _apply_line_patch_once(
+    original: str,
+    parsed_patch: ParsedPatch,
+    *,
+    patch_mode: str,
+) -> tuple[str, dict[str, Any]]:
     current_lines = original.splitlines()
     trailing_newline = original.endswith("\n")
 
@@ -1025,8 +1073,28 @@ def _apply_line_patch(original: str, parsed_patch: ParsedPatch) -> tuple[str, di
         {
             "operation": "patch",
             "hunks_applied": len(parsed_patch.hunks),
+            "patch_mode": patch_mode,
         },
     )
+
+
+def _apply_line_patch(original: str, parsed_patch: ParsedPatch) -> tuple[str, dict[str, Any]]:
+    try:
+        return _apply_line_patch_once(original, parsed_patch, patch_mode="strict")
+    except ValueError as strict_exc:
+        if not _patch_uses_separator_space(parsed_patch):
+            raise
+
+        try:
+            return _apply_line_patch_once(
+                original,
+                _normalized_separator_space_patch(parsed_patch),
+                patch_mode="normalized_separator_space",
+            )
+        except ValueError as normalized_exc:
+            if "matched multiple locations" in str(normalized_exc):
+                raise normalized_exc from strict_exc
+            raise strict_exc
 
 
 def _apply_text_edit(original: str, arguments: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -1100,7 +1168,7 @@ def _emit_workspace_update(
 def _handle_edit_file(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
     raw_path = str(arguments.get("path") or "").strip()
     if not raw_path:
-        raise ValueError("edit_file requires path.")
+        raise ValueError("edit requires path.")
     path, root_name, relative = _resolve_workspace_file_path(session, raw_path, must_exist=True)
     if not path.is_file():
         raise ValueError(f"File '{relative}' does not exist inside {root_name}/.")
@@ -1119,12 +1187,18 @@ def _handle_edit_file(session: AgentSession, arguments: dict[str, Any]) -> dict[
     }
 
 
-def _rewrite_apply_patch_error(message: str, *, display_path: str) -> str:
-    read_hint = f"Read the current file with read_file(path='{display_path}') before retrying."
+def _rewrite_apply_patch_error(message: str, *, display_path: str, has_separator_space: bool = False) -> str:
+    read_hint = f"Read the current file with read(path='{display_path}') before retrying."
     if "context was not found" in message:
+        separator_hint = (
+            " Patch prefixes are exact: '-### Heading' matches '### Heading', while "
+            "'- ### Heading' matches a line that begins with a space."
+            if has_separator_space
+            else ""
+        )
         return (
             f"{message} The file content does not match the patch context anymore. "
-            f"{read_hint} Rebuild the patch from the exact current lines."
+            f"{read_hint} Rebuild the patch from the exact current lines.{separator_hint}"
         )
     if "matched multiple locations" in message:
         return (
@@ -1137,7 +1211,7 @@ def _rewrite_apply_patch_error(message: str, *, display_path: str) -> str:
 def _handle_apply_patch(session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
     raw_patch = arguments.get("patch")
     if raw_patch is None:
-        raise ValueError("apply_patch requires patch.")
+        raise ValueError("patch requires patch.")
     parsed_patch = _parse_apply_patch_text(str(raw_patch))
     path, root_name, relative = _resolve_workspace_file_path(session, parsed_patch.path, must_exist=True)
     if not path.is_file():
@@ -1147,9 +1221,15 @@ def _handle_apply_patch(session: AgentSession, arguments: dict[str, Any]) -> dic
     try:
         updated, details = _apply_line_patch(original, parsed_patch)
     except ValueError as exc:
-        raise ValueError(_rewrite_apply_patch_error(str(exc), display_path=f"{root_name}/{relative}")) from exc
+        raise ValueError(
+            _rewrite_apply_patch_error(
+                str(exc),
+                display_path=f"{root_name}/{relative}",
+                has_separator_space=_patch_uses_separator_space(parsed_patch),
+            )
+        ) from exc
     if root_name == "publish" and not updated.strip():
-        raise ValueError("apply_patch cannot leave publish paths empty.")
+        raise ValueError("patch cannot leave publish paths empty.")
 
     write_text_atomic(path, updated)
     _emit_workspace_update(session, root_name=root_name, path=path, relative=relative, details=details)
@@ -1159,6 +1239,7 @@ def _handle_apply_patch(session: AgentSession, arguments: dict[str, Any]) -> dic
         "root": root_name,
         "operation": details["operation"],
         "hunks_applied": int(details["hunks_applied"]),
+        "patch_mode": str(details.get("patch_mode") or "strict"),
         "before_chars": len(original),
         "after_chars": len(updated),
     }
@@ -1184,13 +1265,13 @@ def _handle_set_status(session: AgentSession, arguments: dict[str, Any]) -> dict
 
 
 _HANDLERS = {
-    "spawn_subagent": _handle_spawn_subagent,
-    "list_children": _handle_list_children,
-    "list_publish_files": _handle_list_publish_files,
-    "promote_artifact": _handle_promote_artifact,
+    "delegate": _handle_spawn_subagent,
+    "agents": _handle_list_children,
+    "files": _handle_list_publish_files,
+    "promote": _handle_promote_artifact,
     "bash": _handle_bash,
-    "write_file": _handle_write_file,
-    "edit_file": _handle_edit_file,
-    "apply_patch": _handle_apply_patch,
-    "set_status": _handle_set_status,
+    "write": _handle_write_file,
+    "edit": _handle_edit_file,
+    "patch": _handle_apply_patch,
+    "status": _handle_set_status,
 }
