@@ -25,17 +25,7 @@
 - Use `read(path=..., start_line=..., max_lines=...)` when you want a line-based slice, or `read(path=..., max_chars=..., start_char=...)` for a character range.
 - Use `read_web_pages(urls=[...], max_chars_per_url=...)` after `search_web` or `search_news` when you want actual page content.
 - Use `edit(path=..., ...)` only for short exact replacements or inserts under `publish/` or `scratch/`.
-- Use `patch(patch=...)` for localized multi-line edits after reading the relevant file slice with `read(path=...)`.
-- The `patch` payload must be formatted exactly like:
-  `*** Begin Patch`
-  `*** Update File: publish/example.md`
-  `@@`
-  `-old line`
-  `+new line`
-  `*** End Patch`
-- For Markdown headings, remove `### Bear Case` with `-### Bear Case` and add `### Bear Case` with `+### Bear Case`.
-- In each `patch` hunk, the first character is the patch prefix: use a leading space for unchanged context lines, `-` for removed lines, and `+` for added lines. Do not add a separator space after the prefix unless that space exists in the target file line. Context matching is exact; if the context is missing or duplicated, the patch fails.
-- If `patch` fails because the context is missing or ambiguous, call `read(path=...)` on that file again before retrying and rebuild the patch from the exact current lines.
+- Use `patch(patch=...)` for localized multi-line edits after `grep` finds the line and `read(path=..., start_line=..., max_lines=...)` loads a small nearby slice; if it fails, rerun `grep` and `read`.
 - Use `write(path=..., content=...)` when you are replacing most of a file or creating a new one under `publish/` or `scratch/`.
 - If you delegate, the parent only sees your child metadata and published files by default.
 - `delegate` accepts only the preset names listed above. Unknown preset names will be rejected.

@@ -112,7 +112,7 @@ def harness_tool_definitions() -> dict[str, dict[str, Any]]:
             },
         },
         "patch": {
-            "description": "Apply one Codex-style single-file patch to an existing publish/ or scratch/ file. The patch string must use the exact markers '*** Begin Patch', one '*** Update File: ...' block, one or more '@@' hunks, and '*** End Patch'. In hunk lines the first character is the patch prefix; write '-### Heading' to remove '### Heading', not '- ### Heading' unless the target line really starts with a space.",
+            "description": "Apply one single-file patch to an existing publish/ or scratch/ file. Example:\n*** Begin Patch\n*** Update File: publish/final.md\n@@\n-old line\n+new line\n*** End Patch",
             "input_schema": {
                 "type": "object",
                 "properties": {

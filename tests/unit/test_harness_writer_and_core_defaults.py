@@ -109,15 +109,9 @@ def test_render_tools_markdown_lists_visible_runtime_surface() -> None:
     assert "short exact replacements or inserts" in text
     assert "patch(patch=...)" in text
     assert "localized multi-line edits" in text
-    assert "*** Begin Patch" in text
-    assert "*** Update File: publish/example.md" in text
-    assert "-old line" in text
-    assert "+new line" in text
-    assert "-### Bear Case" in text
-    assert "Do not add a separator space after the prefix" in text
-    assert "space for unchanged context lines" in text
-    assert "If `patch` fails because the context is missing or ambiguous" in text
-    assert "read(path=...)" in text
+    assert "`grep` finds the line" in text
+    assert "read(path=..., start_line=..., max_lines=...)" in text
+    assert "rerun `grep` and `read`" in text
     assert "write(path=..., content=...)" in text
     assert "replacing most of a file or creating a new one" in text
     assert "fetch_company_profile" in text

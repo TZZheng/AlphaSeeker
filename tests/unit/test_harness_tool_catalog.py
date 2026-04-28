@@ -20,13 +20,14 @@ def test_harness_base_tool_schema_is_available_by_name() -> None:
     ]
 
 
-def test_patch_tool_description_explains_prefix_spacing() -> None:
+def test_patch_tool_description_includes_compact_example() -> None:
     spec = tool_specs_for_names(["patch"])[0]
 
     assert spec["input_schema"] == harness_tool_definitions()["patch"]["input_schema"]
-    assert "-### Heading" in spec["description"]
-    assert "- ### Heading" in spec["description"]
-    assert "starts with a space" in spec["description"]
+    assert "*** Begin Patch" in spec["description"]
+    assert "*** Update File: publish/final.md" in spec["description"]
+    assert "-old line" in spec["description"]
+    assert "+new line" in spec["description"]
 
 
 def test_skill_specs_convert_compact_schema_to_json_schema() -> None:

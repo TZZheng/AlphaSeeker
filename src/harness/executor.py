@@ -1167,7 +1167,10 @@ def _handle_edit_file(session: AgentSession, arguments: dict[str, Any]) -> dict[
 
 
 def _rewrite_apply_patch_error(message: str, *, display_path: str, has_separator_space: bool = False) -> str:
-    read_hint = f"Read the current file with read(path='{display_path}') before retrying."
+    locate_hint = (
+        f"Use grep(pattern=..., paths=['{display_path}']) to find the target line, then "
+        f"read(path='{display_path}', start_line=..., max_lines=...) for a small nearby slice before retrying."
+    )
     if "context was not found" in message:
         separator_hint = (
             " Patch prefixes are exact: '-### Heading' matches '### Heading', while "
@@ -1177,12 +1180,12 @@ def _rewrite_apply_patch_error(message: str, *, display_path: str, has_separator
         )
         return (
             f"{message} The file content does not match the patch context anymore. "
-            f"{read_hint} Rebuild the patch from the exact current lines.{separator_hint}"
+            f"{locate_hint} Rebuild the patch from the exact current lines.{separator_hint}"
         )
     if "matched multiple locations" in message:
         return (
             f"{message} The patch context is ambiguous. "
-            f"{read_hint} Use more specific surrounding lines in the next hunk."
+            f"{locate_hint} Use more specific surrounding lines in the next hunk."
         )
     return message
 

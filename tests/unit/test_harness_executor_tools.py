@@ -1566,7 +1566,8 @@ def test_patch_rejects_ambiguous_context(
         )
     message = str(exc_info.value)
     assert "matched multiple locations" in message
-    assert "read(path='scratch/notes.md')" in message
+    assert "grep(pattern=..., paths=['scratch/notes.md'])" in message
+    assert "read(path='scratch/notes.md', start_line=..., max_lines=...)" in message
     assert "more specific surrounding lines" in message
 
 
@@ -1608,7 +1609,8 @@ def test_patch_rejects_missing_context(
         )
     message = str(exc_info.value)
     assert "context was not found" in message
-    assert "read(path='scratch/notes.md')" in message
+    assert "grep(pattern=..., paths=['scratch/notes.md'])" in message
+    assert "read(path='scratch/notes.md', start_line=..., max_lines=...)" in message
     assert "exact current lines" in message
 
 
