@@ -1660,6 +1660,48 @@ def test_patch_failure_in_soft_stop_omits_retry_recipe(
     assert "read(path=" not in message
 
 
+def test_malformed_patch_failure_in_soft_stop_uses_completion_hint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-apply-patch-soft-stop-malformed",
+        user_prompt="Patch malformed note during soft-stop",
+        preset="research",
+    )
+    session.request.wall_clock_budget_seconds = 0
+    execute_model_tool(
+        session,
+        "write",
+        {"path": "publish/final.md", "content": "alpha\nbeta\ngamma\n"},
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        execute_model_tool(
+            session,
+            "patch",
+            {
+                "patch": "\n".join(
+                    [
+                        "*** Begin Patch",
+                        "*** Update File: publish/final.md",
+                        "@@ -1,0 +1,1 @@",
+                        "+replacement",
+                        "*** End Patch",
+                    ]
+                ),
+            },
+        )
+    message = str(exc_info.value)
+    assert "must include at least one context or removed line" in message
+    assert "Soft-stop mode is active" in message
+    assert "Classify this failed patch" in message
+    assert "do not run grep/read recovery" in message
+    assert "call status(\"done\")" in message
+
+
 def test_patch_is_atomic_when_a_later_hunk_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

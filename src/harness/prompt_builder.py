@@ -351,6 +351,7 @@ def _soft_stop_guidance_lines(*, is_root: bool) -> list[str]:
         "  - blocking: the deliverable or handoff is unusable without this.",
         "  - material but caveatable: the deliverable is usable, but the gap should be documented as a limitation.",
         "  - optional: nice-to-have polish, extra checks, or depth that will not change the core answer.",
+        "Missing required publish files are blocking; create those before revising existing files or following commenter suggestions.",
         "Use current materials to produce the required publish files; if publish/final.md already exists, do not inspect or patch it for polish.",
         "After the required publish files exist, call status(\"done\") as the next action unless a blocking gap makes the deliverable or handoff unusable.",
         "Only a blocking gap justifies more tool work in soft-stop; take the minimal write or patch action needed for required publish files.",

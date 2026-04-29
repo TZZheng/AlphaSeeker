@@ -1174,6 +1174,16 @@ def _soft_time_limit_active(session: AgentSession) -> bool:
     return min(remaining_run, remaining_agent) <= 0
 
 
+def _soft_stop_patch_error(message: str) -> str:
+    return (
+        f"{message} Soft-stop mode is active. Classify this failed patch before "
+        "recovering it: if the change is polish, material but caveatable, or the "
+        "deliverable or handoff is already usable, do not run grep/read recovery. "
+        "Document the caveat if needed, then call status(\"done\"). Retry only if "
+        "this exact patch closes a blocking gap that makes the deliverable unusable."
+    )
+
+
 def _rewrite_apply_patch_error(
     message: str,
     *,
@@ -1181,16 +1191,8 @@ def _rewrite_apply_patch_error(
     has_separator_space: bool = False,
     soft_time_limit_active: bool = False,
 ) -> str:
-    if soft_time_limit_active and (
-        "context was not found" in message or "matched multiple locations" in message
-    ):
-        return (
-            f"{message} Soft-stop mode is active. Classify this failed patch before "
-            "recovering it: if the change is polish, material but caveatable, or the "
-            "deliverable or handoff is already usable, do not run grep/read recovery. "
-            "Document the caveat if needed, then call status(\"done\"). Retry only if "
-            "this exact patch closes a blocking gap that makes the deliverable unusable."
-        )
+    if soft_time_limit_active:
+        return _soft_stop_patch_error(message)
     locate_hint = (
         f"Use grep(pattern=..., paths=['{display_path}']) to find the target line, then "
         f"read(path='{display_path}', start_line=..., max_lines=...) for a small nearby slice before retrying."
@@ -1218,7 +1220,13 @@ def _handle_apply_patch(session: AgentSession, arguments: dict[str, Any]) -> dic
     raw_patch = arguments.get("patch")
     if raw_patch is None:
         raise ValueError("patch requires patch.")
-    parsed_patch = _parse_apply_patch_text(str(raw_patch))
+    soft_time_limit_active = _soft_time_limit_active(session)
+    try:
+        parsed_patch = _parse_apply_patch_text(str(raw_patch))
+    except ValueError as exc:
+        if soft_time_limit_active:
+            raise ValueError(_soft_stop_patch_error(str(exc))) from exc
+        raise
     path, root_name, relative = _resolve_workspace_file_path(session, parsed_patch.path, must_exist=True)
     if not path.is_file():
         raise ValueError(f"File '{relative}' does not exist inside {root_name}/.")
@@ -1232,7 +1240,7 @@ def _handle_apply_patch(session: AgentSession, arguments: dict[str, Any]) -> dic
                 str(exc),
                 display_path=f"{root_name}/{relative}",
                 has_separator_space=_patch_uses_separator_space(parsed_patch),
-                soft_time_limit_active=_soft_time_limit_active(session),
+                soft_time_limit_active=soft_time_limit_active,
             )
         ) from exc
     if root_name == "publish" and not updated.strip():
