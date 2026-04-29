@@ -504,6 +504,7 @@ class _SequencedTransport:
         self._clock = clock
         self.call_times: list[float] = []
         self.user_messages: list[str] = []
+        self.tool_specs_history: list[list[dict[str, object]]] = []
 
     def ensure_initialized(self, _initial_user_prompt: str) -> None:
         return None
@@ -515,6 +516,7 @@ class _SequencedTransport:
         self.user_messages.append(text)
 
     def execute_turn(self, _tool_specs: list[dict[str, object]]) -> ModelTurnResult:
+        self.tool_specs_history.append(_tool_specs)
         self.call_times.append(self._clock.monotonic())
         if not self._turns:
             raise AssertionError("No more fake turns configured.")
@@ -554,7 +556,40 @@ def _scratch_write_turn() -> ModelTurnResult:
 
 
 def _idle_turn() -> ModelTurnResult:
-    return ModelTurnResult(tool_calls=[], text_blocks=[], stop_reason=None)
+    return ModelTurnResult(tool_calls=[], text_blocks=[], stop_reason="end_turn")
+
+
+def _status_done_turn() -> ModelTurnResult:
+    return ModelTurnResult(
+        tool_calls=[ModelToolCall(call_id="call_done", name="status", arguments={"status": "done"})],
+        text_blocks=["done"],
+        stop_reason="tool_use",
+    )
+
+
+def _publish_only_turn() -> ModelTurnResult:
+    """Writes publish files without calling status(done)."""
+    return ModelTurnResult(
+        tool_calls=[
+            ModelToolCall(
+                call_id="call_final",
+                name="write",
+                arguments={"path": "publish/final.md", "content": "# Final\n\nDone.\n"},
+            ),
+            ModelToolCall(
+                call_id="call_summary",
+                name="write",
+                arguments={"path": "publish/summary.md", "content": "# Summary\n"},
+            ),
+            ModelToolCall(
+                call_id="call_index",
+                name="write",
+                arguments={"path": "publish/artifact_index.md", "content": "# Index\n"},
+            ),
+        ],
+        text_blocks=["writing files"],
+        stop_reason="tool_use",
+    )
 
 
 def _finish_turn() -> ModelTurnResult:
@@ -955,3 +990,52 @@ def test_worker_soft_stop_activates_when_run_remaining_expired(
     assert len(transport.user_messages) == 2
     assert "Soft-stop mode is active" in transport.user_messages[1]
     assert "# Runtime Delta" in transport.user_messages[1]
+
+
+def test_worker_final_status_turn_repeats_status_only_after_idle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """After soft-stop + publish completed, the agent gets status-only turns.
+    An idle turn (no tool call) must be followed by another status-only turn,
+    not a full tool set."""
+    from src.harness.artifacts import write_text_atomic
+
+    run_root, agent_id, _request = _create_workspace(tmp_path, monkeypatch)
+    clock = _FakeClock()
+    # First turn: writes publish files (soft-stop normal turn)
+    # Second turn: idle (model doesn't call status) → should still get status-only
+    # Third turn: calls status("done")
+    transport = _SequencedTransport(
+        [_idle_turn(), _idle_turn(), _status_done_turn()], clock
+    )
+
+    _install_fake_worker_timing(monkeypatch, clock)
+    _install_fake_transport(monkeypatch, transport)
+    _auto_complete_commenter_gate(clock, run_root, agent_id)
+    monkeypatch.setattr(agent_worker_module, "TURN_MAX_PROMPT_GAP_SECONDS", 10.0)
+    monkeypatch.setattr(agent_worker_module, "TURN_PACING_POLL_SECONDS", 1.0)
+    monkeypatch.setattr(agent_worker_module, "remaining_agent_seconds", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(agent_worker_module, "remaining_run_seconds", lambda *_args, **_kwargs: 0)
+
+    # Pre-write publish files so _publish_outputs_satisfy_completion passes
+    paths = agent_workspace_paths(str(run_root), agent_id)
+    write_text_atomic(paths["publish_final"], "# Final\n")
+    write_text_atomic(paths["publish_summary"], "# Summary\n")
+    write_text_atomic(paths["publish_index"], "- final.md\n")
+
+    result = run_agent_worker(str(run_root), agent_id)
+
+    assert result == 0
+    # After the first soft-stop turn that writes publish files,
+    # the next execute_turn should have status-only tool specs
+    status_only_turns = [
+        specs for specs in transport.tool_specs_history
+        if len(specs) == 1 and specs[0].get("name") == "status"
+    ]
+    assert len(status_only_turns) >= 1, (
+        f"Expected at least one status-only turn. "
+        f"Tool specs history ({len(transport.tool_specs_history)} turns): "
+        f"{[len(s) for s in transport.tool_specs_history]}"
+    )
+    assert any("# Final Status Required" in msg for msg in transport.user_messages)

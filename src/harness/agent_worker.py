@@ -152,7 +152,6 @@ def _current_prompt_bundle(
     comment_feed: str | None = None,
     soft_stop_active: bool = False,
     show_budget_time: bool = False,
-    available_tools_override: list[str] | None = None,
 ):
     response_mode = "text_json" if transport_name == "text_json" else "native_tools"
     visible_skills = visible_skills_for_preset(
@@ -165,7 +164,7 @@ def _current_prompt_bundle(
         agent_id=session.agent_id,
         preset=session.preset,
         response_mode=response_mode,
-        available_tools=available_tools_override or session.allowed_tools,
+        available_tools=session.allowed_tools,
         available_skills=visible_skills,
         previous_error=previous_error,
         comment_feed=comment_feed,
@@ -932,7 +931,6 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
                 # tool is available. The model must call status("done") itself.
                 if (
                     soft_time_limit_active
-                    and not state.final_status_required
                     and runtime.transport_name != "text_json"
                     and _publish_outputs_satisfy_completion(run_root, agent_id)
                     and read_status(run_root, agent_id) not in TERMINAL_STATUSES
@@ -949,8 +947,17 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
                         tool_specs=tool_specs_for_names(["status"]),
                         hard_overflow=False,
                     )
+                    status_prompt = TurnPrompt(
+                        system_prompt=status_prepared.system_prompt,
+                        user_prompt=status_prepared.user_prompt or "",
+                        native_user_prompt=status_prepared.user_prompt,
+                        native_user_prompt_is_initial=False,
+                        previous_error=None,
+                        comment_feed=None,
+                        injected_comment_count=0,
+                    )
                     native_result = _execute_native_turn(
-                        run_root, agent_id, runtime, state, prompt, status_prepared,
+                        run_root, agent_id, runtime, state, status_prompt, status_prepared,
                         soft_time_limit_active=True,
                     )
                     if native_result == "stop" or read_status(run_root, agent_id) in TERMINAL_STATUSES:
