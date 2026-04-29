@@ -26,6 +26,7 @@ from src.harness.artifacts import (
     mark_commenter_comments_read,
     read_status,
     remaining_agent_seconds,
+    remaining_run_seconds,
     save_skill_state,
     unread_commenter_comments,
     write_heartbeat,
@@ -298,7 +299,11 @@ def _wait_for_next_turn_window(
         if read_status(run_root, agent_id) in TERMINAL_STATUSES:
             return False, soft_time_limit_was_active
         now = time.monotonic()
-        soft_time_limit_active = soft_time_limit_was_active or remaining_agent_seconds(request, run_root, agent_id) <= 0
+        remaining = min(
+            remaining_agent_seconds(request, run_root, agent_id),
+            remaining_run_seconds(request, run_root),
+        )
+        soft_time_limit_active = soft_time_limit_was_active or remaining <= 0
         if now >= max_ready_at:
             return True, soft_time_limit_active
         if soft_time_limit_active != soft_time_limit_was_active:
@@ -464,7 +469,9 @@ def _wait_before_next_turn(run_root: str, agent_id: str, runtime: WorkerRuntime,
 
 def _soft_time_limit_active(run_root: str, agent_id: str, runtime: WorkerRuntime, state: WorkerLoopState) -> bool:
     remaining_agent = remaining_agent_seconds(runtime.request, run_root, agent_id)
-    if remaining_agent <= 0 and not state.soft_finalize_logged:
+    remaining_run = remaining_run_seconds(runtime.request, run_root)
+    remaining = min(remaining_agent, remaining_run)
+    if remaining <= 0 and not state.soft_finalize_logged:
         append_event(
             run_root,
             AgentEvent(
@@ -475,7 +482,7 @@ def _soft_time_limit_active(run_root: str, agent_id: str, runtime: WorkerRuntime
             ),
         )
         state.soft_finalize_logged = True
-    return remaining_agent <= 0
+    return remaining <= 0
 
 
 def _build_turn_prompt(runtime: WorkerRuntime, state: WorkerLoopState, *, soft_stop_active: bool, show_budget_time: bool = False) -> TurnPrompt:

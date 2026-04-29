@@ -919,3 +919,39 @@ def test_worker_calls_immediately_when_previous_turn_already_used_full_deadline(
 
     assert result == 0
     assert transport.call_times == [start, start + 7.0]
+
+
+def test_worker_soft_stop_activates_when_run_remaining_expired(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Soft-stop must activate when run-level remaining <= 0, even if agent-level remaining > 0."""
+    run_root, agent_id, _request = _create_workspace(tmp_path, monkeypatch)
+    clock = _FakeClock()
+    transport = _SequencedTransport([_scratch_write_turn(), _finish_turn()], clock)
+
+    _install_fake_worker_timing(monkeypatch, clock)
+    _install_fake_transport(monkeypatch, transport)
+    _auto_complete_commenter_gate(clock, run_root, agent_id)
+    monkeypatch.setattr(agent_worker_module, "TURN_MAX_PROMPT_GAP_SECONDS", 10.0)
+    monkeypatch.setattr(agent_worker_module, "TURN_PACING_POLL_SECONDS", 1.0)
+    # Agent-level time: still > 0 (would not trigger soft-stop alone)
+    monkeypatch.setattr(agent_worker_module, "remaining_agent_seconds", lambda *_args, **_kwargs: 120)
+    # Run-level time: expired — this must trigger soft-stop
+    monkeypatch.setattr(
+        agent_worker_module,
+        "remaining_run_seconds",
+        lambda *_args, **_kwargs: (
+            0
+            if transport.call_times and clock.monotonic() >= transport.call_times[0] + 4.0
+            else 9999
+        ),
+    )
+
+    result = run_agent_worker(str(run_root), agent_id)
+
+    assert result == 0
+    assert transport.call_times[1] == transport.call_times[0] + 4.0
+    assert len(transport.user_messages) == 2
+    assert "Soft-stop mode is active" in transport.user_messages[1]
+    assert "# Runtime Delta" in transport.user_messages[1]
