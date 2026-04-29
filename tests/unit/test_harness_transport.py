@@ -1010,11 +1010,11 @@ def test_transcript_replay_no_pending_strips_latest_user_message(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """When there is no pending user message (no model activity follows),
-    the latest user message is still historical and gets stripped."""
+    """When the latest user_message is followed by a model_request (consumed),
+    it is historical, not pending, and its budget lines get stripped."""
     run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
 
-    # Only one user message, no model activity after it
+    # User message with budget lines
     append_transcript_entry(
         run_root, agent_id,
         {
@@ -1027,6 +1027,11 @@ def test_transcript_replay_no_pending_strips_latest_user_message(
                 ),
             },
         },
+    )
+    # Model request consumes it — user message becomes historical, not pending
+    append_transcript_entry(
+        run_root, agent_id,
+        {"kind": "model_request", "turn_index": 1, "transport": "test"},
     )
 
     messages = _transcript_messages(str(run_root), agent_id)

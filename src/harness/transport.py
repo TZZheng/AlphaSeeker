@@ -611,7 +611,7 @@ def _transcript_messages(
             latest_user_idx = i
         elif kind in {"model_request", "assistant_response", "tool_result"}:
             latest_model_activity_idx = i
-    if latest_user_idx > latest_model_activity_idx and latest_model_activity_idx >= 0:
+    if latest_user_idx > latest_model_activity_idx:
         pending_user_entry = replay_entries[latest_user_idx]
 
     def _strip_budget_lines_from_content(content: Any) -> Any:
