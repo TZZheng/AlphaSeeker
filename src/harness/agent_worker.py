@@ -963,7 +963,8 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
                 )
                 if native_result == "continue":
                     # After soft-stop, if the agent published all deliverables but
-                    # did not call status("done"), prompt it to do so in a stripped-down turn.
+                    # did not call status("done"), rebuild the prompt with no
+                    # commenter feed and only the status tool visible.
                     if (
                         soft_time_limit_active
                         and not state.final_status_required
@@ -971,7 +972,20 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
                         and read_status(run_root, agent_id) != "done"
                     ):
                         state.final_status_required = True
-                        runtime.transport._append_system_prompt_snapshot(reason="final-status-required")
+                        from src.harness.prompt_builder import build_agent_prompt_bundle
+                        from src.harness.presets import default_tool_allowlist
+                        status_bundle = build_agent_prompt_bundle(
+                            request=runtime.request,
+                            run_root=run_root,
+                            agent_id=agent_id,
+                            preset=runtime.record.preset,
+                            response_mode="native_tools",
+                            available_tools=["status"],
+                            available_skills=[],
+                            soft_stop_active=True,
+                            show_budget_time=True,
+                        )
+                        runtime.transport.update_system_prompt(status_bundle.system_prompt)
                         runtime.transport.append_user_text(
                             "# Final Status Required\n\n"
                             "All required publish files exist. Call `status(status=\"done\")` "
