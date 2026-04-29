@@ -1074,3 +1074,32 @@ def test_transcript_replay_non_user_messages_unaffected_by_strip(
             if isinstance(content, list):
                 content = content[0]["text"]
             assert "remaining run time" in content  # assistants NOT stripped
+
+
+def test_transcript_replay_first_prompt_preserves_budget_lines(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """First user message with no prior model activity is pending — budget lines preserved."""
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+
+    # Only one user_message, no model activity yet — this is the pending first prompt
+    append_transcript_entry(
+        run_root, agent_id,
+        {
+            "kind": "user_message",
+            "message": {
+                "role": "user",
+                "content": (
+                    "# Runtime Capacity Snapshot\n"
+                    "- remaining run time: ~598s\n"
+                    "- remaining agent time: ~598s\n"
+                ),
+            },
+        },
+    )
+
+    messages = _transcript_messages(str(run_root), agent_id)
+    assert len(messages) == 1
+    assert "remaining run time: ~598s" in messages[0]["content"]
+    assert "remaining agent time: ~598s" in messages[0]["content"]
