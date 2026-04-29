@@ -117,6 +117,8 @@ def test_render_tools_markdown_lists_visible_runtime_surface() -> None:
     assert "`grep` finds the line" in text
     assert "read(path=..., start_line=..., max_lines=...)" in text
     assert "rerun `grep` and `read`" in text
+    assert "except in soft-stop mode" in text
+    assert "do not recover failed polish patches" in text
     assert "write(path=..., content=...)" in text
     assert "replacing most of a file or creating a new one" in text
     assert "fetch_company_profile" in text
@@ -507,6 +509,8 @@ def test_research_system_prompt_uses_child_completion_not_global_final_requireme
 
     assert "write the final answer to `publish/final.md`" not in bundle.system_prompt
     assert "If you are a child agent, set `status` to `done`" in bundle.system_prompt
+    assert "except in soft-stop mode" in bundle.system_prompt
+    assert "do not recover failed polish patches" in bundle.system_prompt
 
 
 def test_orchestrator_prompt_encourages_synthesis_from_partial_child_outputs(

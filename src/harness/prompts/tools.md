@@ -25,7 +25,8 @@
 - Use `read(path=..., start_line=..., max_lines=...)` when you want a line-based slice, or `read(path=..., max_chars=..., start_char=...)` for a character range.
 - Use `read_web_pages(urls=[...], max_chars_per_url=...)` after `search_web` or `search_news` when you want actual page content.
 - Use `edit(path=..., ...)` only for short exact replacements or inserts under `publish/` or `scratch/`.
-- Use `patch(patch=...)` for localized multi-line edits after `grep` finds the line and `read(path=..., start_line=..., max_lines=...)` loads a small nearby slice; if it fails, rerun `grep` and `read`.
+- Use `patch(patch=...)` for localized multi-line edits after `grep` finds the line and `read(path=..., start_line=..., max_lines=...)` loads a small nearby slice; if it fails, rerun `grep` and `read`, except in soft-stop mode.
+- In soft-stop mode, do not recover failed polish patches with more reads or retries; if usable publish files exist, call `status` with `done`.
 - Use `write(path=..., content=...)` when you are replacing most of a file or creating a new one under `publish/` or `scratch/`.
 - If you delegate, the parent only sees your child metadata and published files by default.
 - `delegate` accepts only the preset names listed above. Unknown preset names will be rejected.
