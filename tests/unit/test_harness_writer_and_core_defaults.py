@@ -297,7 +297,7 @@ def test_prompt_bundle_soft_stop_appends_role_specific_guidance(
         "Use current materials to write or patch your publish/summary.md and publish/artifact_index.md "
         "now so your parent can use them."
     )
-    finish_text = 'Before this response ends, call the status tool with status="done".'
+    finish_text = "blocking: the deliverable is unusable without this (do it)."
 
     assert "## Soft-Stop Mode" in root_bundle.user_prompt
     assert shared_text in root_bundle.user_prompt
@@ -443,7 +443,8 @@ def test_runtime_delta_prompt_only_includes_out_of_band_changes(
     assert "remaining run time:" in delta
     assert "remaining agent time:" in delta
     assert "final model turn" in delta
-    assert 'status tool with status="done"' in delta
+    assert "blocking: the deliverable is unusable without this" in delta
+    assert "call status(\"done\")" in delta
 
 
 def test_tools_markdown_changes_system_prompt(

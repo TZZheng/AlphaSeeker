@@ -885,7 +885,7 @@ def test_worker_soft_stop_second_prompt_contains_finalization_guidance(
         "Use current materials to write or patch publish/final.md, publish/summary.md, "
         "and publish/artifact_index.md now."
     )
-    finish_text = 'Before this response ends, call the status tool with status="done".'
+    finish_text = "blocking: the deliverable is unusable without this (do it)."
 
     assert result == 0
     assert len(transport.user_messages) == 2
