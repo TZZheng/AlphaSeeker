@@ -310,6 +310,10 @@ def test_prompt_bundle_soft_stop_appends_role_specific_guidance(
     existing_final_rule = (
         "if publish/final.md already exists, do not inspect or patch it for polish."
     )
+    post_publish_status_rule = (
+        "After the required publish files exist, call status(\"done\") as the next action "
+        "unless a blocking gap makes the deliverable or handoff unusable."
+    )
     old_finish_text = 'Before this response ends, call the status tool with status="done".'
 
     assert "## Soft-Stop Mode" in root_bundle.user_prompt
@@ -317,6 +321,7 @@ def test_prompt_bundle_soft_stop_appends_role_specific_guidance(
     assert root_text in root_bundle.user_prompt
     assert blocking_rule in root_bundle.user_prompt
     assert existing_final_rule in root_bundle.user_prompt
+    assert post_publish_status_rule in root_bundle.user_prompt
     assert finish_text in root_bundle.user_prompt
     assert old_finish_text not in root_bundle.user_prompt
     assert child_text not in root_bundle.user_prompt
@@ -325,6 +330,7 @@ def test_prompt_bundle_soft_stop_appends_role_specific_guidance(
     assert child_text in child_bundle.user_prompt
     assert blocking_rule in child_bundle.user_prompt
     assert existing_final_rule in child_bundle.user_prompt
+    assert post_publish_status_rule in child_bundle.user_prompt
     assert finish_text in child_bundle.user_prompt
     assert old_finish_text not in child_bundle.user_prompt
     assert root_text not in child_bundle.user_prompt
@@ -466,6 +472,7 @@ def test_runtime_delta_prompt_only_includes_out_of_band_changes(
     assert "minimal write or patch action needed for required publish files" in delta
     assert "do not retry or read more context" in delta
     assert "do not inspect or patch it for polish" in delta
+    assert "call status(\"done\") as the next action" in delta
     assert "call status(\"done\")" in delta
     assert 'Before this response ends, call the status tool with status="done".' not in delta
 

@@ -352,6 +352,7 @@ def _soft_stop_guidance_lines(*, is_root: bool) -> list[str]:
         "  - material but caveatable: the deliverable is usable, but the gap should be documented as a limitation.",
         "  - optional: nice-to-have polish, extra checks, or depth that will not change the core answer.",
         "Use current materials to produce the required publish files; if publish/final.md already exists, do not inspect or patch it for polish.",
+        "After the required publish files exist, call status(\"done\") as the next action unless a blocking gap makes the deliverable or handoff unusable.",
         "Only a blocking gap justifies more tool work in soft-stop; take the minimal write or patch action needed for required publish files.",
         "If a tool call for a material or optional improvement fails, do not retry or read more context; document the gap if possible, then call status(\"done\").",
         "Use status(\"blocked\") only when no usable deliverable or handoff can be written.",

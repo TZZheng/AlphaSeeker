@@ -1614,6 +1614,52 @@ def test_patch_rejects_missing_context(
     assert "exact current lines" in message
 
 
+def test_patch_failure_in_soft_stop_omits_retry_recipe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-apply-patch-soft-stop-missing",
+        user_prompt="Patch missing note during soft-stop",
+        preset="research",
+    )
+    session.request.wall_clock_budget_seconds = 0
+    execute_model_tool(
+        session,
+        "write",
+        {"path": "publish/final.md", "content": "alpha\nbeta\ngamma\n"},
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        execute_model_tool(
+            session,
+            "patch",
+            {
+                "patch": "\n".join(
+                    [
+                        "*** Begin Patch",
+                        "*** Update File: publish/final.md",
+                        "@@",
+                        " alpha",
+                        "-missing",
+                        "+replacement",
+                        " gamma",
+                        "*** End Patch",
+                    ]
+                ),
+            },
+        )
+    message = str(exc_info.value)
+    assert "context was not found" in message
+    assert "Soft-stop mode is active" in message
+    assert "Classify this failed patch" in message
+    assert "call status(\"done\")" in message
+    assert "grep(pattern=..." not in message
+    assert "read(path=" not in message
+
+
 def test_patch_is_atomic_when_a_later_hunk_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

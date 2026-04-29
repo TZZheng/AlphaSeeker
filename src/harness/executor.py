@@ -25,6 +25,8 @@ from src.harness.artifacts import (
     read_jsonl,
     read_status,
     read_text,
+    remaining_agent_seconds,
+    remaining_run_seconds,
     refresh_progress_view,
     save_skill_state,
     snapshot_final_report_if_changed,
@@ -1166,7 +1168,29 @@ def _handle_edit_file(session: AgentSession, arguments: dict[str, Any]) -> dict[
     }
 
 
-def _rewrite_apply_patch_error(message: str, *, display_path: str, has_separator_space: bool = False) -> str:
+def _soft_time_limit_active(session: AgentSession) -> bool:
+    remaining_run = remaining_run_seconds(session.request, session.run_root)
+    remaining_agent = remaining_agent_seconds(session.request, session.run_root, session.agent_id)
+    return min(remaining_run, remaining_agent) <= 0
+
+
+def _rewrite_apply_patch_error(
+    message: str,
+    *,
+    display_path: str,
+    has_separator_space: bool = False,
+    soft_time_limit_active: bool = False,
+) -> str:
+    if soft_time_limit_active and (
+        "context was not found" in message or "matched multiple locations" in message
+    ):
+        return (
+            f"{message} Soft-stop mode is active. Classify this failed patch before "
+            "recovering it: if the change is polish, material but caveatable, or the "
+            "deliverable or handoff is already usable, do not run grep/read recovery. "
+            "Document the caveat if needed, then call status(\"done\"). Retry only if "
+            "this exact patch closes a blocking gap that makes the deliverable unusable."
+        )
     locate_hint = (
         f"Use grep(pattern=..., paths=['{display_path}']) to find the target line, then "
         f"read(path='{display_path}', start_line=..., max_lines=...) for a small nearby slice before retrying."
@@ -1208,6 +1232,7 @@ def _handle_apply_patch(session: AgentSession, arguments: dict[str, Any]) -> dic
                 str(exc),
                 display_path=f"{root_name}/{relative}",
                 has_separator_space=_patch_uses_separator_space(parsed_patch),
+                soft_time_limit_active=_soft_time_limit_active(session),
             )
         ) from exc
     if root_name == "publish" and not updated.strip():
