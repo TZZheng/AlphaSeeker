@@ -38,6 +38,7 @@ from src.harness.commenter import commenter_gate_finished, open_commenter_gate
 from src.harness.executor import TERMINAL_STATUSES, create_or_load_session, execute_agent_command, execute_model_tool, model_tool_specs
 from src.harness.presets import visible_skills_for_preset
 from src.harness.prompt_builder import build_agent_prompt_bundle, build_agent_runtime_delta_prompt
+from src.harness.tool_catalog import tool_specs_for_names
 from src.harness.types import AgentCommand, AgentEvent
 from src.shared.llm_manager import get_llm
 from src.shared.model_config import get_model
@@ -151,6 +152,7 @@ def _current_prompt_bundle(
     comment_feed: str | None = None,
     soft_stop_active: bool = False,
     show_budget_time: bool = False,
+    available_tools_override: list[str] | None = None,
 ):
     response_mode = "text_json" if transport_name == "text_json" else "native_tools"
     visible_skills = visible_skills_for_preset(
@@ -163,7 +165,7 @@ def _current_prompt_bundle(
         agent_id=session.agent_id,
         preset=session.preset,
         response_mode=response_mode,
-        available_tools=session.allowed_tools,
+        available_tools=available_tools_override or session.allowed_tools,
         available_skills=visible_skills,
         previous_error=previous_error,
         comment_feed=comment_feed,
@@ -925,6 +927,41 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
             show_budget_time = is_first_turn or soft_time_limit_active
 
             try:
+                # Final-status-only turn: after soft-stop fires and publish
+                # outputs exist, give the model one turn where only the status
+                # tool is available. The model must call status("done") itself.
+                if (
+                    soft_time_limit_active
+                    and not state.final_status_required
+                    and runtime.transport_name != "text_json"
+                    and _publish_outputs_satisfy_completion(run_root, agent_id)
+                    and read_status(run_root, agent_id) not in TERMINAL_STATUSES
+                ):
+                    state.final_status_required = True
+                    status_specs = tool_specs_for_names(["status"])
+                    runtime.transport.update_system_prompt(
+                        "# Final Status Required\n\n"
+                        "You have only one tool available: `status`. "
+                        "Call `status(status=\"done\")` now to mark this task complete."
+                    )
+                    runtime.transport.append_user_text(
+                        "# Final Status Required\n\n"
+                        "All required publish files exist. "
+                        "Call `status(status=\"done\")` now."
+                    )
+                    # Execute a transport-level turn with status-only specs
+                    turn_result = runtime.transport.execute_turn(status_specs)
+                    # Execute any tool calls the model made
+                    tool_results = []
+                    for tc in turn_result.tool_calls:
+                        result = execute_model_tool(runtime.session, tc.name, tc.arguments)
+                        tool_results.append(result)
+                    if tool_results:
+                        runtime.transport.append_tool_results(tool_results)
+                    if read_status(run_root, agent_id) in TERMINAL_STATUSES:
+                        break
+                    continue
+
                 prompt = _build_turn_prompt(runtime, state, soft_stop_active=soft_time_limit_active, show_budget_time=show_budget_time)
                 state.previous_error = None
                 if runtime.transport_name == "text_json":
@@ -962,36 +999,6 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
                     soft_time_limit_active=soft_time_limit_active,
                 )
                 if native_result == "continue":
-                    # After soft-stop, if the agent published all deliverables but
-                    # did not call status("done"), rebuild the prompt with no
-                    # commenter feed and only the status tool visible.
-                    if (
-                        soft_time_limit_active
-                        and not state.final_status_required
-                        and _publish_outputs_satisfy_completion(run_root, agent_id)
-                        and read_status(run_root, agent_id) != "done"
-                    ):
-                        state.final_status_required = True
-                        from src.harness.prompt_builder import build_agent_prompt_bundle
-                        from src.harness.presets import default_tool_allowlist
-                        status_bundle = build_agent_prompt_bundle(
-                            request=runtime.request,
-                            run_root=run_root,
-                            agent_id=agent_id,
-                            preset=runtime.record.preset,
-                            response_mode="native_tools",
-                            available_tools=["status"],
-                            available_skills=[],
-                            soft_stop_active=True,
-                            show_budget_time=True,
-                        )
-                        runtime.transport.update_system_prompt(status_bundle.system_prompt)
-                        runtime.transport.append_user_text(
-                            "# Final Status Required\n\n"
-                            "All required publish files exist. Call `status(status=\"done\")` "
-                            "now to mark this task complete. Do not do any further research, "
-                            "writing, or delegation. Only call status."
-                        )
                     continue
                 if native_result == "stop" or read_status(run_root, agent_id) in TERMINAL_STATUSES:
                     break
