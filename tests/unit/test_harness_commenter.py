@@ -567,31 +567,6 @@ def _status_done_turn() -> ModelTurnResult:
     )
 
 
-def _publish_only_turn() -> ModelTurnResult:
-    """Writes publish files without calling status(done)."""
-    return ModelTurnResult(
-        tool_calls=[
-            ModelToolCall(
-                call_id="call_final",
-                name="write",
-                arguments={"path": "publish/final.md", "content": "# Final\n\nDone.\n"},
-            ),
-            ModelToolCall(
-                call_id="call_summary",
-                name="write",
-                arguments={"path": "publish/summary.md", "content": "# Summary\n"},
-            ),
-            ModelToolCall(
-                call_id="call_index",
-                name="write",
-                arguments={"path": "publish/artifact_index.md", "content": "# Index\n"},
-            ),
-        ],
-        text_blocks=["writing files"],
-        stop_reason="tool_use",
-    )
-
-
 def _finish_turn() -> ModelTurnResult:
     return ModelTurnResult(
         tool_calls=[
@@ -996,18 +971,13 @@ def test_worker_final_status_turn_repeats_status_only_after_idle(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """After soft-stop + publish completed, the agent gets status-only turns.
-    An idle turn (no tool call) must be followed by another status-only turn,
-    not a full tool set."""
+    """Soft-stop + publish done: agent gets status-only turns repeatedly."""
     from src.harness.artifacts import write_text_atomic
 
     run_root, agent_id, _request = _create_workspace(tmp_path, monkeypatch)
     clock = _FakeClock()
-    # First turn: writes publish files (soft-stop normal turn)
-    # Second turn: idle (model doesn't call status) → should still get status-only
-    # Third turn: calls status("done")
     transport = _SequencedTransport(
-        [_idle_turn(), _idle_turn(), _status_done_turn()], clock
+        [_idle_turn(), _status_done_turn()], clock
     )
 
     _install_fake_worker_timing(monkeypatch, clock)
@@ -1027,15 +997,13 @@ def test_worker_final_status_turn_repeats_status_only_after_idle(
     result = run_agent_worker(str(run_root), agent_id)
 
     assert result == 0
-    # After the first soft-stop turn that writes publish files,
-    # the next execute_turn should have status-only tool specs
-    status_only_turns = [
-        specs for specs in transport.tool_specs_history
-        if len(specs) == 1 and specs[0].get("name") == "status"
+    tool_names_by_turn = [
+        [spec.get("name") for spec in specs]
+        for specs in transport.tool_specs_history
     ]
-    assert len(status_only_turns) >= 1, (
-        f"Expected at least one status-only turn. "
-        f"Tool specs history ({len(transport.tool_specs_history)} turns): "
-        f"{[len(s) for s in transport.tool_specs_history]}"
+    assert tool_names_by_turn == [["status"], ["status"]], (
+        f"Expected both turns to have only ['status']. Got: {tool_names_by_turn}"
     )
-    assert any("# Final Status Required" in msg for msg in transport.user_messages)
+    assert len(transport.user_messages) == 2
+    for msg in transport.user_messages:
+        assert "# Final Status Required" in msg
