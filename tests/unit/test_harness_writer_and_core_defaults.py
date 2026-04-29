@@ -297,17 +297,29 @@ def test_prompt_bundle_soft_stop_appends_role_specific_guidance(
         "Use current materials to write or patch your publish/summary.md and publish/artifact_index.md "
         "now so your parent can use them."
     )
-    finish_text = "blocking: the deliverable is unusable without this (do it)."
+    finish_text = (
+        "Otherwise write or patch the publish files, document material caveats and "
+        "skipped optional work, then call status(\"done\")."
+    )
+    blocking_rule = (
+        "Only a blocking gap justifies more tool work in soft-stop; "
+        "take at most one cheap action if it closes that gap."
+    )
+    old_finish_text = 'Before this response ends, call the status tool with status="done".'
 
     assert "## Soft-Stop Mode" in root_bundle.user_prompt
     assert shared_text in root_bundle.user_prompt
     assert root_text in root_bundle.user_prompt
+    assert blocking_rule in root_bundle.user_prompt
     assert finish_text in root_bundle.user_prompt
+    assert old_finish_text not in root_bundle.user_prompt
     assert child_text not in root_bundle.user_prompt
     assert "## Soft-Stop Mode" in child_bundle.user_prompt
     assert shared_text in child_bundle.user_prompt
     assert child_text in child_bundle.user_prompt
+    assert blocking_rule in child_bundle.user_prompt
     assert finish_text in child_bundle.user_prompt
+    assert old_finish_text not in child_bundle.user_prompt
     assert root_text not in child_bundle.user_prompt
 
 
@@ -443,8 +455,11 @@ def test_runtime_delta_prompt_only_includes_out_of_band_changes(
     assert "remaining run time:" in delta
     assert "remaining agent time:" in delta
     assert "final model turn" in delta
-    assert "blocking: the deliverable is unusable without this" in delta
+    assert "Only a blocking gap justifies more tool work in soft-stop" in delta
+    assert "take at most one cheap action if it closes that gap" in delta
+    assert "document material caveats and skipped optional work" in delta
     assert "call status(\"done\")" in delta
+    assert 'Before this response ends, call the status tool with status="done".' not in delta
 
 
 def test_tools_markdown_changes_system_prompt(

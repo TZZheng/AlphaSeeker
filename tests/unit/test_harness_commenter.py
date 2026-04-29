@@ -885,7 +885,15 @@ def test_worker_soft_stop_second_prompt_contains_finalization_guidance(
         "Use current materials to write or patch publish/final.md, publish/summary.md, "
         "and publish/artifact_index.md now."
     )
-    finish_text = "blocking: the deliverable is unusable without this (do it)."
+    blocking_rule = (
+        "Only a blocking gap justifies more tool work in soft-stop; "
+        "take at most one cheap action if it closes that gap."
+    )
+    finish_text = (
+        "Otherwise write or patch the publish files, document material caveats and "
+        "skipped optional work, then call status(\"done\")."
+    )
+    old_finish_text = 'Before this response ends, call the status tool with status="done".'
 
     assert result == 0
     assert len(transport.user_messages) == 2
@@ -896,7 +904,9 @@ def test_worker_soft_stop_second_prompt_contains_finalization_guidance(
     assert "# Runtime Snapshot" not in transport.user_messages[1]
     assert shared_text in transport.user_messages[1]
     assert root_text in transport.user_messages[1]
+    assert blocking_rule in transport.user_messages[1]
     assert finish_text in transport.user_messages[1]
+    assert old_finish_text not in transport.user_messages[1]
 
 
 def test_worker_calls_immediately_when_previous_turn_already_used_full_deadline(

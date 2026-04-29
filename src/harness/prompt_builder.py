@@ -343,16 +343,16 @@ def build_agent_runtime_delta_prompt(
 def _soft_stop_guidance_lines(*, is_root: bool) -> list[str]:
     shared = [
         "Soft-stop mode is active. Treat this as your final model turn before shutdown.",
-        "Finish the job in this same response: do not start new research, delegate work, search the web, or inspect more files unless the next tool call is strictly required to write the final publish files.",
+        "Classify any remaining gap before using another tool; broad new research, delegation, and polish are no longer appropriate in soft-stop.",
     ]
     completion_rules = [
-        "Classify remaining work:",
-        "  - blocking: the deliverable is unusable without this (do it).",
-        "  - material but caveatable: the deliverable is usable but stronger with it (document the gap and proceed).",
-        "  - optional: nice-to-have polish that does not change the core answer (skip it).",
-        "After you finish blocking work, call status(\"done\").",
-        "If the deliverable has caveats, publish them as limitations in the report and still call status(\"done\").",
-        "Use status(\"blocked\") only when no usable deliverable can be written.",
+        "Classify remaining gaps:",
+        "  - blocking: the deliverable or handoff is unusable without this.",
+        "  - material but caveatable: the deliverable is usable, but the gap should be documented as a limitation.",
+        "  - optional: nice-to-have polish, extra checks, or depth that will not change the core answer.",
+        "Only a blocking gap justifies more tool work in soft-stop; take at most one cheap action if it closes that gap.",
+        "Otherwise write or patch the publish files, document material caveats and skipped optional work, then call status(\"done\").",
+        "Use status(\"blocked\") only when no usable deliverable or handoff can be written.",
     ]
     if is_root:
         return [
