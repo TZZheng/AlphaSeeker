@@ -887,11 +887,14 @@ def test_worker_soft_stop_second_prompt_contains_finalization_guidance(
     )
     blocking_rule = (
         "Only a blocking gap justifies more tool work in soft-stop; "
-        "take at most one cheap action if it closes that gap."
+        "take the minimal write or patch action needed for required publish files."
     )
     finish_text = (
-        "Otherwise write or patch the publish files, document material caveats and "
-        "skipped optional work, then call status(\"done\")."
+        "If a tool call for a material or optional improvement fails, do not retry "
+        "or read more context; document the gap if possible, then call status(\"done\")."
+    )
+    existing_final_rule = (
+        "if publish/final.md already exists, do not inspect or patch it for polish."
     )
     old_finish_text = 'Before this response ends, call the status tool with status="done".'
 
@@ -905,6 +908,7 @@ def test_worker_soft_stop_second_prompt_contains_finalization_guidance(
     assert shared_text in transport.user_messages[1]
     assert root_text in transport.user_messages[1]
     assert blocking_rule in transport.user_messages[1]
+    assert existing_final_rule in transport.user_messages[1]
     assert finish_text in transport.user_messages[1]
     assert old_finish_text not in transport.user_messages[1]
 

@@ -298,12 +298,15 @@ def test_prompt_bundle_soft_stop_appends_role_specific_guidance(
         "now so your parent can use them."
     )
     finish_text = (
-        "Otherwise write or patch the publish files, document material caveats and "
-        "skipped optional work, then call status(\"done\")."
+        "If a tool call for a material or optional improvement fails, do not retry "
+        "or read more context; document the gap if possible, then call status(\"done\")."
     )
     blocking_rule = (
         "Only a blocking gap justifies more tool work in soft-stop; "
-        "take at most one cheap action if it closes that gap."
+        "take the minimal write or patch action needed for required publish files."
+    )
+    existing_final_rule = (
+        "if publish/final.md already exists, do not inspect or patch it for polish."
     )
     old_finish_text = 'Before this response ends, call the status tool with status="done".'
 
@@ -311,6 +314,7 @@ def test_prompt_bundle_soft_stop_appends_role_specific_guidance(
     assert shared_text in root_bundle.user_prompt
     assert root_text in root_bundle.user_prompt
     assert blocking_rule in root_bundle.user_prompt
+    assert existing_final_rule in root_bundle.user_prompt
     assert finish_text in root_bundle.user_prompt
     assert old_finish_text not in root_bundle.user_prompt
     assert child_text not in root_bundle.user_prompt
@@ -318,6 +322,7 @@ def test_prompt_bundle_soft_stop_appends_role_specific_guidance(
     assert shared_text in child_bundle.user_prompt
     assert child_text in child_bundle.user_prompt
     assert blocking_rule in child_bundle.user_prompt
+    assert existing_final_rule in child_bundle.user_prompt
     assert finish_text in child_bundle.user_prompt
     assert old_finish_text not in child_bundle.user_prompt
     assert root_text not in child_bundle.user_prompt
@@ -456,8 +461,9 @@ def test_runtime_delta_prompt_only_includes_out_of_band_changes(
     assert "remaining agent time:" in delta
     assert "final model turn" in delta
     assert "Only a blocking gap justifies more tool work in soft-stop" in delta
-    assert "take at most one cheap action if it closes that gap" in delta
-    assert "document material caveats and skipped optional work" in delta
+    assert "minimal write or patch action needed for required publish files" in delta
+    assert "do not retry or read more context" in delta
+    assert "do not inspect or patch it for polish" in delta
     assert "call status(\"done\")" in delta
     assert 'Before this response ends, call the status tool with status="done".' not in delta
 
