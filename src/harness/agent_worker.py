@@ -630,6 +630,7 @@ def _prepare_native_turn(
     prompt: TurnPrompt,
     *,
     soft_time_limit_active: bool,
+    show_budget_time: bool = False,
 ) -> NativeTurnPreparation:
     tool_specs = model_tool_specs(runtime.session)
     compaction_changed_any = False
@@ -938,6 +939,7 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
                     state,
                     prompt,
                     soft_time_limit_active=soft_time_limit_active,
+                    show_budget_time=show_budget_time,
                 )
                 if prepared.hard_overflow:
                     state.previous_error = prepared.previous_error

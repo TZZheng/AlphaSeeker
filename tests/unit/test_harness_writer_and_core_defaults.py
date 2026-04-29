@@ -439,7 +439,9 @@ def test_runtime_delta_prompt_only_includes_out_of_band_changes(
     assert "Need to call a valid tool." in delta
     assert "Comment Feed" in delta
     assert "Soft-stop mode is active" in delta
+    assert "## Remaining Time" in delta
     assert "remaining run time:" in delta
+    assert "remaining agent time:" in delta
     assert "final model turn" in delta
     assert 'status tool with status="done"' in delta
 
@@ -544,3 +546,44 @@ def test_child_completion_does_not_require_publish_final(
     write_text_atomic(child_paths["publish_summary"], "# Child Summary\n")
     write_text_atomic(child_paths["publish_root"] / "financials_valuation.md", "# Topic Output\n")
     assert _publish_outputs_satisfy_completion(str(run_root), "agent_child") is True
+
+
+def test_budget_snapshot_default_does_not_include_time(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Default build_agent_prompt_bundle must NOT include time lines."""
+    run_root, agent_id, request = _create_workspace(monkeypatch, tmp_path, preset="research")
+    bundle = build_agent_prompt_bundle(
+        request=request,
+        run_root=str(run_root),
+        agent_id=agent_id,
+        preset="research",
+        response_mode="native_tools",
+        available_tools=default_tool_allowlist("research"),
+        available_skills=[],
+    )
+    user_text = " ".join(s.content for s in bundle.user_sections)
+    assert "remaining run time" not in user_text
+    assert "remaining agent time" not in user_text
+
+
+def test_budget_snapshot_with_show_budget_time_includes_time(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Explicit show_budget_time=True must include both time lines."""
+    run_root, agent_id, request = _create_workspace(monkeypatch, tmp_path, preset="research")
+    bundle = build_agent_prompt_bundle(
+        request=request,
+        run_root=str(run_root),
+        agent_id=agent_id,
+        preset="research",
+        response_mode="native_tools",
+        available_tools=default_tool_allowlist("research"),
+        available_skills=[],
+        show_budget_time=True,
+    )
+    user_text = " ".join(s.content for s in bundle.user_sections)
+    assert "remaining run time:" in user_text
+    assert "remaining agent time:" in user_text

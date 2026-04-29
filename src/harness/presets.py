@@ -92,7 +92,7 @@ def visible_skills_for_preset(
     return primitive_core
 
 
-def render_budget_snapshot(*, request: HarnessRequest, snapshot: dict[str, int]) -> str:
+def render_budget_snapshot(*, request: HarnessRequest, snapshot: dict[str, int], show_budget_time: bool = False) -> str:
     lines = [
         "# Runtime Capacity Snapshot",
         "",
@@ -102,10 +102,9 @@ def render_budget_snapshot(*, request: HarnessRequest, snapshot: dict[str, int])
         f"- live children per parent cap: {request.max_live_children_per_parent}",
         f"- remaining live child slots: {snapshot['remaining_live_child_slots']}",
     ]
-    remaining_run = snapshot.get("remaining_run_seconds")
-    if remaining_run is not None:
+    if show_budget_time:
+        remaining_run = snapshot.get("remaining_run_seconds", 0)
+        remaining_agent = snapshot.get("remaining_agent_seconds", 0)
         lines.append(f"- remaining run time: ~{remaining_run}s")
-    remaining_agent = snapshot.get("remaining_agent_seconds")
-    if remaining_agent is not None:
         lines.append(f"- remaining agent time: ~{remaining_agent}s")
     return "\n".join(lines)

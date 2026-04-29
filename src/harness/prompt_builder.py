@@ -243,7 +243,7 @@ def _render_runtime_snapshot(
         f"- parent_id: {current.parent_id if current and current.parent_id else '-'}",
         f"- root_orchestrator: {'yes' if agent_id == 'agent_root' else 'no'}",
         "",
-        render_budget_snapshot(request=request, snapshot=budget_snapshot),
+        render_budget_snapshot(request=request, snapshot=budget_snapshot, show_budget_time=show_budget_time),
         "",
         "## Agent Lineage",
         f"- depth: {depth}",
@@ -262,15 +262,6 @@ def _render_runtime_snapshot(
         "## Children",
         _children_overview(run_root, agent_id),
     ]
-    if show_budget_time:
-        remaining = budget_snapshot.get("remaining_run_seconds", 0)
-        sections.extend([
-            "",
-            "## Planning Time",
-            f"- available planning time: ~{remaining}s of wall-clock budget remain.",
-            "- Use this estimate to decide research depth: more time allows deeper analysis; less time suggests scoping down to essentials.",
-            "- Focus on producing the best deliverable within the remaining run time.",
-        ])
     return "\n".join(sections)
 
 
@@ -296,12 +287,16 @@ def _render_runtime_history(
     if soft_stop_active:
         record = latest_agent_records(run_root).get(agent_id)
         is_root = record is None or not record.parent_id
-        remaining = remaining_run_seconds(request, run_root)
+        remaining_run = remaining_run_seconds(request, run_root)
+        remaining_agent = remaining_agent_seconds(request, run_root, agent_id)
         sections.extend(
             [
                 "",
+                "## Remaining Time",
+                f"- remaining run time: ~{remaining_run}s",
+                f"- remaining agent time: ~{remaining_agent}s",
+                "",
                 "## Soft-Stop Mode",
-                f"- remaining run time: ~{remaining}s",
                 *_soft_stop_guidance_lines(is_root=is_root),
             ]
         )
@@ -329,12 +324,16 @@ def build_agent_runtime_delta_prompt(
         has_content = True
         record = latest_agent_records(run_root).get(agent_id)
         is_root = record is None or not record.parent_id
-        remaining = remaining_run_seconds(request, run_root)
+        remaining_run = remaining_run_seconds(request, run_root)
+        remaining_agent = remaining_agent_seconds(request, run_root, agent_id)
         sections.extend(
             [
                 "",
+                "## Remaining Time",
+                f"- remaining run time: ~{remaining_run}s",
+                f"- remaining agent time: ~{remaining_agent}s",
+                "",
                 "## Soft-Stop Mode",
-                f"- remaining run time: ~{remaining}s",
                 *_soft_stop_guidance_lines(is_root=is_root),
             ]
         )
