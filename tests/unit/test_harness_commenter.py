@@ -504,7 +504,6 @@ class _SequencedTransport:
         self._clock = clock
         self.call_times: list[float] = []
         self.user_messages: list[str] = []
-        self.tool_specs_history: list[list[dict[str, object]]] = []
 
     def ensure_initialized(self, _initial_user_prompt: str) -> None:
         return None
@@ -516,7 +515,6 @@ class _SequencedTransport:
         self.user_messages.append(text)
 
     def execute_turn(self, _tool_specs: list[dict[str, object]]) -> ModelTurnResult:
-        self.tool_specs_history.append(_tool_specs)
         self.call_times.append(self._clock.monotonic())
         if not self._turns:
             raise AssertionError("No more fake turns configured.")
@@ -557,14 +555,6 @@ def _scratch_write_turn() -> ModelTurnResult:
 
 def _idle_turn() -> ModelTurnResult:
     return ModelTurnResult(tool_calls=[], text_blocks=[], stop_reason="end_turn")
-
-
-def _status_done_turn() -> ModelTurnResult:
-    return ModelTurnResult(
-        tool_calls=[ModelToolCall(call_id="call_done", name="status", arguments={"status": "done"})],
-        text_blocks=["done"],
-        stop_reason="tool_use",
-    )
 
 
 def _finish_turn() -> ModelTurnResult:
@@ -965,45 +955,3 @@ def test_worker_soft_stop_activates_when_run_remaining_expired(
     assert len(transport.user_messages) == 2
     assert "Soft-stop mode is active" in transport.user_messages[1]
     assert "# Runtime Delta" in transport.user_messages[1]
-
-
-def test_worker_final_status_turn_repeats_status_only_after_idle(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Soft-stop + publish done: agent gets status-only turns repeatedly."""
-    from src.harness.artifacts import write_text_atomic
-
-    run_root, agent_id, _request = _create_workspace(tmp_path, monkeypatch)
-    clock = _FakeClock()
-    transport = _SequencedTransport(
-        [_idle_turn(), _status_done_turn()], clock
-    )
-
-    _install_fake_worker_timing(monkeypatch, clock)
-    _install_fake_transport(monkeypatch, transport)
-    _auto_complete_commenter_gate(clock, run_root, agent_id)
-    monkeypatch.setattr(agent_worker_module, "TURN_MAX_PROMPT_GAP_SECONDS", 10.0)
-    monkeypatch.setattr(agent_worker_module, "TURN_PACING_POLL_SECONDS", 1.0)
-    monkeypatch.setattr(agent_worker_module, "remaining_agent_seconds", lambda *_args, **_kwargs: 0)
-    monkeypatch.setattr(agent_worker_module, "remaining_run_seconds", lambda *_args, **_kwargs: 0)
-
-    # Pre-write publish files so _publish_outputs_satisfy_completion passes
-    paths = agent_workspace_paths(str(run_root), agent_id)
-    write_text_atomic(paths["publish_final"], "# Final\n")
-    write_text_atomic(paths["publish_summary"], "# Summary\n")
-    write_text_atomic(paths["publish_index"], "- final.md\n")
-
-    result = run_agent_worker(str(run_root), agent_id)
-
-    assert result == 0
-    tool_names_by_turn = [
-        [spec.get("name") for spec in specs]
-        for specs in transport.tool_specs_history
-    ]
-    assert tool_names_by_turn == [["status"], ["status"]], (
-        f"Expected both turns to have only ['status']. Got: {tool_names_by_turn}"
-    )
-    assert len(transport.user_messages) == 2
-    for msg in transport.user_messages:
-        assert "# Final Status Required" in msg

@@ -38,7 +38,6 @@ from src.harness.commenter import commenter_gate_finished, open_commenter_gate
 from src.harness.executor import TERMINAL_STATUSES, create_or_load_session, execute_agent_command, execute_model_tool, model_tool_specs
 from src.harness.presets import visible_skills_for_preset
 from src.harness.prompt_builder import build_agent_prompt_bundle, build_agent_runtime_delta_prompt
-from src.harness.tool_catalog import tool_specs_for_names
 from src.harness.types import AgentCommand, AgentEvent
 from src.shared.llm_manager import get_llm
 from src.shared.model_config import get_model
@@ -81,7 +80,6 @@ class WorkerLoopState:
     pending_commenter_gate_id: str | None = None
     native_initial_prompt_sent: bool = False
     soft_stop_delta_sent: bool = False
-    final_status_required: bool = False
 
 
 @dataclass
@@ -926,44 +924,6 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
             show_budget_time = is_first_turn or soft_time_limit_active
 
             try:
-                # Final-status-only turn: after soft-stop fires and publish
-                # outputs exist, give the model one turn where only the status
-                # tool is available. The model must call status("done") itself.
-                if (
-                    soft_time_limit_active
-                    and runtime.transport_name != "text_json"
-                    and _publish_outputs_satisfy_completion(run_root, agent_id)
-                    and read_status(run_root, agent_id) not in TERMINAL_STATUSES
-                ):
-                    state.final_status_required = True
-                    status_prepared = NativeTurnPreparation(
-                        system_prompt=(
-                            "# Final Status Required\n\n"
-                            "You have only one tool available: `status`. "
-                            "Call `status(status=\"done\")` now to mark this task complete."
-                        ),
-                        user_prompt="# Final Status Required\n\nCall status(status=\"done\") now.",
-                        user_prompt_is_initial=False,
-                        tool_specs=tool_specs_for_names(["status"]),
-                        hard_overflow=False,
-                    )
-                    status_prompt = TurnPrompt(
-                        system_prompt=status_prepared.system_prompt,
-                        user_prompt=status_prepared.user_prompt or "",
-                        native_user_prompt=status_prepared.user_prompt,
-                        native_user_prompt_is_initial=False,
-                        previous_error=None,
-                        comment_feed=None,
-                        injected_comment_count=0,
-                    )
-                    native_result = _execute_native_turn(
-                        run_root, agent_id, runtime, state, status_prompt, status_prepared,
-                        soft_time_limit_active=True,
-                    )
-                    if native_result == "stop" or read_status(run_root, agent_id) in TERMINAL_STATUSES:
-                        break
-                    continue
-
                 prompt = _build_turn_prompt(runtime, state, soft_stop_active=soft_time_limit_active, show_budget_time=show_budget_time)
                 state.previous_error = None
                 if runtime.transport_name == "text_json":
