@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import math
+import re
 import sys
 import time
 from typing import Any
@@ -45,6 +46,9 @@ _REPLAY_STRING_LIMIT = 1200
 _SUMMARY_INPUT_CHAR_BUDGET = 20000
 _SUMMARY_OUTPUT_CHAR_LIMIT = 12000
 _TOKEN_FALLBACK_CHARS_PER_TOKEN = 4
+
+# Regex to strip stale budget-time lines from replayed user messages.
+_STALE_BUDGET_LINE_RE = re.compile(r"^- remaining (run|agent) time: ~\d+s$", re.MULTILINE)
 
 
 @dataclass
@@ -593,6 +597,40 @@ def _transcript_messages(
         replay_entries = entries
 
     unconsumed_tool_result = _latest_unconsumed_tool_result_entry(replay_entries)
+    # Determine the pending user_message: the latest user_message that has
+    # NO model activity after it (i.e. it has not yet been consumed by a
+    # model_request / assistant_response / tool_result).
+    # If the latest user_message IS followed by model activity, it is
+    # historical and must also be stripped.
+    pending_user_entry = None
+    latest_user_idx = -1
+    latest_model_activity_idx = -1
+    for i, entry in enumerate(replay_entries):
+        kind = str(entry.get("kind") or "")
+        if kind == "user_message":
+            latest_user_idx = i
+        elif kind in {"model_request", "assistant_response", "tool_result"}:
+            latest_model_activity_idx = i
+    if latest_user_idx > latest_model_activity_idx and latest_model_activity_idx >= 0:
+        pending_user_entry = replay_entries[latest_user_idx]
+
+    def _strip_budget_lines_from_content(content: Any) -> Any:
+        """Strip stale budget-time lines from user message content.
+        Handles string content (OpenAI style) and list content (Anthropic style).
+        """
+        if isinstance(content, str):
+            stripped = _STALE_BUDGET_LINE_RE.sub("", content)
+            return stripped
+        if isinstance(content, list):
+            result: list[dict[str, Any]] = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+                    block = dict(block)
+                    block["text"] = _STALE_BUDGET_LINE_RE.sub("", block["text"])
+                result.append(block)
+            return result
+        return content
+
     messages: list[dict[str, Any]] = []
     for entry in _clean_replay_entries(replay_entries):
         if not isinstance(entry, dict):
@@ -606,6 +644,14 @@ def _transcript_messages(
             preserve_tool_result=entry is unconsumed_tool_result,
         )
         if message is not None:
+            # Strip stale budget-time lines from historical user messages.
+            # Do not strip from the pending user_message (it may be a soft-stop delta).
+            if (
+                entry is not pending_user_entry
+                and isinstance(message, dict)
+                and message.get("role") == "user"
+            ):
+                message["content"] = _strip_budget_lines_from_content(message.get("content"))
             messages.append(message)
     return messages
 

@@ -877,3 +877,195 @@ def test_replay_truncates_tool_result_after_model_consumes_it(
     assert result_content != full_body
     assert "A_END" not in result_content
     assert "... [" in result_content
+
+
+def test_transcript_replay_strips_stale_budget_lines_from_historical_string_content(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Historical user message with string content has budget lines stripped."""
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+
+    # Turn 1: user message with budget lines (historical)
+    append_transcript_entry(
+        run_root, agent_id,
+        {
+            "kind": "user_message",
+            "message": {
+                "role": "user",
+                "content": (
+                    "# Runtime Capacity Snapshot\n"
+                    "- remaining run time: ~598s\n"
+                    "- remaining agent time: ~598s\n"
+                    "- live agents: 0/16\n"
+                ),
+            },
+        },
+    )
+
+    # Turn 1: assistant response (makes the above historical)
+    append_transcript_entry(
+        run_root, agent_id,
+        {"kind": "assistant_response", "message": {"role": "assistant", "content": "Let me research XOM."}},
+    )
+
+    # Turn 2: newest user message, no model activity after it (pending)
+    append_transcript_entry(
+        run_root, agent_id,
+        {
+            "kind": "user_message",
+            "message": {
+                "role": "user",
+                "content": (
+                    "# Runtime Delta\n"
+                    "## Soft-Stop Mode\n"
+                    "- remaining run time: ~120s\n"
+                    "- Finish your work.\n"
+                ),
+            },
+        },
+    )
+
+    messages = _transcript_messages(str(run_root), agent_id)
+    historical = messages[0]
+    pending = messages[-1]
+
+    # Historical: budget lines stripped
+    assert historical["role"] == "user"
+    assert isinstance(historical["content"], str)
+    assert "remaining run time" not in historical["content"]
+    assert "remaining agent time" not in historical["content"]
+    assert "live agents: 0/16" in historical["content"]  # non-budget lines preserved
+
+    # Pending: budget lines preserved
+    assert pending["role"] == "user"
+    assert isinstance(pending["content"], str)
+    assert "remaining run time: ~120s" in pending["content"]
+
+
+def test_transcript_replay_strips_stale_budget_lines_from_historical_list_content(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Historical user message with Anthropic-style list content has budget lines stripped."""
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+
+    # Turn 1: user message with budget lines in list content (Anthropic style)
+    append_transcript_entry(
+        run_root, agent_id,
+        {
+            "kind": "user_message",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": (
+                        "# Runtime Capacity Snapshot\n"
+                        "- remaining run time: ~598s\n"
+                        "- remaining agent time: ~598s\n"
+                        "- live agents: 0/16\n"
+                    )},
+                ],
+            },
+        },
+    )
+
+    # Turn 1: assistant response
+    append_transcript_entry(
+        run_root, agent_id,
+        {"kind": "assistant_response", "message": {"role": "assistant", "content": "Researching."}},
+    )
+
+    # Turn 2: pending user message (no model activity after it)
+    append_transcript_entry(
+        run_root, agent_id,
+        {
+            "kind": "user_message",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "# Runtime Delta\n- remaining run time: ~60s\n"}],
+            },
+        },
+    )
+
+    messages = _transcript_messages(str(run_root), agent_id)
+    historical = messages[0]
+    pending = messages[-1]
+
+    # Historical: budget lines stripped from list text block
+    assert historical["role"] == "user"
+    assert isinstance(historical["content"], list)
+    historical_text = historical["content"][0]["text"]
+    assert "remaining run time" not in historical_text
+    assert "remaining agent time" not in historical_text
+    assert "live agents: 0/16" in historical_text
+
+    # Pending: budget lines preserved
+    assert pending["role"] == "user"
+    assert isinstance(pending["content"], list)
+    pending_text = pending["content"][0]["text"]
+    assert "remaining run time: ~60s" in pending_text
+
+
+def test_transcript_replay_no_pending_strips_latest_user_message(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When there is no pending user message (no model activity follows),
+    the latest user message is still historical and gets stripped."""
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+
+    # Only one user message, no model activity after it
+    append_transcript_entry(
+        run_root, agent_id,
+        {
+            "kind": "user_message",
+            "message": {
+                "role": "user",
+                "content": (
+                    "# Runtime Capacity Snapshot\n"
+                    "- remaining run time: ~598s\n"
+                ),
+            },
+        },
+    )
+
+    messages = _transcript_messages(str(run_root), agent_id)
+    assert len(messages) == 1
+    assert "remaining run time" not in messages[0]["content"]
+
+
+def test_transcript_replay_non_user_messages_unaffected_by_strip(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Assistant and tool messages are not affected by the budget-line strip."""
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+
+    append_transcript_entry(
+        run_root, agent_id,
+        {
+            "kind": "user_message",
+            "message": {
+                "role": "user",
+                "content": "# Task\n- remaining run time: ~598s\nDo analysis.",
+            },
+        },
+    )
+    append_transcript_entry(
+        run_root, agent_id,
+        {
+            "kind": "assistant_response",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "- remaining run time: ~598s\nResearching now."}],
+            },
+        },
+    )
+
+    messages = _transcript_messages(str(run_root), agent_id)
+    for msg in messages:
+        if msg["role"] == "assistant":
+            content = msg["content"]
+            if isinstance(content, list):
+                content = content[0]["text"]
+            assert "remaining run time" in content  # assistants NOT stripped
