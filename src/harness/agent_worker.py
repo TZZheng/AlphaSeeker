@@ -80,6 +80,7 @@ class WorkerLoopState:
     pending_commenter_gate_id: str | None = None
     native_initial_prompt_sent: bool = False
     soft_stop_delta_sent: bool = False
+    final_status_required: bool = False
 
 
 @dataclass
@@ -961,6 +962,22 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
                     soft_time_limit_active=soft_time_limit_active,
                 )
                 if native_result == "continue":
+                    # After soft-stop, if the agent published all deliverables but
+                    # did not call status("done"), prompt it to do so in a stripped-down turn.
+                    if (
+                        soft_time_limit_active
+                        and not state.final_status_required
+                        and _publish_outputs_satisfy_completion(run_root, agent_id)
+                        and read_status(run_root, agent_id) != "done"
+                    ):
+                        state.final_status_required = True
+                        runtime.transport._append_system_prompt_snapshot(reason="final-status-required")
+                        runtime.transport.append_user_text(
+                            "# Final Status Required\n\n"
+                            "All required publish files exist. Call `status(status=\"done\")` "
+                            "now to mark this task complete. Do not do any further research, "
+                            "writing, or delegation. Only call status."
+                        )
                     continue
                 if native_result == "stop" or read_status(run_root, agent_id) in TERMINAL_STATUSES:
                     break
