@@ -11,6 +11,8 @@ from src.harness.artifacts import (
     latest_agent_records,
     read_status,
     read_text,
+    remaining_agent_seconds,
+    remaining_run_seconds,
     write_text_atomic,
 )
 from src.harness.presets import PRESET_EXPLANATIONS, render_budget_snapshot
@@ -203,6 +205,8 @@ def _budget_snapshot(request: HarnessRequest, run_root: str, agent_id: str) -> d
         "live_agents": live_agents,
         "remaining_agent_slots": max(0, request.max_agents_per_run - len(records)),
         "remaining_live_child_slots": max(0, request.max_live_children_per_parent - live_children),
+        "remaining_run_seconds": remaining_run_seconds(request, run_root),
+        "remaining_agent_seconds": remaining_agent_seconds(request, run_root, agent_id),
     }
 
 
@@ -223,7 +227,9 @@ def _agent_lineage(run_root: str, agent_id: str) -> tuple[int, str]:
     return depth, " -> ".join(chain) if chain else "None"
 
 
-def _render_runtime_snapshot(*, request: HarnessRequest, run_root: str, agent_id: str) -> str:
+def _render_runtime_snapshot(
+    *, request: HarnessRequest, run_root: str, agent_id: str, show_budget_time: bool = False,
+) -> str:
     records = latest_agent_records(run_root)
     current = records.get(agent_id)
     depth, lineage = _agent_lineage(run_root, agent_id)
@@ -256,11 +262,21 @@ def _render_runtime_snapshot(*, request: HarnessRequest, run_root: str, agent_id
         "## Children",
         _children_overview(run_root, agent_id),
     ]
+    if show_budget_time:
+        remaining = budget_snapshot.get("remaining_run_seconds", 0)
+        sections.extend([
+            "",
+            "## Planning Time",
+            f"- available planning time: ~{remaining}s of wall-clock budget remain.",
+            "- Use this estimate to decide research depth: more time allows deeper analysis; less time suggests scoping down to essentials.",
+            "- Focus on producing the best deliverable within the remaining run time.",
+        ])
     return "\n".join(sections)
 
 
 def _render_runtime_history(
     *,
+    request: HarnessRequest,
     run_root: str,
     agent_id: str,
     previous_error: str | None,
@@ -280,10 +296,12 @@ def _render_runtime_history(
     if soft_stop_active:
         record = latest_agent_records(run_root).get(agent_id)
         is_root = record is None or not record.parent_id
+        remaining = remaining_run_seconds(request, run_root)
         sections.extend(
             [
                 "",
                 "## Soft-Stop Mode",
+                f"- remaining run time: ~{remaining}s",
                 *_soft_stop_guidance_lines(is_root=is_root),
             ]
         )
@@ -292,6 +310,7 @@ def _render_runtime_history(
 
 def build_agent_runtime_delta_prompt(
     *,
+    request: HarnessRequest,
     run_root: str,
     agent_id: str,
     previous_error: str | None,
@@ -310,10 +329,12 @@ def build_agent_runtime_delta_prompt(
         has_content = True
         record = latest_agent_records(run_root).get(agent_id)
         is_root = record is None or not record.parent_id
+        remaining = remaining_run_seconds(request, run_root)
         sections.extend(
             [
                 "",
                 "## Soft-Stop Mode",
+                f"- remaining run time: ~{remaining}s",
                 *_soft_stop_guidance_lines(is_root=is_root),
             ]
         )
@@ -350,6 +371,7 @@ def build_agent_prompt_bundle(
     previous_error: str | None = None,
     comment_feed: str | None = None,
     soft_stop_active: bool = False,
+    show_budget_time: bool = False,
 ) -> PromptBundle:
     tools_text = sync_agent_tools_markdown(
         run_root=run_root,
@@ -384,13 +406,14 @@ def build_agent_prompt_bundle(
         PromptSection(
             "runtime_snapshot",
             "user",
-            _render_runtime_snapshot(request=request, run_root=run_root, agent_id=agent_id),
+            _render_runtime_snapshot(request=request, run_root=run_root, agent_id=agent_id, show_budget_time=show_budget_time),
             protected=False,
         ),
         PromptSection(
             "runtime_history",
             "user",
             _render_runtime_history(
+                request=request,
                 run_root=run_root,
                 agent_id=agent_id,
                 previous_error=previous_error,

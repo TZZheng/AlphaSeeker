@@ -93,14 +93,19 @@ def visible_skills_for_preset(
 
 
 def render_budget_snapshot(*, request: HarnessRequest, snapshot: dict[str, int]) -> str:
-    return "\n".join(
-        [
-            "# Runtime Capacity Snapshot",
-            "",
-            f"- total agents created: {snapshot['created_agents']}/{request.max_agents_per_run}",
-            f"- live agents: {snapshot['live_agents']}/{request.max_live_agents}",
-            f"- remaining agent slots: {snapshot['remaining_agent_slots']}",
-            f"- live children per parent cap: {request.max_live_children_per_parent}",
-            f"- remaining live child slots: {snapshot['remaining_live_child_slots']}",
-        ]
-    )
+    lines = [
+        "# Runtime Capacity Snapshot",
+        "",
+        f"- total agents created: {snapshot['created_agents']}/{request.max_agents_per_run}",
+        f"- live agents: {snapshot['live_agents']}/{request.max_live_agents}",
+        f"- remaining agent slots: {snapshot['remaining_agent_slots']}",
+        f"- live children per parent cap: {request.max_live_children_per_parent}",
+        f"- remaining live child slots: {snapshot['remaining_live_child_slots']}",
+    ]
+    remaining_run = snapshot.get("remaining_run_seconds")
+    if remaining_run is not None:
+        lines.append(f"- remaining run time: ~{remaining_run}s")
+    remaining_agent = snapshot.get("remaining_agent_seconds")
+    if remaining_agent is not None:
+        lines.append(f"- remaining agent time: ~{remaining_agent}s")
+    return "\n".join(lines)

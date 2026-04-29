@@ -148,6 +148,7 @@ def _current_prompt_bundle(
     previous_error: str | None = None,
     comment_feed: str | None = None,
     soft_stop_active: bool = False,
+    show_budget_time: bool = False,
 ):
     response_mode = "text_json" if transport_name == "text_json" else "native_tools"
     visible_skills = visible_skills_for_preset(
@@ -165,6 +166,7 @@ def _current_prompt_bundle(
         previous_error=previous_error,
         comment_feed=comment_feed,
         soft_stop_active=soft_stop_active,
+        show_budget_time=show_budget_time,
     )
 
 
@@ -187,6 +189,7 @@ def _native_pending_user_prompt(
     ):
         return full_user_prompt, True
     delta_prompt = build_agent_runtime_delta_prompt(
+        request=runtime.session.request,
         run_root=runtime.session.run_root,
         agent_id=runtime.session.agent_id,
         previous_error=previous_error,
@@ -475,7 +478,7 @@ def _soft_time_limit_active(run_root: str, agent_id: str, runtime: WorkerRuntime
     return remaining_agent <= 0
 
 
-def _build_turn_prompt(runtime: WorkerRuntime, state: WorkerLoopState, *, soft_stop_active: bool) -> TurnPrompt:
+def _build_turn_prompt(runtime: WorkerRuntime, state: WorkerLoopState, *, soft_stop_active: bool, show_budget_time: bool = False) -> TurnPrompt:
     comment_feed, injected_comment_count = build_comment_feed_message(runtime.session.run_root, runtime.session.agent_id)
     prompt_bundle = _current_prompt_bundle(
         runtime.session,
@@ -483,6 +486,7 @@ def _build_turn_prompt(runtime: WorkerRuntime, state: WorkerLoopState, *, soft_s
         previous_error=state.previous_error,
         comment_feed=comment_feed,
         soft_stop_active=soft_stop_active,
+        show_budget_time=show_budget_time,
     )
     native_user_prompt, native_user_prompt_is_initial = (
         _native_pending_user_prompt(
@@ -663,6 +667,7 @@ def _prepare_native_turn(
             previous_error=prompt.previous_error,
             comment_feed=prompt.comment_feed,
             soft_stop_active=soft_time_limit_active,
+            show_budget_time=show_budget_time,
         )
         system_prompt = prompt_bundle.system_prompt
         user_prompt, user_prompt_is_initial = _native_pending_user_prompt(
@@ -907,9 +912,11 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
             if not _wait_before_next_turn(run_root, agent_id, runtime, state):
                 break
             soft_time_limit_active = _soft_time_limit_active(run_root, agent_id, runtime, state)
+            is_first_turn = not _transcript_has_user_message(run_root, agent_id)
+            show_budget_time = is_first_turn or soft_time_limit_active
 
             try:
-                prompt = _build_turn_prompt(runtime, state, soft_stop_active=soft_time_limit_active)
+                prompt = _build_turn_prompt(runtime, state, soft_stop_active=soft_time_limit_active, show_budget_time=show_budget_time)
                 state.previous_error = None
                 if runtime.transport_name == "text_json":
                     _execute_text_json_turn(

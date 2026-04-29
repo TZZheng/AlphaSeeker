@@ -416,6 +416,7 @@ def test_runtime_delta_prompt_only_includes_out_of_band_changes(
     run_root, agent_id, _request = _create_workspace(monkeypatch, tmp_path, preset="research")
 
     empty_delta = build_agent_runtime_delta_prompt(
+        request=_request,
         run_root=str(run_root),
         agent_id=agent_id,
         previous_error=None,
@@ -423,6 +424,7 @@ def test_runtime_delta_prompt_only_includes_out_of_band_changes(
         soft_stop_active=False,
     )
     delta = build_agent_runtime_delta_prompt(
+        request=_request,
         run_root=str(run_root),
         agent_id=agent_id,
         previous_error="Need to call a valid tool.",
@@ -437,6 +439,7 @@ def test_runtime_delta_prompt_only_includes_out_of_band_changes(
     assert "Need to call a valid tool." in delta
     assert "Comment Feed" in delta
     assert "Soft-stop mode is active" in delta
+    assert "remaining run time:" in delta
     assert "final model turn" in delta
     assert 'status tool with status="done"' in delta
 
