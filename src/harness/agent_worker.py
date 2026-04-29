@@ -938,27 +938,22 @@ def run_agent_worker(run_root: str, agent_id: str) -> int:
                     and read_status(run_root, agent_id) not in TERMINAL_STATUSES
                 ):
                     state.final_status_required = True
-                    status_specs = tool_specs_for_names(["status"])
-                    runtime.transport.update_system_prompt(
-                        "# Final Status Required\n\n"
-                        "You have only one tool available: `status`. "
-                        "Call `status(status=\"done\")` now to mark this task complete."
+                    status_prepared = NativeTurnPreparation(
+                        system_prompt=(
+                            "# Final Status Required\n\n"
+                            "You have only one tool available: `status`. "
+                            "Call `status(status=\"done\")` now to mark this task complete."
+                        ),
+                        user_prompt="# Final Status Required\n\nCall status(status=\"done\") now.",
+                        user_prompt_is_initial=False,
+                        tool_specs=tool_specs_for_names(["status"]),
+                        hard_overflow=False,
                     )
-                    runtime.transport.append_user_text(
-                        "# Final Status Required\n\n"
-                        "All required publish files exist. "
-                        "Call `status(status=\"done\")` now."
+                    native_result = _execute_native_turn(
+                        run_root, agent_id, runtime, state, prompt, status_prepared,
+                        soft_time_limit_active=True,
                     )
-                    # Execute a transport-level turn with status-only specs
-                    turn_result = runtime.transport.execute_turn(status_specs)
-                    # Execute any tool calls the model made
-                    tool_results = []
-                    for tc in turn_result.tool_calls:
-                        result = execute_model_tool(runtime.session, tc.name, tc.arguments)
-                        tool_results.append(result)
-                    if tool_results:
-                        runtime.transport.append_tool_results(tool_results)
-                    if read_status(run_root, agent_id) in TERMINAL_STATUSES:
+                    if native_result == "stop" or read_status(run_root, agent_id) in TERMINAL_STATUSES:
                         break
                     continue
 
