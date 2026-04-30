@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from src.harness.artifacts import (
     agent_workspace_paths,
+    append_conversation_entry,
     append_transcript_entry,
     create_agent_workspace,
     initialize_run_root,
+    load_conversation_entries,
     load_transcript_entries,
     read_json,
 )
@@ -18,6 +21,8 @@ from src.harness.prompt_builder import render_task_markdown, render_tools_markdo
 from src.harness.registry import build_skill_registry, get_skills_for_packs
 from src.harness.transport import BaseAgentTransport, MiniMaxAnthropicTransport, OpenAINativeTransport
 from src.harness.transport import (
+    _canonicalize_message_for_conversation,
+    _conversation_messages,
     _persist_history_compaction_state,
     _transcript_messages,
     minimax_openai_base_url,
@@ -31,11 +36,13 @@ from src.harness.types import HarnessRequest
 
 class DummyTransport(BaseAgentTransport):
     def append_user_text(self, text: str) -> None:
+        message = {"role": "user", "content": text}
         append_transcript_entry(
             self.run_root,
             self.agent_id,
-            {"kind": "user_message", "message": {"role": "user", "content": text}},
+            {"kind": "user_message", "message": message},
         )
+        self._append_conversation_message(kind="user_message", message=message)
 
     def execute_turn(self, tool_specs: list[dict[str, object]]):  # pragma: no cover - not used in these tests.
         raise NotImplementedError
@@ -168,7 +175,15 @@ class _FakeAnthropicClient:
 
 
 class _FakeOpenAICompletions:
+    def __init__(self, responses: list[object] | None = None) -> None:
+        self.calls: list[dict[str, object]] = []
+        self._responses = list(responses or [])
+
     def create(self, **_kwargs: object) -> object:
+        self.calls.append(dict(_kwargs))
+        if self._responses:
+            return self._responses.pop(0)
+
         class _FakeChoice:
             finish_reason = "stop"
 
@@ -183,11 +198,37 @@ class _FakeOpenAICompletions:
 
 
 class _FakeOpenAIClient:
-    def __init__(self) -> None:
-        class _FakeChat:
-            completions = _FakeOpenAICompletions()
+    def __init__(self, responses: list[object] | None = None) -> None:
+        self.completions = _FakeOpenAICompletions(responses)
 
+        class _FakeChat:
+            pass
+
+        _FakeChat.completions = self.completions
         self.chat = _FakeChat()
+
+
+def _fake_openai_tool_call(call_id: str, name: str, arguments: dict[str, object]) -> object:
+    return SimpleNamespace(
+        id=call_id,
+        function=SimpleNamespace(name=name, arguments=json.dumps(arguments, ensure_ascii=True)),
+    )
+
+
+def _fake_openai_response(
+    *,
+    content: str | None = "done",
+    tool_calls: list[object] | None = None,
+    finish_reason: str = "stop",
+) -> object:
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                finish_reason=finish_reason,
+                message=SimpleNamespace(content=content, tool_calls=tool_calls or []),
+            )
+        ]
+    )
 
 
 class _FakeSummaryLLM:
@@ -233,6 +274,30 @@ def _create_agent_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
         ),
     )
     return Path(run_root), agent_id
+
+
+def _append_model_visible_entry(
+    run_root: Path,
+    agent_id: str,
+    *,
+    kind: str,
+    message: dict[str, object],
+    transport: str = "test",
+) -> None:
+    append_transcript_entry(run_root, agent_id, {"kind": kind, "message": message})
+    canonical_message = _canonicalize_message_for_conversation(message, entry_kind=kind)
+    if canonical_message is None:
+        return
+    append_conversation_entry(
+        run_root,
+        agent_id,
+        {
+            "kind": kind,
+            "transport": transport,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "message": canonical_message,
+        },
+    )
 
 
 def test_auto_transport_routing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -291,6 +356,171 @@ def test_transport_initialization_logs_system_prompt_snapshot(
     assert entries[2]["system_prompt"] == "System v2"
     assert Path(entries[0]["artifact_path"]).exists()
     assert Path(entries[2]["artifact_path"]).exists()
+
+
+def test_workspace_initializes_empty_canonical_conversation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+    conversation_path = agent_workspace_paths(run_root, agent_id)["conversation"]
+
+    assert conversation_path.exists()
+    assert load_conversation_entries(run_root, agent_id) == []
+
+
+def test_canonical_conversation_appends_model_visible_rows_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+    transport = DummyTransport(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name="gpt-4o",
+        system_prompt="System v1",
+    )
+
+    transport.append_user_text("Turn 1")
+    _append_model_visible_entry(
+        run_root,
+        agent_id,
+        kind="assistant_response",
+        message={
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "read", "arguments": '{"path":"publish/final.md"}'},
+                }
+            ],
+        },
+    )
+    _append_model_visible_entry(
+        run_root,
+        agent_id,
+        kind="tool_result",
+        message={"role": "tool", "tool_call_id": "call_1", "content": '{"status":"ok"}'},
+    )
+
+    rows = load_conversation_entries(run_root, agent_id)
+
+    assert [row["kind"] for row in rows] == ["user_message", "assistant_response", "tool_result"]
+    assert all("transport" in row and "created_at" in row and "message" in row for row in rows)
+
+
+@pytest.mark.parametrize(
+    ("transport_name", "assistant_message", "tool_result_message", "tool_result_role"),
+    [
+        (
+            "minimax_anthropic",
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "call_1", "name": "read", "input": {"path": "a.md"}}],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": '{"status":"ok"}'}],
+            },
+            "user",
+        ),
+        (
+            "anthropic",
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "call_1", "name": "read", "input": {"path": "a.md"}}],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": '{"status":"ok"}'}],
+            },
+            "user",
+        ),
+        (
+            "minimax_openai",
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read", "arguments": '{"path":"a.md"}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": '{"status":"ok"}'},
+            "tool",
+        ),
+        (
+            "openai",
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read", "arguments": '{"path":"a.md"}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": '{"status":"ok"}'},
+            "tool",
+        ),
+    ],
+)
+def test_canonical_conversation_keeps_tool_results_paired_after_tool_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    transport_name: str,
+    assistant_message: dict[str, object],
+    tool_result_message: dict[str, object],
+    tool_result_role: str,
+) -> None:
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+    append_conversation_entry(
+        run_root,
+        agent_id,
+        {
+            "kind": "user_message",
+            "transport": transport_name,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "message": {"role": "user", "content": "Turn 1"},
+        },
+    )
+    for kind, message in (("assistant_response", assistant_message), ("tool_result", tool_result_message)):
+        canonical_message = _canonicalize_message_for_conversation(message, entry_kind=kind)
+        assert canonical_message is not None
+        append_conversation_entry(
+            run_root,
+            agent_id,
+            {
+                "kind": kind,
+                "transport": transport_name,
+                "created_at": "2026-01-01T00:00:01+00:00",
+                "message": canonical_message,
+            },
+        )
+
+    messages = _conversation_messages(str(run_root), agent_id)
+
+    assert [message["role"] for message in messages] == ["user", "assistant", tool_result_role]
+    assert messages[1]["role"] == "assistant"
+    assert messages[2]["role"] == tool_result_role
+
+
+def test_missing_canonical_conversation_is_hard_cutover_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+    agent_workspace_paths(run_root, agent_id)["conversation"].unlink()
+
+    with pytest.raises(FileNotFoundError, match="Canonical conversation state is missing"):
+        _conversation_messages(str(run_root), agent_id)
 
 
 def test_anthropic_transport_logs_full_turn_request_and_decision(
@@ -360,36 +590,32 @@ def test_anthropic_transport_replay_strips_thinking_blocks(
     )
 
     transport.ensure_initialized("Initial prompt")
-    append_transcript_entry(
+    _append_model_visible_entry(
         run_root,
         agent_id,
-        {
-            "kind": "assistant_response",
-            "message": {
-                "role": "assistant",
-                "content": [
-                    {"type": "thinking", "thinking": "Hidden reasoning."},
-                    {"type": "text", "text": "Visible answer."},
-                    {"type": "tool_use", "id": "call_old", "name": "search_web", "input": {"query": "prior"}},
-                ],
-            },
+        kind="assistant_response",
+        message={
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "Hidden reasoning."},
+                {"type": "text", "text": "Visible answer."},
+                {"type": "tool_use", "id": "call_old", "name": "search_web", "input": {"query": "prior"}},
+            ],
         },
     )
-    append_transcript_entry(
+    _append_model_visible_entry(
         run_root,
         agent_id,
-        {
-            "kind": "tool_result",
-            "message": {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": "call_old",
-                        "content": '{"status":"ok"}',
-                    }
-                ],
-            },
+        kind="tool_result",
+        message={
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call_old",
+                    "content": '{"status":"ok"}',
+                }
+            ],
         },
     )
 
@@ -426,17 +652,15 @@ def test_anthropic_transport_skips_assistant_messages_with_only_thinking(
     )
 
     transport.ensure_initialized("Initial prompt")
-    append_transcript_entry(
+    _append_model_visible_entry(
         run_root,
         agent_id,
-        {
-            "kind": "assistant_response",
-            "message": {
-                "role": "assistant",
-                "content": [
-                    {"type": "thinking", "thinking": "Hidden reasoning only."},
-                ],
-            },
+        kind="assistant_response",
+        message={
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "Hidden reasoning only."},
+            ],
         },
     )
 
@@ -467,16 +691,14 @@ def test_openai_transport_replay_strips_reasoning_content(
     )
 
     transport.ensure_initialized("Initial prompt")
-    append_transcript_entry(
+    _append_model_visible_entry(
         run_root,
         agent_id,
-        {
-            "kind": "assistant_response",
-            "message": {
-                "role": "assistant",
-                "content": "Visible answer.",
-                "reasoning_content": "Hidden reasoning.",
-            },
+        kind="assistant_response",
+        message={
+            "role": "assistant",
+            "content": "Visible answer.",
+            "reasoning_content": "Hidden reasoning.",
         },
     )
 
@@ -489,6 +711,94 @@ def test_openai_transport_replay_strips_reasoning_content(
 
     assert assistant_message["content"] == "Visible answer."
     assert "reasoning_content" not in assistant_message
+
+
+def test_openai_transport_request_uses_canonical_conversation_not_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+    fake_client = _FakeOpenAIClient()
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr("src.harness.transport.OpenAI", lambda **_: fake_client)
+    append_transcript_entry(
+        run_root,
+        agent_id,
+        {"kind": "user_message", "message": {"role": "user", "content": "transcript-only"}},
+    )
+    append_conversation_entry(
+        run_root,
+        agent_id,
+        {
+            "kind": "user_message",
+            "transport": "openai",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "message": {"role": "user", "content": "canonical-only"},
+        },
+    )
+    transport = OpenAINativeTransport(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name="gpt-4o",
+        system_prompt="System v1",
+    )
+
+    transport.execute_turn([])
+
+    rendered_messages = json.dumps(fake_client.completions.calls[0]["messages"], ensure_ascii=True)
+    assert "canonical-only" in rendered_messages
+    assert "transcript-only" not in rendered_messages
+
+
+def test_openai_transport_canonical_request_omits_large_write_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+    huge_content = "A" * 1800 + "FULL_CONTENT_END"
+    fake_client = _FakeOpenAIClient(
+        responses=[
+            _fake_openai_response(
+                content=None,
+                tool_calls=[
+                    _fake_openai_tool_call(
+                        "call_write",
+                        "write",
+                        {"path": "publish/final.md", "content": huge_content},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            _fake_openai_response(content="done"),
+        ]
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr("src.harness.transport.OpenAI", lambda **_: fake_client)
+    transport = OpenAINativeTransport(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name="gpt-4o",
+        system_prompt="System v1",
+    )
+
+    transport.append_user_text("Initial prompt")
+    result = transport.execute_turn([])
+    transport.append_tool_results([{"call_id": "call_write", "result": {"status": "ok"}}])
+    transport.append_user_text("Revise")
+    transport.execute_turn([])
+
+    transcript_response = next(
+        entry for entry in load_transcript_entries(run_root, agent_id) if entry["kind"] == "assistant_response"
+    )
+    raw_arguments = transcript_response["message"]["tool_calls"][0]["function"]["arguments"]
+    second_request_messages = fake_client.completions.calls[1]["messages"]
+    rendered_second_request = json.dumps(second_request_messages, ensure_ascii=True)
+
+    assert result.tool_calls[0].arguments["content"] == huge_content
+    assert "FULL_CONTENT_END" in raw_arguments
+    assert "[omitted " in rendered_second_request
+    assert "read the current file before revising" in rendered_second_request
+    assert "FULL_CONTENT_END" not in rendered_second_request
 
 
 def test_model_request_artifact_records_compaction_preflight_metadata(
@@ -547,15 +857,13 @@ def test_preflight_history_compaction_keeps_full_raw_replay_under_budget(
     for turn_number in range(1, 6):
         if turn_number > 1:
             transport.append_user_text(f"Turn {turn_number}")
-        append_transcript_entry(
+        _append_model_visible_entry(
             run_root,
             agent_id,
-            {
-                "kind": "assistant_response",
-                "message": {
-                    "role": "assistant",
-                    "content": f"Assistant response {turn_number}",
-                },
+            kind="assistant_response",
+            message={
+                "role": "assistant",
+                "content": f"Assistant response {turn_number}",
             },
         )
 
@@ -571,7 +879,7 @@ def test_preflight_history_compaction_keeps_full_raw_replay_under_budget(
         tool_specs=[],
     )
 
-    replay_messages = _transcript_messages(str(run_root), agent_id)
+    replay_messages = _conversation_messages(str(run_root), agent_id)
     replay_user_messages = [message for message in replay_messages if message["role"] == "user"]
 
     assert not result.compaction_changed
@@ -637,15 +945,13 @@ def test_preflight_history_compaction_compacts_oldest_turns_only_when_over_budge
     for turn_number in range(1, 6):
         if turn_number > 1:
             transport.append_user_text(f"Turn {turn_number}")
-        append_transcript_entry(
+        _append_model_visible_entry(
             run_root,
             agent_id,
-            {
-                "kind": "assistant_response",
-                "message": {
-                    "role": "assistant",
-                    "content": f"Assistant response {turn_number}",
-                },
+            kind="assistant_response",
+            message={
+                "role": "assistant",
+                "content": f"Assistant response {turn_number}",
             },
         )
 
@@ -670,7 +976,7 @@ def test_preflight_history_compaction_compacts_oldest_turns_only_when_over_budge
     )
 
     history_summary = agent_workspace_paths(run_root, agent_id)["history_summary"].read_text(encoding="utf-8")
-    replay_messages = _transcript_messages(str(run_root), agent_id)
+    replay_messages = _conversation_messages(str(run_root), agent_id)
     replay_user_messages = [message for message in replay_messages if message["role"] == "user"]
 
     assert result.compaction_changed

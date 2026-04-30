@@ -23,7 +23,9 @@ except ImportError:  # pragma: no cover - optional dependency at runtime
 
 from src.harness.artifacts import (
     agent_workspace_paths,
+    append_conversation_entry,
     append_transcript_entry,
+    load_conversation_entries,
     load_transcript_entries,
     load_transport_state,
     save_transport_state,
@@ -46,6 +48,7 @@ _REPLAY_STRING_LIMIT = 1200
 _SUMMARY_INPUT_CHAR_BUDGET = 20000
 _SUMMARY_OUTPUT_CHAR_LIMIT = 12000
 _TOKEN_FALLBACK_CHARS_PER_TOKEN = 4
+_OMITTED_TOOL_ARGUMENT_HINT = "read the current file before revising"
 
 # Regex to strip stale budget-time lines from replayed user messages.
 _STALE_BUDGET_LINE_RE = re.compile(r"^- remaining (run|agent) time: ~\d+s$", re.MULTILINE)
@@ -223,6 +226,158 @@ def _trim_large_strings(value: Any, *, limit: int = _REPLAY_STRING_LIMIT) -> Any
     if isinstance(value, dict):
         return {key: _trim_large_strings(item, limit=limit) for key, item in value.items()}
     return value
+
+
+def _omitted_large_tool_argument(text: str) -> str:
+    return f"[omitted {len(text)} chars; {_OMITTED_TOOL_ARGUMENT_HINT}]"
+
+
+def _canonicalize_tool_arguments(value: Any, *, limit: int = _REPLAY_STRING_LIMIT) -> Any:
+    if isinstance(value, str):
+        if len(value) > limit:
+            return _omitted_large_tool_argument(value)
+        return value
+    if isinstance(value, list):
+        return [_canonicalize_tool_arguments(item, limit=limit) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _canonicalize_tool_arguments(item, limit=limit)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _message_has_visible_payload(message: dict[str, Any]) -> bool:
+    has_tool_calls = bool(message.get("tool_calls")) or bool(message.get("function_call"))
+    content = message.get("content")
+    if isinstance(content, list):
+        return bool(content) or has_tool_calls
+    if content is None:
+        return has_tool_calls
+    if isinstance(content, str):
+        return bool(content) or has_tool_calls
+    return True
+
+
+def _strip_budget_lines_from_content(content: Any) -> Any:
+    """Strip stale budget-time lines from historical user message content."""
+    if isinstance(content, str):
+        return _STALE_BUDGET_LINE_RE.sub("", content)
+    if isinstance(content, list):
+        result: list[Any] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+                block = dict(block)
+                block["text"] = _STALE_BUDGET_LINE_RE.sub("", block["text"])
+            result.append(block)
+        return result
+    return content
+
+
+def _canonicalize_assistant_message(message: dict[str, Any]) -> dict[str, Any]:
+    canonical = dict(_serialize_payload(message))
+    for key in ("reasoning_content", "reasoning", "reasoning_details"):
+        canonical.pop(key, None)
+
+    content = canonical.get("content")
+    if isinstance(content, list):
+        filtered: list[Any] = []
+        for item in content:
+            if not isinstance(item, dict):
+                filtered.append(item)
+                continue
+            if item.get("type") == "thinking":
+                continue
+            updated = dict(item)
+            if item.get("type") == "tool_use" and isinstance(item.get("input"), dict):
+                updated["input"] = _canonicalize_tool_arguments(item["input"])
+            filtered.append(updated)
+        canonical["content"] = filtered
+
+    tool_calls = canonical.get("tool_calls")
+    if isinstance(tool_calls, list):
+        updated_tool_calls: list[Any] = []
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                updated_tool_calls.append(call)
+                continue
+            updated_call = dict(call)
+            function = updated_call.get("function")
+            if isinstance(function, dict):
+                updated_function = dict(function)
+                arguments = updated_function.get("arguments")
+                if isinstance(arguments, str):
+                    try:
+                        payload = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        if len(arguments) > _REPLAY_STRING_LIMIT:
+                            updated_function["arguments"] = _omitted_large_tool_argument(arguments)
+                    else:
+                        updated_function["arguments"] = json.dumps(
+                            _canonicalize_tool_arguments(payload),
+                            ensure_ascii=True,
+                        )
+                elif arguments is not None:
+                    updated_function["arguments"] = _canonicalize_tool_arguments(arguments)
+                updated_call["function"] = updated_function
+            updated_tool_calls.append(updated_call)
+        canonical["tool_calls"] = updated_tool_calls
+
+    function_call = canonical.get("function_call")
+    if isinstance(function_call, dict):
+        updated_call = dict(function_call)
+        arguments = updated_call.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                payload = json.loads(arguments)
+            except json.JSONDecodeError:
+                if len(arguments) > _REPLAY_STRING_LIMIT:
+                    updated_call["arguments"] = _omitted_large_tool_argument(arguments)
+            else:
+                updated_call["arguments"] = json.dumps(
+                    _canonicalize_tool_arguments(payload),
+                    ensure_ascii=True,
+                )
+        elif arguments is not None:
+            updated_call["arguments"] = _canonicalize_tool_arguments(arguments)
+        canonical["function_call"] = updated_call
+    return canonical
+
+
+def _canonicalize_message_for_conversation(
+    message: dict[str, Any],
+    *,
+    entry_kind: str,
+) -> dict[str, Any] | None:
+    serialized = _serialize_payload(message)
+    if not isinstance(serialized, dict):
+        return None
+    role = str(serialized.get("role") or "")
+    if role == "assistant":
+        canonical = _canonicalize_assistant_message(serialized)
+    else:
+        canonical = dict(serialized)
+    if not _message_has_visible_payload(canonical):
+        return None
+    return canonical
+
+
+def _sanitize_conversation_message(
+    message: dict[str, Any],
+    *,
+    entry_kind: str,
+    preserve_tool_result: bool = False,
+) -> dict[str, Any] | None:
+    role = str(message.get("role") or "")
+    if role == "assistant":
+        sanitized = _canonicalize_assistant_message(message)
+    elif entry_kind == "tool_result" and not preserve_tool_result:
+        sanitized = _sanitize_tool_result_message(message)
+    else:
+        sanitized = dict(message)
+    if not _message_has_visible_payload(sanitized):
+        return None
+    return sanitized
 
 
 def _assistant_message_has_tool_calls(message: dict[str, Any]) -> bool:
@@ -614,23 +769,6 @@ def _transcript_messages(
     if latest_user_idx > latest_model_activity_idx:
         pending_user_entry = replay_entries[latest_user_idx]
 
-    def _strip_budget_lines_from_content(content: Any) -> Any:
-        """Strip stale budget-time lines from user message content.
-        Handles string content (OpenAI style) and list content (Anthropic style).
-        """
-        if isinstance(content, str):
-            stripped = _STALE_BUDGET_LINE_RE.sub("", content)
-            return stripped
-        if isinstance(content, list):
-            result: list[dict[str, Any]] = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
-                    block = dict(block)
-                    block["text"] = _STALE_BUDGET_LINE_RE.sub("", block["text"])
-                result.append(block)
-            return result
-        return content
-
     messages: list[dict[str, Any]] = []
     for entry in _clean_replay_entries(replay_entries):
         if not isinstance(entry, dict):
@@ -653,6 +791,56 @@ def _transcript_messages(
             ):
                 message["content"] = _strip_budget_lines_from_content(message.get("content"))
             messages.append(message)
+    return messages
+
+
+def _conversation_messages(
+    run_root: str,
+    agent_id: str,
+    *,
+    entries: list[dict[str, Any]] | None = None,
+    compacted_turns_override: int | None = None,
+) -> list[dict[str, Any]]:
+    entries = entries if entries is not None else load_conversation_entries(run_root, agent_id)
+    compacted_turns = _current_compacted_user_turns(run_root, agent_id) if compacted_turns_override is None else max(0, compacted_turns_override)
+    turn_starts = _user_turn_start_indices(entries)
+    if compacted_turns > 0 and compacted_turns < len(turn_starts):
+        replay_entries = entries[turn_starts[compacted_turns] :]
+    elif compacted_turns >= len(turn_starts) and turn_starts:
+        replay_entries = []
+    else:
+        replay_entries = entries
+
+    unconsumed_tool_result = _latest_unconsumed_tool_result_entry(replay_entries)
+    pending_user_entry = None
+    latest_user_idx = -1
+    latest_model_activity_idx = -1
+    for index, entry in enumerate(replay_entries):
+        kind = str(entry.get("kind") or "")
+        if kind == "user_message":
+            latest_user_idx = index
+        elif kind in {"model_request", "assistant_response", "tool_result"}:
+            latest_model_activity_idx = index
+    if latest_user_idx > latest_model_activity_idx:
+        pending_user_entry = replay_entries[latest_user_idx]
+
+    messages: list[dict[str, Any]] = []
+    for entry in _clean_replay_entries(replay_entries):
+        if not isinstance(entry, dict):
+            continue
+        raw_message = entry.get("message")
+        if not isinstance(raw_message, dict):
+            continue
+        message = _sanitize_conversation_message(
+            raw_message,
+            entry_kind=str(entry.get("kind") or ""),
+            preserve_tool_result=entry is unconsumed_tool_result,
+        )
+        if message is None:
+            continue
+        if entry is not pending_user_entry and message.get("role") == "user":
+            message["content"] = _strip_budget_lines_from_content(message.get("content"))
+        messages.append(message)
     return messages
 
 
@@ -770,9 +958,9 @@ def preflight_history_compaction(
     pending_user_prompt: str | None,
     tool_specs: list[dict[str, Any]],
 ) -> HistoryCompactionPreflightResult:
-    entries = load_transcript_entries(run_root, agent_id)
+    entries = load_conversation_entries(run_root, agent_id)
     current_compacted_turns = min(_current_compacted_user_turns(run_root, agent_id), len(_user_turn_start_indices(entries)))
-    transcript_messages = _transcript_messages(
+    conversation_messages = _conversation_messages(
         run_root,
         agent_id,
         entries=entries,
@@ -783,7 +971,7 @@ def preflight_history_compaction(
         model_name=model_name,
         system_prompt=system_prompt,
         tool_specs=tool_specs,
-        transcript_messages=transcript_messages,
+        transcript_messages=conversation_messages,
         pending_user_prompt=pending_user_prompt,
     )
 
@@ -797,7 +985,7 @@ def preflight_history_compaction(
             model_name=model_name,
             system_prompt=system_prompt,
             tool_specs=tool_specs,
-            transcript_messages=_transcript_messages(
+            transcript_messages=_conversation_messages(
                 run_root,
                 agent_id,
                 entries=entries,
@@ -896,6 +1084,21 @@ class BaseAgentTransport:
         path = self._llm_turns_root() / f"{turn_index:04d}_{suffix}.json"
         write_json_atomic(path, payload)
         return str(path)
+
+    def _append_conversation_message(self, *, kind: str, message: dict[str, Any]) -> None:
+        canonical_message = _canonicalize_message_for_conversation(message, entry_kind=kind)
+        if canonical_message is None:
+            return
+        append_conversation_entry(
+            self.run_root,
+            self.agent_id,
+            {
+                "kind": kind,
+                "transport": self.transport_name,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "message": canonical_message,
+            },
+        )
 
     def _append_system_prompt_snapshot(self, *, reason: str) -> None:
         version = self._next_counter("system_prompt_version")
@@ -1023,6 +1226,7 @@ class BaseAgentTransport:
                 },
             },
         )
+        self._append_conversation_message(kind="assistant_response", message=assistant_message)
 
     def ensure_initialized(self, initial_user_prompt: str) -> None:
         meta = load_transport_state(self.run_root, self.agent_id)
@@ -1071,14 +1275,15 @@ class MiniMaxAnthropicTransport(BaseAgentTransport):
             self.agent_id,
             {"kind": "user_message", "message": message},
         )
+        self._append_conversation_message(kind="user_message", message=message)
 
     def execute_turn(self, tool_specs: list[dict[str, Any]]) -> ModelTurnResult:
-        transcript_messages = _transcript_messages(self.run_root, self.agent_id)
+        conversation_messages = _conversation_messages(self.run_root, self.agent_id)
         request_payload = _build_request_payload(
             transport_name=self.transport_name,
             model_name=self.model_name,
             system_prompt=self.system_prompt,
-            transcript_messages=transcript_messages,
+            transcript_messages=conversation_messages,
             tool_specs=tool_specs,
         )
         turn_index, request_artifact_path = self._record_model_request(
@@ -1362,6 +1567,7 @@ class MiniMaxAnthropicTransport(BaseAgentTransport):
             self.agent_id,
             {"kind": "tool_result", "message": message},
         )
+        self._append_conversation_message(kind="tool_result", message=message)
 
 
 class MiniMaxOpenAITransport(BaseAgentTransport):
@@ -1381,13 +1587,14 @@ class MiniMaxOpenAITransport(BaseAgentTransport):
             self.agent_id,
             {"kind": "user_message", "message": message},
         )
+        self._append_conversation_message(kind="user_message", message=message)
 
     def execute_turn(self, tool_specs: list[dict[str, Any]]) -> ModelTurnResult:
         request_payload = _build_request_payload(
             transport_name=self.transport_name,
             model_name=self.model_name,
             system_prompt=self.system_prompt,
-            transcript_messages=_transcript_messages(self.run_root, self.agent_id),
+            transcript_messages=_conversation_messages(self.run_root, self.agent_id),
             tool_specs=tool_specs,
         )
         turn_index, request_artifact_path = self._record_model_request(
@@ -1458,6 +1665,7 @@ class MiniMaxOpenAITransport(BaseAgentTransport):
                 self.agent_id,
                 {"kind": "tool_result", "message": message},
             )
+            self._append_conversation_message(kind="tool_result", message=message)
 
 
 class AnthropicNativeTransport(BaseAgentTransport):
@@ -1481,14 +1689,15 @@ class AnthropicNativeTransport(BaseAgentTransport):
             self.agent_id,
             {"kind": "user_message", "message": message},
         )
+        self._append_conversation_message(kind="user_message", message=message)
 
     def execute_turn(self, tool_specs: list[dict[str, Any]]) -> ModelTurnResult:
-        transcript_messages = _transcript_messages(self.run_root, self.agent_id)
+        conversation_messages = _conversation_messages(self.run_root, self.agent_id)
         request_payload = _build_request_payload(
             transport_name=self.transport_name,
             model_name=self.model_name,
             system_prompt=self.system_prompt,
-            transcript_messages=transcript_messages,
+            transcript_messages=conversation_messages,
             tool_specs=tool_specs,
         )
         turn_index, request_artifact_path = self._record_model_request(
@@ -1695,6 +1904,7 @@ class AnthropicNativeTransport(BaseAgentTransport):
             self.agent_id,
             {"kind": "tool_result", "message": message},
         )
+        self._append_conversation_message(kind="tool_result", message=message)
 
 
 class OpenAINativeTransport(BaseAgentTransport):
@@ -1714,13 +1924,14 @@ class OpenAINativeTransport(BaseAgentTransport):
             self.agent_id,
             {"kind": "user_message", "message": message},
         )
+        self._append_conversation_message(kind="user_message", message=message)
 
     def execute_turn(self, tool_specs: list[dict[str, Any]]) -> ModelTurnResult:
         request_payload = _build_request_payload(
             transport_name=self.transport_name,
             model_name=self.model_name,
             system_prompt=self.system_prompt,
-            transcript_messages=_transcript_messages(self.run_root, self.agent_id),
+            transcript_messages=_conversation_messages(self.run_root, self.agent_id),
             tool_specs=tool_specs,
         )
         turn_index, request_artifact_path = self._record_model_request(
@@ -1796,6 +2007,7 @@ class OpenAINativeTransport(BaseAgentTransport):
                 self.agent_id,
                 {"kind": "tool_result", "message": message},
             )
+            self._append_conversation_message(kind="tool_result", message=message)
 
 
 def create_transport(

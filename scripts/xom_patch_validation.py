@@ -31,7 +31,9 @@ DEFAULT_PROMPT = (
 )
 DEFAULT_BASELINE_RUN_ID = "xom-edit-baseline"
 DEFAULT_POSTFIX_RUN_ID = "xom-edit-patch-v1"
-EDIT_TOOLS = {"edit_file", "apply_patch", "write_file"}
+READ_TOOLS = {"read", "read_file"}
+EDIT_TOOLS = {"edit", "edit_file", "patch", "apply_patch", "write", "write_file"}
+REVISION_TOOLS = {"edit", "edit_file", "patch", "apply_patch"}
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -118,6 +120,40 @@ def _error_from_event(event: dict[str, Any]) -> str:
     return str(details.get("error") or "")
 
 
+def _patch_target_path(patch: str) -> str:
+    for line in patch.splitlines():
+        stripped = line.strip()
+        for prefix in ("*** Update File: ", "*** Add File: ", "*** Delete File: "):
+            if stripped.startswith(prefix):
+                return stripped.removeprefix(prefix).strip()
+    return ""
+
+
+def _normalize_tool_path(run_root: Path, agent_id: str, raw_path: str) -> str:
+    if not raw_path:
+        return ""
+    path = Path(raw_path)
+    if path.is_absolute():
+        return str(path.resolve())
+    workspace = agent_workspace_paths(run_root, agent_id)["workspace"]
+    return str((workspace / path).resolve())
+
+
+def _path_from_event(run_root: Path, event: dict[str, Any]) -> str:
+    agent_id = str(event.get("agent_id") or "")
+    result = _result_from_event(event)
+    arguments = _arguments_from_event(event)
+    raw_path = str(result.get("path") or arguments.get("path") or "")
+    artifact_paths = result.get("artifact_paths") or arguments.get("artifact_paths")
+    if not raw_path and isinstance(artifact_paths, list) and artifact_paths:
+        first_path = artifact_paths[0]
+        raw_path = first_path if isinstance(first_path, str) else ""
+    patch = arguments.get("patch")
+    if not raw_path and isinstance(patch, str):
+        raw_path = _patch_target_path(patch)
+    return _normalize_tool_path(run_root, agent_id, raw_path)
+
+
 def _collect_edit_events(run_root: Path) -> list[dict[str, Any]]:
     events_path = registry_paths(run_root)["events_registry"]
     rows: list[dict[str, Any]] = []
@@ -134,10 +170,41 @@ def _collect_edit_events(run_root: Path) -> list[dict[str, Any]]:
                 "event_type": event_type,
                 "agent_id": event.get("agent_id"),
                 "tool_name": tool_name,
-                "path": result.get("path") or arguments.get("path") or "",
+                "path": _path_from_event(run_root, event),
                 "operation": result.get("operation") or arguments.get("operation") or "",
                 "hunks_applied": result.get("hunks_applied", 0),
                 "error": _error_from_event(event),
+            }
+        )
+    return rows
+
+
+def _collect_read_before_edit_events(run_root: Path) -> list[dict[str, Any]]:
+    events_path = registry_paths(run_root)["events_registry"]
+    latest_read_by_agent_path: dict[tuple[str, str], str] = {}
+    rows: list[dict[str, Any]] = []
+    for event in _read_jsonl(events_path):
+        event_type = str(event.get("event_type") or "")
+        if event_type not in {"tool_completed", "tool_failed"}:
+            continue
+        agent_id = str(event.get("agent_id") or "")
+        tool_name = _tool_name_from_event(event)
+        path = _path_from_event(run_root, event)
+        if tool_name in READ_TOOLS and path:
+            latest_read_by_agent_path[(agent_id, path)] = str(event.get("created_at") or event.get("timestamp") or "")
+            continue
+        if tool_name not in REVISION_TOOLS:
+            continue
+        read_at = latest_read_by_agent_path.get((agent_id, path), "")
+        rows.append(
+            {
+                "created_at": event.get("created_at") or event.get("timestamp"),
+                "event_type": event_type,
+                "agent_id": agent_id,
+                "tool_name": tool_name,
+                "path": path,
+                "read_before_edit": bool(read_at),
+                "latest_read_at": read_at,
             }
         )
     return rows
@@ -172,6 +239,7 @@ def summarize_run(run_root: Path, *, response: HarnessResponse | None = None) ->
     final_path = root_paths["publish_final"]
     final_text = final_path.read_text(encoding="utf-8") if final_path.exists() else ""
     edit_events = _collect_edit_events(run_root)
+    read_before_edit_events = _collect_read_before_edit_events(run_root)
 
     tool_attempt_counts: dict[str, int] = {name: 0 for name in sorted(EDIT_TOOLS)}
     tool_failure_counts: dict[str, int] = {name: 0 for name in sorted(EDIT_TOOLS)}
@@ -199,8 +267,14 @@ def summarize_run(run_root: Path, *, response: HarnessResponse | None = None) ->
             "failure_count": sum(1 for event in edit_events if event["event_type"] == "tool_failed"),
             "edit_file_failure_count": tool_failure_counts.get("edit_file", 0),
             "used_patch_or_full_rewrite": bool(
-                tool_attempt_counts.get("apply_patch", 0) or tool_attempt_counts.get("write_file", 0)
+                tool_attempt_counts.get("apply_patch", 0)
+                or tool_attempt_counts.get("patch", 0)
+                or tool_attempt_counts.get("write_file", 0)
+                or tool_attempt_counts.get("write", 0)
             ),
+            "read_before_edit_events": read_before_edit_events,
+            "read_before_edit_count": sum(1 for event in read_before_edit_events if event["read_before_edit"]),
+            "read_before_edit_total": len(read_before_edit_events),
         },
         "coverage": _coverage_report(final_text) if final_text else {},
     }

@@ -197,6 +197,7 @@ def agent_workspace_paths(run_root: str | Path, agent_id: str) -> dict[str, Path
         "events_queue": harness_logs / "events_queue.jsonl",
         "skill_state": harness_state / "skill_state.json",
         "transport_state": harness_state / "transport_state.json",
+        "conversation": harness_state / "conversation.jsonl",
         "commenter_state": harness_state / "commenter_state.json",
         "prompt_memory": harness_state / "prompt_memory.md",
         "history_summary": harness_state / "history_summary.md",
@@ -291,6 +292,7 @@ def create_agent_workspace(
     write_text_atomic(paths["parent"], (parent_id or "") + "\n")
     write_text_atomic(paths["preset"], preset + "\n")
     write_text_atomic(paths["transcript"], "")
+    write_text_atomic(paths["conversation"], "")
     write_text_atomic(paths["tool_calls_log"], "")
     write_text_atomic(paths["events_queue"], "")
     write_text_atomic(paths["commenter_comments"], "")
@@ -752,6 +754,28 @@ def load_transcript_entries(run_root: str | Path, agent_id: str) -> list[dict[st
 
 def append_transcript_entry(run_root: str | Path, agent_id: str, payload: dict[str, Any]) -> None:
     append_jsonl(agent_workspace_paths(run_root, agent_id)["transcript"], payload)
+
+
+def _missing_conversation_state_error(path: Path, run_root: str | Path, agent_id: str) -> FileNotFoundError:
+    return FileNotFoundError(
+        "Canonical conversation state is missing for native transport "
+        f"(agent_id={agent_id!r}, run_root={str(run_root)!r}, path={str(path)!r}). "
+        "This run predates the canonical conversation cutover and cannot be resumed with native transports."
+    )
+
+
+def load_conversation_entries(run_root: str | Path, agent_id: str) -> list[dict[str, Any]]:
+    path = agent_workspace_paths(run_root, agent_id)["conversation"]
+    if not path.exists():
+        raise _missing_conversation_state_error(path, run_root, agent_id)
+    return read_jsonl(path)
+
+
+def append_conversation_entry(run_root: str | Path, agent_id: str, payload: dict[str, Any]) -> None:
+    path = agent_workspace_paths(run_root, agent_id)["conversation"]
+    if not path.exists():
+        raise _missing_conversation_state_error(path, run_root, agent_id)
+    append_jsonl(path, payload)
 
 
 def append_tool_call_log(run_root: str | Path, agent_id: str, payload: dict[str, Any]) -> None:
