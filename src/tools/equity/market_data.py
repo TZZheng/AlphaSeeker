@@ -2,6 +2,7 @@ import yfinance as yf
 import pandas as pd
 import os
 from datetime import datetime
+from pathlib import Path
 
 from src.shared.reliability import cached_retry_call
 
@@ -9,7 +10,7 @@ class MarketDataError(Exception):
     """Custom exception for market data errors."""
     pass
 
-def fetch_historical_data(ticker: str, period: str = "1y") -> str:
+def fetch_historical_data(ticker: str, period: str = "1y", output_dir: str | Path | None = None) -> str:
     """
     Fetches historical stock data for the given ticker and period.
     
@@ -35,13 +36,12 @@ def fetch_historical_data(ticker: str, period: str = "1y") -> str:
         if hist.empty:
             raise MarketDataError(f"No data found for ticker '{ticker}' with period '{period}'.")
         
-        # Ensure data directory exists
-        data_dir = os.path.join(os.getcwd(), "data")
-        os.makedirs(data_dir, exist_ok=True)
+        data_dir = Path(output_dir) if output_dir is not None else Path(os.getcwd()) / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
         
         # Save to CSV
         filename = f"{ticker}_{period}_{datetime.now().strftime('%Y%m%d')}.csv"
-        file_path = os.path.join(data_dir, filename)
+        file_path = str(data_dir / filename)
         hist.to_csv(file_path)
         
         return file_path

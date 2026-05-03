@@ -8,6 +8,7 @@ Requires: FRED_API_KEY environment variable (free from https://fred.stlouisfed.o
 """
 
 import os
+from pathlib import Path
 from typing import List, Tuple, Dict, Optional
 
 
@@ -89,6 +90,7 @@ def fetch_fred_series(
     observation_start: Optional[str] = None,
     observation_end: Optional[str] = None,
     limit: int = 60,
+    output_dir: str | Path | None = None,
 ) -> Tuple[str, Dict]:
     """
     Fetches one or more FRED time series and saves as a structured Markdown file.
@@ -197,11 +199,11 @@ def fetch_fred_series(
         markdown_content += "\n---\n\n"
 
     # Save to file
-    save_dir = os.path.join(os.getcwd(), "data")
-    os.makedirs(save_dir, exist_ok=True)
+    save_dir = Path(output_dir) if output_dir is not None else Path(os.getcwd()) / "data"
+    save_dir.mkdir(parents=True, exist_ok=True)
     
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    file_path = os.path.join(save_dir, f"fred_data_{timestamp}.md")
+    file_path = str(save_dir / f"fred_data_{timestamp}.md")
     
     with open(file_path, "w") as f:
         f.write(markdown_content)
@@ -212,6 +214,7 @@ def fetch_fred_series(
 def fetch_macro_indicators(
     topic: str,
     countries: List[str] = [],
+    output_dir: str | Path | None = None,
 ) -> Tuple[str, Dict]:
     """
     High-level convenience function called by the macro planner node.
@@ -230,7 +233,7 @@ def fetch_macro_indicators(
     series_ids = get_series_for_topic(topic)
     
     try:
-        file_path, metadata = fetch_fred_series(series_ids=series_ids, limit=24)
+        file_path, metadata = fetch_fred_series(series_ids=series_ids, limit=24, output_dir=output_dir)
         return file_path, metadata
     except Exception as e:
         print(f"Error fetching FRED data: {e}")

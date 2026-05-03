@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
 import yfinance as yf
@@ -221,6 +222,7 @@ def calculate_roll_yield(
 def fetch_futures_curve(
     asset: str,
     num_contracts: int = 12,
+    output_dir: str | Path | None = None,
 ) -> Tuple[Optional[str], Dict]:
     """
     Fetches the current futures curve for the given commodity and saves as Markdown.
@@ -312,10 +314,10 @@ def fetch_futures_curve(
         "curve_points": len(curve_points),
     }
 
-    save_dir = os.path.join(os.getcwd(), "data")
-    os.makedirs(save_dir, exist_ok=True)
+    save_dir = Path(output_dir) if output_dir is not None else Path(os.getcwd()) / "data"
+    save_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    file_path = os.path.join(save_dir, f"futures_curve_{timestamp}.md")
+    file_path = str(save_dir / f"futures_curve_{timestamp}.md")
 
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(markdown_content)

@@ -8,6 +8,7 @@ import os
 import requests
 import pandas as pd
 from datetime import datetime
+from pathlib import Path
 from typing import Tuple, Dict, Any, cast
 
 from src.shared.reliability import request_json
@@ -16,7 +17,7 @@ class InsiderTradingError(Exception):
     """Custom exception for insider trading fetch errors."""
     pass
 
-def fetch_insider_activity(ticker: str) -> Tuple[str, Dict[str, Any]]:
+def fetch_insider_activity(ticker: str, output_dir: str | Path | None = None) -> Tuple[str, Dict[str, Any]]:
     """
     Fetches the latest insider trading activity from FMP, parses it, and
     compiles a summary table.
@@ -42,7 +43,7 @@ def fetch_insider_activity(ticker: str) -> Tuple[str, Dict[str, Any]]:
 
         if not data or not isinstance(data, list):
             md = f"# Insider Trading Activity: {ticker}\n\nNo recent insider trading data found for {ticker}."
-            file_path = _save_md(ticker, md)
+            file_path = _save_md(ticker, md, output_dir=output_dir)
             return file_path, {"source": "FMP (Empty)"}
 
         # Convert to DataFrame for easy aggregation
@@ -60,7 +61,7 @@ def fetch_insider_activity(ticker: str) -> Tuple[str, Dict[str, Any]]:
         
         if df.empty:
             md = f"# Insider Trading Activity: {ticker}\n\nNo recent open-market buys/sells found for {ticker}."
-            file_path = _save_md(ticker, md)
+            file_path = _save_md(ticker, md, output_dir=output_dir)
             return file_path, {"source": "FMP (No relevant trades)"}
 
         # Ensure numeric columns
@@ -96,7 +97,7 @@ def fetch_insider_activity(ticker: str) -> Tuple[str, Dict[str, Any]]:
         
         if summary_df.empty:
             md = f"# Insider Trading Activity: {ticker}\n\nNo significant buy/sell volume found in the latest batch."
-            file_path = _save_md(ticker, md)
+            file_path = _save_md(ticker, md, output_dir=output_dir)
             return file_path, {"source": "FMP (No volume)"}
 
         # Sort by Net Value absolute to see largest movers
@@ -115,7 +116,7 @@ def fetch_insider_activity(ticker: str) -> Tuple[str, Dict[str, Any]]:
         md += "## Top Insider Transactions\n"
         md += summary_df.to_markdown(index=False) + "\n"
 
-        file_path = _save_md(ticker, md)
+        file_path = _save_md(ticker, md, output_dir=output_dir)
         
         metadata = {
             "source": "Financial Modeling Prep Free API (Form 4)",
@@ -128,11 +129,11 @@ def fetch_insider_activity(ticker: str) -> Tuple[str, Dict[str, Any]]:
         raise InsiderTradingError(f"Failed to fetch insider trading for {ticker}: {e}")
 
 
-def _save_md(ticker: str, content: str) -> str:
-    data_dir = os.path.join(os.getcwd(), "data")
-    os.makedirs(data_dir, exist_ok=True)
+def _save_md(ticker: str, content: str, output_dir: str | Path | None = None) -> str:
+    data_dir = Path(output_dir) if output_dir is not None else Path(os.getcwd()) / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
     filename = f"{ticker}_insider_trading_{datetime.now().strftime('%Y%m%d')}.md"
-    file_path = os.path.join(data_dir, filename)
+    file_path = str(data_dir / filename)
 
     with open(file_path, "w") as f:
         f.write(content)

@@ -16,7 +16,7 @@ from src.tools.equity.peers import (
 )
 from src.tools.equity.sec_filings import search_and_read_filings
 from src.tools.equity.visualization import plot_price_history
-from src.harness.skills.common import artifact_evidence, json_preview, make_result, note_evidence, safe_read, url_evidence
+from src.harness.skills.common import artifact_evidence, json_preview, make_result, note_evidence, safe_read, skill_artifact_dir, url_evidence
 from src.harness.types import HarnessState, SkillMetrics, SkillResult, SkillSpec
 
 
@@ -36,7 +36,7 @@ def fetch_market_data_skill(arguments: dict[str, Any], _state: HarnessState) -> 
             error="Missing ticker.",
         )
 
-    path = fetch_historical_data(ticker, period)
+    path = fetch_historical_data(ticker, period, output_dir=skill_artifact_dir(_state, "equity"))
     return make_result(
         "fetch_market_data",
         arguments,
@@ -66,7 +66,7 @@ def plot_price_history_skill(arguments: dict[str, Any], _state: HarnessState) ->
             error="Missing data_path or ticker.",
         )
 
-    chart_path = plot_price_history(data_path, ticker)
+    chart_path = plot_price_history(data_path, ticker, output_dir=skill_artifact_dir(_state, "equity", "charts"))
     return make_result(
         "plot_price_history",
         arguments,
@@ -91,7 +91,7 @@ def fetch_company_profile_skill(arguments: dict[str, Any], _state: HarnessState)
             error="Missing ticker.",
         )
 
-    path, metadata = fetch_company_profile(ticker)
+    path, metadata = fetch_company_profile(ticker, output_dir=skill_artifact_dir(_state, "equity"))
     text = safe_read(path, max_chars=5000)
     return make_result(
         "fetch_company_profile",
@@ -121,7 +121,7 @@ def fetch_financials_skill(arguments: dict[str, Any], _state: HarnessState) -> S
             error="Missing ticker.",
         )
 
-    path, metadata = fetch_financial_metrics(ticker)
+    path, metadata = fetch_financial_metrics(ticker, output_dir=skill_artifact_dir(_state, "equity"))
     text = safe_read(path, max_chars=5000)
     return make_result(
         "fetch_financials",
@@ -169,7 +169,7 @@ def search_sec_filings_skill(arguments: dict[str, Any], _state: HarnessState) ->
                 break
         if not profile_metadata:
             try:
-                _, fetched_metadata = fetch_company_profile(ticker)
+                _, fetched_metadata = fetch_company_profile(ticker, output_dir=skill_artifact_dir(_state, "equity"))
             except Exception:
                 fetched_metadata = {}
             if isinstance(fetched_metadata, dict):
@@ -243,7 +243,7 @@ def fetch_insider_activity_skill(arguments: dict[str, Any], _state: HarnessState
             error="Missing ticker.",
         )
 
-    path, metadata = fetch_insider_activity(ticker)
+    path, metadata = fetch_insider_activity(ticker, output_dir=skill_artifact_dir(_state, "equity"))
     if not path:
         return make_result(
             "fetch_insider_activity",
@@ -325,7 +325,7 @@ def analyze_peers_skill(arguments: dict[str, Any], state: HarnessState) -> Skill
 
     candidates = extract_peers_from_text(seed_text)
     categorized = evaluate_candidates(candidates, ticker)
-    path, metadata = fetch_peer_metrics(categorized, target_ticker=ticker)
+    path, metadata = fetch_peer_metrics(categorized, target_ticker=ticker, output_dir=skill_artifact_dir(state, "equity"))
     text = safe_read(path, max_chars=5000)
     return make_result(
         "analyze_peers",
@@ -348,68 +348,120 @@ def analyze_peers_skill(arguments: dict[str, Any], state: HarnessState) -> Skill
 EQUITY_SKILLS = [
     SkillSpec(
         name="fetch_market_data",
-        description="Fetch historical OHLCV market data for an equity ticker.",
+        description="Fetch historical OHLCV market data for price trend, volatility, or chart inputs.",
         pack="equity",
-        input_schema={"ticker": "string", "period": "string"},
+        input_schema={
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "Exchange ticker, for example AAPL."},
+                "period": {
+                    "type": "string",
+                    "default": "1y",
+                    "description": "Yahoo Finance period such as 5d, 1mo, 6mo, 1y, 5y, or max.",
+                },
+            },
+            "required": ["ticker"],
+        },
         produces_artifacts=True,
         executor=fetch_market_data_skill,
     ),
     SkillSpec(
         name="plot_price_history",
-        description="Generate a price chart from a saved market-data file.",
+        description="Generate a PNG price chart from a saved market-data CSV artifact.",
         pack="equity",
-        input_schema={"data_path": "string", "ticker": "string"},
+        input_schema={
+            "type": "object",
+            "properties": {
+                "data_path": {"type": "string", "description": "CSV path returned by fetch_market_data."},
+                "ticker": {"type": "string"},
+            },
+            "required": ["data_path", "ticker"],
+        },
         produces_artifacts=True,
         executor=plot_price_history_skill,
     ),
     SkillSpec(
         name="fetch_company_profile",
-        description="Fetch company profile, sector, industry, and ownership data.",
+        description="Fetch issuer identity, business description, sector, industry, market cap, and holder data.",
         pack="equity",
-        input_schema={"ticker": "string"},
+        input_schema={
+            "type": "object",
+            "properties": {"ticker": {"type": "string", "description": "Equity ticker."}},
+            "required": ["ticker"],
+        },
         produces_artifacts=True,
         executor=fetch_company_profile_skill,
     ),
     SkillSpec(
         name="fetch_financials",
-        description="Fetch income statement, balance sheet, cash flow, and key ratios.",
+        description="Fetch financial statements, cash flow, ratios, and TTM approximations for valuation work.",
         pack="equity",
-        input_schema={"ticker": "string"},
+        input_schema={
+            "type": "object",
+            "properties": {"ticker": {"type": "string", "description": "Equity ticker."}},
+            "required": ["ticker"],
+        },
         produces_artifacts=True,
         executor=fetch_financials_skill,
     ),
     SkillSpec(
         name="search_sec_filings",
-        description="Search and read recent SEC filings for an equity issuer.",
+        description="Search and read recent SEC filings when primary-company disclosures are needed.",
         pack="equity",
         input_schema={
-            "company_name": "string",
-            "ticker": "string",
-            "form_types": "string[]",
-            "max_filings": "integer",
+            "type": "object",
+            "properties": {
+                "company_name": {"type": "string", "description": "Issuer legal or common name."},
+                "ticker": {"type": "string", "description": "Optional ticker used to resolve issuer name."},
+                "form_types": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": ["10-K", "10-Q", "8-K"],
+                },
+                "max_filings": {"type": "integer", "default": 3, "minimum": 1},
+            },
         },
+        produces_artifacts=False,
         executor=search_sec_filings_skill,
     ),
     SkillSpec(
         name="fetch_insider_activity",
-        description="Fetch recent insider trading activity from Form 4-style data sources.",
+        description="Fetch recent insider transaction evidence for management-alignment or governance analysis.",
         pack="equity",
-        input_schema={"ticker": "string"},
+        input_schema={
+            "type": "object",
+            "properties": {"ticker": {"type": "string", "description": "Equity ticker."}},
+            "required": ["ticker"],
+        },
         produces_artifacts=True,
         executor=fetch_insider_activity_skill,
     ),
     SkillSpec(
         name="research_earnings_call",
-        description="Collect and summarize recent earnings-call evidence.",
+        description="Collect recent earnings-call commentary when management tone or guidance is important.",
         pack="equity",
-        input_schema={"ticker": "string", "company_name": "string"},
+        input_schema={
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string"},
+                "company_name": {"type": "string", "description": "Optional company name for better transcript search."},
+            },
+            "required": ["ticker"],
+        },
         executor=research_earnings_call_skill,
     ),
     SkillSpec(
         name="analyze_peers",
-        description="Extract peer candidates, categorize them, and build a peer-comparison artifact.",
+        description="Extract peer candidates from evidence and build a peer-comparison artifact.",
         pack="equity",
-        input_schema={"ticker": "string", "seed_text": "string"},
+        input_schema={
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string"},
+                "seed_text": {"type": "string", "description": "Optional text containing competitor names."},
+            },
+            "required": ["ticker"],
+        },
         produces_artifacts=True,
         executor=analyze_peers_skill,
     ),

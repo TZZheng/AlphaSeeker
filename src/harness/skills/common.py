@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Any
 
+from src.harness.artifacts import agent_workspace_paths
 from src.harness.types import EvidenceItem, SkillMetrics, SkillResult
 
 
@@ -126,3 +128,13 @@ def safe_read(path: str, max_chars: int = 5000) -> str:
     if len(text) > max_chars:
         return text[:max_chars] + f"\n... [truncated at {max_chars} chars]"
     return text
+
+
+def skill_artifact_dir(state: Any, *parts: str) -> Path:
+    if state.run_root and state.agent_id:
+        root = agent_workspace_paths(state.run_root, state.agent_id)["artifacts_root"]
+    else:
+        root = Path(state.workspace_path or ".") / "artifacts"
+    path = root.joinpath(*[part for part in parts if part])
+    path.mkdir(parents=True, exist_ok=True)
+    return path

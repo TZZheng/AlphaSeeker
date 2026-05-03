@@ -95,10 +95,8 @@ def test_commenter_tool_specs_are_read_only_catalog_subset() -> None:
         "start_line",
         "max_lines",
     }
-    assert by_name["grep"]["input_schema"]["properties"]["paths"] == {
-        "type": "array",
-        "items": {"type": "string"},
-    }
+    assert by_name["grep"]["input_schema"]["properties"]["paths"]["type"] == "array"
+    assert by_name["grep"]["input_schema"]["properties"]["paths"]["items"] == {"type": "string"}
 
 
 def test_commenter_and_main_agent_share_readable_workspace_view(

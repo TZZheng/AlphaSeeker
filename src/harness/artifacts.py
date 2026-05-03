@@ -160,7 +160,6 @@ def agent_workspace_paths(run_root: str | Path, agent_id: str) -> dict[str, Path
     artifacts = workspace / "artifacts"
     skills_artifacts = artifacts / "skills"
     search_artifacts = artifacts / "search"
-    reduction_artifacts = artifacts / "reduction"
     harness = workspace / "_harness"
     harness_state = harness / "state"
     harness_logs = harness / "logs"
@@ -181,7 +180,6 @@ def agent_workspace_paths(run_root: str | Path, agent_id: str) -> dict[str, Path
         "artifacts_root": artifacts,
         "skills_artifacts_root": skills_artifacts,
         "search_artifacts_root": search_artifacts,
-        "reduction_artifacts_root": reduction_artifacts,
         "harness_root": harness,
         "harness_state_root": harness_state,
         "harness_logs_root": harness_logs,
@@ -208,21 +206,6 @@ def agent_workspace_paths(run_root: str | Path, agent_id: str) -> dict[str, Path
         "preset": harness_state / "preset.txt",
         "context_root": context_root,
     }
-
-
-def build_reduction_paths(workspace: str | Path) -> dict[str, str]:
-    reduction_root = agent_workspace_paths(Path(workspace).parents[1], Path(workspace).name)["reduction_artifacts_root"]
-    reduction_root.mkdir(parents=True, exist_ok=True)
-    return {
-        "discovered_sources": str(reduction_root / "discovered_sources.json"),
-        "read_queue": str(reduction_root / "read_queue.json"),
-        "read_results": str(reduction_root / "read_results.json"),
-        "source_cards": str(reduction_root / "source_cards.jsonl"),
-        "fact_index": str(reduction_root / "fact_index.json"),
-        "section_briefs": str(reduction_root / "section_briefs.json"),
-        "coverage_matrix": str(reduction_root / "coverage_matrix.json"),
-    }
-
 
 def initialize_run_root(request: HarnessRequest) -> tuple[Path, str]:
     run_root = build_run_root(request)
@@ -272,7 +255,6 @@ def create_agent_workspace(
         "artifacts_root",
         "skills_artifacts_root",
         "search_artifacts_root",
-        "reduction_artifacts_root",
         "harness_root",
         "harness_state_root",
         "harness_logs_root",
@@ -563,11 +545,30 @@ def write_pid(run_root: str | Path, agent_id: str, pid: int) -> None:
     write_text_atomic(agent_workspace_paths(run_root, agent_id)["pid"], f"{pid}\n")
 
 
+DEPRECATED_SKILL_STATE_KEYS = {
+    "dossier_paths",
+    "query_buckets",
+    "discovered_sources",
+    "read_queue",
+    "read_results",
+    "source_cards",
+    "fact_index",
+    "section_briefs",
+    "coverage_matrix",
+    "retrieval_wave_count",
+}
+
+
+def _strip_deprecated_skill_state_keys(payload: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in payload.items() if key not in DEPRECATED_SKILL_STATE_KEYS}
+
+
 def load_skill_state(run_root: str | Path, agent_id: str) -> HarnessState | None:
     path = agent_workspace_paths(run_root, agent_id)["skill_state"]
     payload = read_json(path)
     if not isinstance(payload, dict):
         return None
+    payload = _strip_deprecated_skill_state_keys(payload)
     return HarnessState.model_validate(payload)
 
 
@@ -820,46 +821,6 @@ def _first_nonempty_line(path: Path) -> str:
         if line:
             return line
     return ""
-
-
-def sync_reduction_artifacts(state: HarnessState) -> None:
-    """Persist retrieval reduction artifacts inside the agent artifacts workspace."""
-
-    if not state.workspace_path:
-        return
-    paths = state.dossier_paths or build_reduction_paths(state.workspace_path)
-    state.dossier_paths = paths
-    write_json_atomic(
-        paths["discovered_sources"],
-        {
-            "query_buckets": [bucket.model_dump(mode="json") for bucket in state.query_buckets],
-            "sources": [source.model_dump(mode="json") for source in state.discovered_sources],
-        },
-    )
-    write_json_atomic(
-        paths["read_queue"],
-        {"queue": [entry.model_dump(mode="json") for entry in state.read_queue]},
-    )
-    write_json_atomic(
-        paths["read_results"],
-        {"results": [entry.model_dump(mode="json") for entry in state.read_results]},
-    )
-    source_card_lines = "\n".join(
-        json.dumps(card.model_dump(mode="json"), ensure_ascii=True) for card in state.source_cards
-    )
-    write_text_atomic(paths["source_cards"], source_card_lines + ("\n" if source_card_lines else ""))
-    write_json_atomic(
-        paths["fact_index"],
-        {"facts": [record.model_dump(mode="json") for record in state.fact_index]},
-    )
-    write_json_atomic(
-        paths["section_briefs"],
-        {"sections": [brief.model_dump(mode="json") for brief in state.section_briefs]},
-    )
-    write_json_atomic(
-        paths["coverage_matrix"],
-        state.coverage_matrix.model_dump(mode="json") if state.coverage_matrix else {},
-    )
 
 
 def stale_agents(run_root: str | Path, *, stale_after_seconds: int, now_epoch: float | None = None) -> list[str]:

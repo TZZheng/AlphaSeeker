@@ -6,7 +6,7 @@ from typing import Any
 
 from src.tools.macro.fred import fetch_macro_indicators
 from src.tools.macro.world_bank import fetch_world_bank_indicators
-from src.harness.skills.common import artifact_evidence, make_result, safe_read
+from src.harness.skills.common import artifact_evidence, make_result, safe_read, skill_artifact_dir
 from src.harness.types import HarnessState, SkillMetrics, SkillResult, SkillSpec
 
 
@@ -22,7 +22,11 @@ def fetch_macro_indicators_skill(arguments: dict[str, Any], _state: HarnessState
             error="Missing topic.",
         )
 
-    path, metadata = fetch_macro_indicators(topic=topic, countries=list(countries))
+    path, metadata = fetch_macro_indicators(
+        topic=topic,
+        countries=list(countries),
+        output_dir=skill_artifact_dir(_state, "macro"),
+    )
     if not path:
         return make_result(
             "fetch_macro_indicators",
@@ -67,6 +71,7 @@ def fetch_world_bank_indicators_skill(arguments: dict[str, Any], _state: Harness
         countries=countries,
         indicator_codes=indicator_codes,
         date_range=date_range,
+        output_dir=skill_artifact_dir(_state, "macro"),
     )
     if not path:
         return make_result(
@@ -98,20 +103,40 @@ def fetch_world_bank_indicators_skill(arguments: dict[str, Any], _state: Harness
 MACRO_SKILLS = [
     SkillSpec(
         name="fetch_macro_indicators",
-        description="Fetch FRED-based macro indicators for a topic and country set.",
+        description="Fetch FRED macro time series for US rates, inflation, employment, growth, or liquidity topics.",
         pack="macro",
-        input_schema={"topic": "string", "countries": "string[]"},
+        input_schema={
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string", "description": "Natural-language macro topic."},
+                "countries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": ["US"],
+                    "description": "Country names or codes. FRED is primarily US-focused.",
+                },
+            },
+            "required": ["topic"],
+        },
         produces_artifacts=True,
         executor=fetch_macro_indicators_skill,
     ),
     SkillSpec(
         name="fetch_world_bank_indicators",
-        description="Fetch cross-country World Bank indicator tables.",
+        description="Fetch cross-country World Bank tables for GDP, inflation, unemployment, external balance, or debt.",
         pack="macro",
         input_schema={
-            "countries": "string[]",
-            "indicator_codes": "string[]",
-            "date_range": "string",
+            "type": "object",
+            "properties": {
+                "countries": {"type": "array", "items": {"type": "string"}, "description": "Country names or ISO codes."},
+                "indicator_codes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional World Bank indicator codes.",
+                },
+                "date_range": {"type": "string", "default": "2019:2025", "description": "Year range like 2019:2025."},
+            },
+            "required": ["countries"],
         },
         produces_artifacts=True,
         executor=fetch_world_bank_indicators_skill,

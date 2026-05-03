@@ -17,7 +17,6 @@ from src.harness.artifacts import (
     agent_workspace_paths,
     append_tool_call_log,
     append_event,
-    build_reduction_paths,
     create_agent_workspace,
     latest_agent_records,
     load_skill_state,
@@ -116,7 +115,6 @@ def create_or_load_session(
             run_root=run_root,
             agent_id=agent_id,
             workspace_path=str(workspace),
-            dossier_paths=build_reduction_paths(workspace),
             enabled_packs=enabled_packs,
             available_skills=allowed_skills,
         )
@@ -334,7 +332,7 @@ def _run_skill(session: AgentSession, skill_name: str, skill_args: dict[str, Any
         "status": result.status,
         "summary": result.summary,
     }
-    if skill_name == "search_web":
+    if skill_name in {"search_web", "search_news"}:
         response["results"] = result.details.get("results", [])
         results_path = result.details.get("results_path")
         if results_path:

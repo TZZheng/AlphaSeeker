@@ -9,6 +9,7 @@ Requires: EIA_API_KEY environment variable (free from https://www.eia.gov/openda
 
 import os
 import re
+from pathlib import Path
 from typing import List, Tuple, Dict, Optional
 
 from src.shared.reliability import request_json
@@ -59,6 +60,7 @@ def get_series_for_commodity(asset: str) -> Dict[str, str]:
 def fetch_eia_series(
     series_ids: List[str],
     num_observations: int = 52,
+    output_dir: str | Path | None = None,
 ) -> Tuple[str, Dict]:
     """
     Fetches one or more EIA time series and saves as a structured Markdown file.
@@ -145,10 +147,10 @@ def fetch_eia_series(
             print(f"Error fetching EIA series {series_id}: {sanitized_error}")
             markdown_content += f"## Series {series_id}\nError fetching data: {sanitized_error}\n\n"
             
-    save_dir = os.path.join(os.getcwd(), "data")
-    os.makedirs(save_dir, exist_ok=True)
+    save_dir = Path(output_dir) if output_dir is not None else Path(os.getcwd()) / "data"
+    save_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    file_path = os.path.join(save_dir, f"eia_data_{timestamp}.md")
+    file_path = str(save_dir / f"eia_data_{timestamp}.md")
 
     with open(file_path, "w") as f:
         f.write(markdown_content)
@@ -158,6 +160,7 @@ def fetch_eia_series(
 
 def fetch_eia_inventory(
     asset: str,
+    output_dir: str | Path | None = None,
 ) -> Tuple[Optional[str], Dict]:
     """
     High-level convenience function called by commodity/nodes.py fetch_eia_data node.
@@ -177,7 +180,7 @@ def fetch_eia_inventory(
 
     try:
         series_ids = list(series_map.keys())
-        return fetch_eia_series(series_ids=series_ids)
+        return fetch_eia_series(series_ids=series_ids, output_dir=output_dir)
     except Exception as e:
         print(f"EIA fetch failed for {asset}: {e}")
         return None, {}

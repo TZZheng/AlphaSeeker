@@ -8,6 +8,7 @@ API Docs: https://datahelpdesk.worldbank.org/knowledgebase/articles/889392
 No API key required.
 """
 
+from pathlib import Path
 from typing import List, Tuple, Dict, Optional
 
 
@@ -78,6 +79,7 @@ def fetch_world_bank_indicators(
     countries: List[str],
     indicator_codes: Optional[List[str]] = None,
     date_range: str = "2019:2025",
+    output_dir: str | Path | None = None,
 ) -> Tuple[str, Dict]:
     """
     Fetches World Bank indicator data for the given countries and saves as Markdown.
@@ -192,11 +194,11 @@ def fetch_world_bank_indicators(
         markdown_content += "\n"
         
     # Save to file
-    save_dir = os.path.join(os.getcwd(), "data")
-    os.makedirs(save_dir, exist_ok=True)
+    save_dir = Path(output_dir) if output_dir is not None else Path(os.getcwd()) / "data"
+    save_dir.mkdir(parents=True, exist_ok=True)
     
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    file_path = os.path.join(save_dir, f"wb_data_{timestamp}.md")
+    file_path = str(save_dir / f"wb_data_{timestamp}.md")
     
     with open(file_path, "w") as f:
         f.write(markdown_content)

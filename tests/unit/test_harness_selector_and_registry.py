@@ -16,8 +16,11 @@ def test_registry_exposes_core_and_domain_skills() -> None:
     assert registry["read"].pack == "core"
     assert "get_current_datetime" in registry
     assert registry["get_current_datetime"].pack == "core"
+    assert "search_news" in registry
+    assert registry["search_news"].pack == "core"
     assert "read_web_pages" in registry
     assert registry["read_web_pages"].pack == "core"
+    assert "retrieve_sources" not in registry
     assert "fetch_company_profile" in registry
     assert registry["fetch_company_profile"].pack == "equity"
     assert "fetch_macro_indicators" in registry
@@ -34,6 +37,7 @@ def test_get_skills_for_packs_filters_to_enabled_packs() -> None:
 
     assert "read" in enabled_names
     assert "get_current_datetime" in enabled_names
+    assert "search_news" in enabled_names
     assert "read_web_pages" in enabled_names
     assert "fetch_macro_indicators" in enabled_names
     assert "fetch_company_profile" not in enabled_names

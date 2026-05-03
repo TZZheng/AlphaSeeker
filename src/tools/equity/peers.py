@@ -9,6 +9,7 @@ import yfinance as yf
 import pandas as pd
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional
 from langchain_core.messages import HumanMessage
 
@@ -285,6 +286,7 @@ def _is_valid_ticker(ticker: str) -> bool:
 def fetch_peer_metrics(
     categorized_peers: Dict[str, List[str]],
     target_ticker: Optional[str] = None,
+    output_dir: str | Path | None = None,
 ) -> Tuple[str, Dict[str, Any]]:
     """
     Fetches comparative metrics for categorized peers.
@@ -368,10 +370,10 @@ def fetch_peer_metrics(
     md += "\n"
 
     # Save
-    data_dir = os.path.join(os.getcwd(), "data")
-    os.makedirs(data_dir, exist_ok=True)
+    data_dir = Path(output_dir) if output_dir is not None else Path(os.getcwd()) / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
     filename = f"peer_comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-    file_path = os.path.join(data_dir, filename)
+    file_path = str(data_dir / filename)
 
     with open(file_path, "w") as f:
         f.write(md)

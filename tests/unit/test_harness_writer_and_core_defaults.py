@@ -121,8 +121,10 @@ def test_render_tools_markdown_lists_visible_runtime_surface() -> None:
     assert "do not recover failed polish patches" in text
     assert "write(path=..., content=...)" in text
     assert "replacing most of a file or creating a new one" in text
+    assert "search_news" in text
     assert "fetch_company_profile" in text
     assert "retrieve_sources" not in text
+    assert "type='news'" not in text
     assert "Response Mode" in text
 
 
@@ -144,7 +146,29 @@ def test_orchestrator_tools_markdown_hides_direct_skills() -> None:
     assert "`evaluator`" in text
 
 
-def test_evaluator_preset_gets_primitive_core_skills() -> None:
+def test_research_tools_markdown_exposes_enabled_domain_skills() -> None:
+    registry = build_skill_registry()
+    skills = visible_skills_for_preset(
+        preset="research",
+        available_skills=get_skills_for_packs(registry, ["core", "equity", "macro", "commodity"]),
+    )
+
+    text = render_tools_markdown(
+        preset="research",
+        available_tools=default_tool_allowlist("research"),
+        available_skills=skills,
+    )
+
+    assert "fetch_company_profile" in text
+    assert "fetch_financials" in text
+    assert "fetch_macro_indicators" in text
+    assert "fetch_world_bank_indicators" in text
+    assert "fetch_eia_inventory" in text
+    assert "fetch_cot_report" in text
+    assert "fetch_futures_curve" in text
+
+
+def test_evaluator_preset_gets_full_enabled_skill_set() -> None:
     registry = build_skill_registry()
     skills = visible_skills_for_preset(
         preset="evaluator",
@@ -157,9 +181,11 @@ def test_evaluator_preset_gets_primitive_core_skills() -> None:
     assert "grep" in names
     assert "get_current_datetime" in names
     assert "search_web" in names
+    assert "search_news" in names
     assert "read_web_pages" in names
     assert "condense_context" in names
-    assert "fetch_company_profile" not in names
+    assert "fetch_company_profile" in names
+    assert "fetch_financials" in names
 
 
 def test_invalid_skill_pack_is_rejected() -> None:

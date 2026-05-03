@@ -11,6 +11,7 @@ import yfinance as yf
 import pandas as pd
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Tuple, Dict, Any
 
 from src.shared.reliability import cached_retry_call
@@ -41,7 +42,7 @@ def _load_company_profile_snapshot(ticker: str) -> Dict[str, Any]:
     )
 
 
-def fetch_company_profile(ticker: str) -> Tuple[str, Dict[str, Any]]:
+def fetch_company_profile(ticker: str, output_dir: str | Path | None = None) -> Tuple[str, Dict[str, Any]]:
     """
     Fetches company identity, ownership structure, and institutional holders.
 
@@ -145,10 +146,10 @@ def fetch_company_profile(ticker: str) -> Tuple[str, Dict[str, Any]]:
             print(f"Warning: Mutual fund holders data fetch failed for {ticker}: {e}")
 
         # --- Save ---
-        data_dir = os.path.join(os.getcwd(), "data")
-        os.makedirs(data_dir, exist_ok=True)
+        data_dir = Path(output_dir) if output_dir is not None else Path(os.getcwd()) / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
         filename = f"{ticker}_profile_{datetime.now().strftime('%Y%m%d')}.md"
-        file_path = os.path.join(data_dir, filename)
+        file_path = str(data_dir / filename)
 
         with open(file_path, "w") as f:
             f.write(md)

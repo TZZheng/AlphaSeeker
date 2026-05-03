@@ -2,6 +2,7 @@ import pandas as pd
 import matplotlib
 import os
 from datetime import datetime
+from pathlib import Path
 
 # Non-interactive backend is required in worker threads/CI.
 matplotlib.use("Agg")
@@ -11,7 +12,7 @@ class VisualizationError(Exception):
     """Custom exception for visualization errors."""
     pass
 
-def plot_price_history(data_path: str, ticker: str) -> str:
+def plot_price_history(data_path: str, ticker: str, output_dir: str | Path | None = None) -> str:
     """
     Plots the closing price history from a CSV file.
     
@@ -48,12 +49,11 @@ def plot_price_history(data_path: str, ticker: str) -> str:
         plt.legend()
         plt.grid(True)
         
-        # Ensure charts directory exists
-        charts_dir = os.path.join(os.getcwd(), "charts")
-        os.makedirs(charts_dir, exist_ok=True)
+        charts_dir = Path(output_dir) if output_dir is not None else Path(os.getcwd()) / "charts"
+        charts_dir.mkdir(parents=True, exist_ok=True)
         
         filename = f"{ticker}_chart_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-        chart_path = os.path.join(charts_dir, filename)
+        chart_path = str(charts_dir / filename)
         
         plt.savefig(chart_path)
         plt.close()

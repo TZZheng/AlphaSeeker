@@ -2,6 +2,7 @@ import yfinance as yf
 import pandas as pd
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Tuple, Dict, Any, List
 from src.shared.web_search import search_web, deep_search
 from src.shared.reliability import cached_retry_call
@@ -36,7 +37,7 @@ def _load_financial_snapshot(ticker: str) -> Dict[str, Any]:
     )
 
 
-def fetch_financial_metrics(ticker: str) -> Tuple[str, Dict[str, Any]]:
+def fetch_financial_metrics(ticker: str, output_dir: str | Path | None = None) -> Tuple[str, Dict[str, Any]]:
     """
     Fetches key financial metrics, annual + quarterly statements, and cash flow.
 
@@ -196,10 +197,10 @@ def fetch_financial_metrics(ticker: str) -> Tuple[str, Dict[str, Any]]:
             md += ttm_cashflow.to_markdown() + "\n\n"
         
         # --- Save ---
-        data_dir = os.path.join(os.getcwd(), "data")
-        os.makedirs(data_dir, exist_ok=True)
+        data_dir = Path(output_dir) if output_dir is not None else Path(os.getcwd()) / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
         filename = f"{ticker}_financials_{datetime.now().strftime('%Y%m%d')}.md"
-        file_path = os.path.join(data_dir, filename)
+        file_path = str(data_dir / filename)
 
         with open(file_path, "w") as f:
             f.write(md)
@@ -222,13 +223,13 @@ def fetch_financial_metrics(ticker: str) -> Tuple[str, Dict[str, Any]]:
 
     except FinancialsError as e:
         print(f"Financials check failed for {ticker} ({e}). Attempting fallback...")
-        return fetch_financials_fallback(ticker)
+        return fetch_financials_fallback(ticker, output_dir=output_dir)
     except Exception as e:
         print(f"yfinance failed for {ticker} ({e}). Attempting fallback to web search...")
-        return fetch_financials_fallback(ticker)
+        return fetch_financials_fallback(ticker, output_dir=output_dir)
 
 
-def fetch_financials_fallback(ticker: str) -> Tuple[str, Dict[str, Any]]:
+def fetch_financials_fallback(ticker: str, output_dir: str | Path | None = None) -> Tuple[str, Dict[str, Any]]:
     """
     Fallback method to find financial data via web search when yfinance fails.
     Prioritizes "Investor Relations" pages for public companies, then generic estimates.
@@ -306,10 +307,10 @@ def fetch_financials_fallback(ticker: str) -> Tuple[str, Dict[str, Any]]:
         md += f"{content}\n\n---\n\n"
 
     # Save
-    data_dir = os.path.join(os.getcwd(), "data")
-    os.makedirs(data_dir, exist_ok=True)
+    data_dir = Path(output_dir) if output_dir is not None else Path(os.getcwd()) / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
     filename = f"{ticker}_financials_fallback_{datetime.now().strftime('%Y%m%d')}.md"
-    file_path = os.path.join(data_dir, filename)
+    file_path = str(data_dir / filename)
 
     with open(file_path, "w") as f:
         f.write(md)

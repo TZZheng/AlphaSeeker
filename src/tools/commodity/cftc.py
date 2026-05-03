@@ -14,6 +14,7 @@ import csv
 import datetime
 import io
 import os
+from pathlib import Path
 import zipfile
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -215,6 +216,7 @@ def get_positioning_summary(asset: str) -> str:
 def fetch_cot_report(
     asset: str,
     num_weeks: int = 12,
+    output_dir: str | Path | None = None,
 ) -> Tuple[Optional[str], Dict]:
     """
     Fetches the latest COT positioning data for the given commodity.
@@ -277,10 +279,10 @@ def fetch_cot_report(
         "open_interest": latest["open_interest"],
     }
 
-    save_dir = os.path.join(os.getcwd(), "data")
-    os.makedirs(save_dir, exist_ok=True)
+    save_dir = Path(output_dir) if output_dir is not None else Path(os.getcwd()) / "data"
+    save_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    file_path = os.path.join(save_dir, f"cot_data_{timestamp}.md")
+    file_path = str(save_dir / f"cot_data_{timestamp}.md")
 
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(markdown_content)

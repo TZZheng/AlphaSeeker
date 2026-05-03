@@ -288,6 +288,154 @@ def test_search_web_result_exposes_compact_urls_without_snippets(
     assert "Long preview text" not in output_text
 
 
+def test_search_news_result_matches_search_web_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-search-news",
+        user_prompt="Search news for XOM.",
+        preset="research",
+    )
+    search_results = [
+        {
+            "title": "Energy policy update",
+            "href": "https://example.com/energy-news",
+            "date": "2026-01-02",
+            "body": "News preview.",
+        }
+    ]
+    monkeypatch.setattr(
+        "src.harness.skills.core.search_news",
+        lambda _query, max_results=8: search_results[:max_results],
+    )
+
+    result = execute_model_tool(session, "search_news", {"query": "xom news", "max_results": 1})
+
+    assert result["results"] == [
+        {"title": "Energy policy update", "url": "https://example.com/energy-news", "date": "2026-01-02"},
+    ]
+    artifact_path = Path(result["results_path"])
+    output_path = next(agent_workspace_paths(run_root, root_agent_id)["skills_artifacts_root"].glob("*_search_news/output.md"))
+
+    assert artifact_path.exists()
+    assert str(agent_workspace_paths(run_root, root_agent_id)["search_artifacts_root"]) in str(artifact_path)
+    assert json.loads(artifact_path.read_text(encoding="utf-8")) == search_results
+    assert result["artifact_paths"] == [str(artifact_path)]
+    assert f"Results artifact: {artifact_path}" in output_path.read_text(encoding="utf-8")
+
+
+def test_domain_skill_passes_run_scoped_output_dir_to_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    request = HarnessRequest(
+        user_prompt="Analyze AAPL market data.",
+        run_id="executor-domain-output-dir",
+        available_skill_packs=["core", "equity"],
+    )
+    run_root, root_agent_id = initialize_run_root(request)
+    registry = build_skill_registry()
+    create_agent_workspace(
+        run_root,
+        agent_id=root_agent_id,
+        parent_id="",
+        preset="research",
+        task_name="Root Task",
+        description=request.user_prompt,
+        task_markdown=render_task_markdown(request.user_prompt),
+        tools_markdown=render_tools_markdown(
+            preset="research",
+            available_tools=default_tool_allowlist("research"),
+            available_skills=visible_skills_for_preset(
+                preset="research",
+                available_skills=get_skills_for_packs(registry, ["core", "equity"]),
+            ),
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_fetch_historical_data(ticker: str, period: str = "1y", output_dir=None) -> str:
+        captured["ticker"] = ticker
+        captured["period"] = period
+        captured["output_dir"] = output_dir
+        path = Path(output_dir) / f"{ticker}_{period}.csv"
+        path.write_text("Date,Close\n2026-01-01,100\n", encoding="utf-8")
+        return str(path)
+
+    monkeypatch.setattr("src.harness.skills.equity.fetch_historical_data", _fake_fetch_historical_data)
+    session = create_or_load_session(
+        request=request,
+        run_root=str(run_root),
+        agent_id=root_agent_id,
+        preset="research",
+        registry_map=registry,
+    )
+
+    result = execute_model_tool(session, "fetch_market_data", {"ticker": "AAPL", "period": "1mo"})
+
+    expected_output_dir = agent_workspace_paths(run_root, root_agent_id)["artifacts_root"] / "equity"
+    assert captured == {"ticker": "AAPL", "period": "1mo", "output_dir": expected_output_dir}
+    assert result["artifact_paths"] == [str(expected_output_dir / "AAPL_1mo.csv")]
+
+
+def test_load_skill_state_strips_deprecated_retrieval_keys(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    request = HarnessRequest(user_prompt="Resume old state", run_id="executor-old-skill-state")
+    run_root, root_agent_id = initialize_run_root(request)
+    registry = build_skill_registry()
+    create_agent_workspace(
+        run_root,
+        agent_id=root_agent_id,
+        parent_id="",
+        preset="research",
+        task_name="Root Task",
+        description=request.user_prompt,
+        task_markdown=render_task_markdown(request.user_prompt),
+        tools_markdown=render_tools_markdown(
+            preset="research",
+            available_tools=default_tool_allowlist("research"),
+            available_skills=[],
+        ),
+    )
+    paths = agent_workspace_paths(run_root, root_agent_id)
+    old_payload = {
+        "request": request.model_dump(mode="json"),
+        "run_id": "executor-old-skill-state",
+        "run_root": str(run_root),
+        "agent_id": root_agent_id,
+        "workspace_path": str(paths["workspace"]),
+        "dossier_paths": {"fact_index": "old.json"},
+        "query_buckets": [],
+        "discovered_sources": [],
+        "read_queue": [],
+        "read_results": [],
+        "source_cards": [],
+        "fact_index": [],
+        "section_briefs": [],
+        "coverage_matrix": {},
+        "retrieval_wave_count": 2,
+    }
+    write_text_atomic(paths["skill_state"], json.dumps(old_payload))
+
+    session = create_or_load_session(
+        request=request,
+        run_root=str(run_root),
+        agent_id=root_agent_id,
+        preset="research",
+        registry_map=registry,
+    )
+
+    assert session.state.run_id == "executor-old-skill-state"
+    assert not hasattr(session.state, "dossier_paths")
+
+
 def test_publish_tools_normalize_publish_prefix(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

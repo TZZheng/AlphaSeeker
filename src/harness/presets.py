@@ -63,7 +63,6 @@ PRESET_EXPLANATIONS: dict[str, str] = {
 }
 
 AGENT_HIDDEN_SKILLS = {
-    "retrieve_sources",
     "search_and_read",
     "read_artifact",
     "research_earnings_call",
@@ -87,7 +86,7 @@ def visible_skills_for_preset(
         if spec.name
         in {"read", "grep", "get_current_datetime", "search_web", "search_news", "read_web_pages", "condense_context"}
     ]
-    if preset == "research":
+    if preset in {"research", "evaluator"}:
         return visible
     return primitive_core
 

@@ -135,6 +135,8 @@ def harness_tool_definitions() -> dict[str, dict[str, Any]]:
 
 
 def _skill_tool_schema(spec: SkillSpec) -> dict[str, Any]:
+    if spec.input_schema.get("type") == "object":
+        return deepcopy(spec.input_schema)
     return {
         "type": "object",
         "properties": tool_schema_properties(spec.input_schema),

@@ -50,181 +50,6 @@ class SkillMetrics(BaseModel):
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
-class RetrievalQueryBucket(BaseModel):
-    """A themed bucket of retrieval queries."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    label: str
-    intent: str
-    queries: list[str] = Field(default_factory=list)
-
-
-class DiscoveredSource(BaseModel):
-    """One candidate source discovered during retrieval."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    source_id: str
-    query: str
-    query_bucket: str
-    search_type: Literal["web", "news", "artifact", "dataset"]
-    title: str
-    url: str
-    canonical_url: str
-    domain: str = ""
-    snippet: str = ""
-    publication_date: str | None = None
-    discovered_rank: int = 0
-    freshness_score: float = 0.0
-    relevance_score: float = 0.0
-    uniqueness_score: float = 0.0
-    source_quality_score: float = 0.0
-    composite_score: float = 0.0
-    coverage_tags: list[str] = Field(default_factory=list)
-
-
-class ReadQueueEntry(BaseModel):
-    """A ranked source selected for full-text reading."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    source_id: str
-    canonical_url: str
-    title: str
-    domain: str = ""
-    query_bucket: str = ""
-    priority_rank: int
-    priority_score: float
-    coverage_tags: list[str] = Field(default_factory=list)
-    reason: str = ""
-
-
-class ReadResultRecord(BaseModel):
-    """One attempted full-text ingestion result."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    source_id: str
-    canonical_url: str
-    title: str
-    status: Literal["read", "failed"]
-    text: str = ""
-    text_chars: int = 0
-    publication_date: str | None = None
-    error: str | None = None
-    query_bucket: str = ""
-    coverage_tags: list[str] = Field(default_factory=list)
-
-
-class SourceCard(BaseModel):
-    """A normalized representation of one ingested source."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    source_id: str
-    title: str
-    canonical_url: str = ""
-    domain: str = ""
-    source_kind: Literal["web", "news", "artifact", "dataset", "note"] = "web"
-    publication_date: str | None = None
-    summary: str
-    extracted_facts: list[str] = Field(default_factory=list)
-    extracted_numbers: list[str] = Field(default_factory=list)
-    extracted_dates: list[str] = Field(default_factory=list)
-    supporting_evidence: list[str] = Field(default_factory=list)
-    counterevidence: list[str] = Field(default_factory=list)
-    section_relevance: list[str] = Field(default_factory=list)
-    freshness_label: str = ""
-    evidence_ids: list[str] = Field(default_factory=list)
-
-
-class FactIndexRecord(BaseModel):
-    """A normalized fact extracted from one or more source cards."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    fact_id: str
-    fact: str
-    source_ids: list[str] = Field(default_factory=list)
-    evidence_ids: list[str] = Field(default_factory=list)
-    section_labels: list[str] = Field(default_factory=list)
-    numbers: list[str] = Field(default_factory=list)
-    dates: list[str] = Field(default_factory=list)
-    stance: Literal["supporting", "counterevidence", "neutral"] = "neutral"
-
-
-class SectionBrief(BaseModel):
-    """A compressed section-level brief for the writer and controller."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    section_label: str
-    summary: str
-    evidence_ids: list[str] = Field(default_factory=list)
-    source_ids: list[str] = Field(default_factory=list)
-    key_facts: list[str] = Field(default_factory=list)
-    counterpoints: list[str] = Field(default_factory=list)
-    coverage_status: Literal["strong", "partial", "missing"] = "missing"
-
-
-class CoverageMatrixEntry(BaseModel):
-    """One machine-readable coverage row for retrieval and critique."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    coverage_type: Literal["section", "contract", "freshness", "counterevidence", "evidence_type"]
-    label: str
-    status: Literal["strong", "partial", "missing"]
-    evidence_count: int = 0
-    evidence_ids: list[str] = Field(default_factory=list)
-    source_ids: list[str] = Field(default_factory=list)
-    notes: list[str] = Field(default_factory=list)
-
-
-class CoverageMatrix(BaseModel):
-    """Coverage summary derived from retrieval artifacts."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    sections: list[CoverageMatrixEntry] = Field(default_factory=list)
-    contract_clauses: list[CoverageMatrixEntry] = Field(default_factory=list)
-    freshness_requirements: list[CoverageMatrixEntry] = Field(default_factory=list)
-    counterevidence_requirements: list[CoverageMatrixEntry] = Field(default_factory=list)
-    evidence_types: list[CoverageMatrixEntry] = Field(default_factory=list)
-    needs_more_retrieval: bool = False
-    next_priority_labels: list[str] = Field(default_factory=list)
-    stats: dict[str, Any] = Field(default_factory=dict)
-
-
-class RetrievalStageOutput(BaseModel):
-    """Typed stage output returned by the composite retrieval skill."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    stage: Literal[
-        "plan_queries",
-        "discover",
-        "rank",
-        "build_read_queue",
-        "ingest_batch",
-        "extract_batch",
-        "refresh_coverage",
-        "run_wave",
-    ]
-    query_bucket_count: int = 0
-    query_count: int = 0
-    discovered_count: int = 0
-    deduped_count: int = 0
-    read_queue_count: int = 0
-    successful_read_count: int = 0
-    failed_read_count: int = 0
-    source_card_count: int = 0
-    extraction_batch_count: int = 0
-    coverage_status: str = ""
-    artifact_paths: list[str] = Field(default_factory=list)
-
-
 class Observation(BaseModel):
     """Structured state fact emitted by skills, critics, or validators."""
 
@@ -397,28 +222,18 @@ class HarnessState(BaseModel):
     run_root: str | None = None
     agent_id: str = ""
     workspace_path: str | None = None
-    dossier_paths: dict[str, str] = Field(default_factory=dict)
     started_at_epoch: float = Field(default_factory=time.time)
     elapsed_seconds: float = 0.0
     enabled_packs: list[str] = Field(default_factory=list)
     available_skills: list[SkillSpec] = Field(default_factory=list)
     required_sections: list[str] = Field(default_factory=list)
     research_contract: dict[str, Any] | None = None
-    query_buckets: list[RetrievalQueryBucket] = Field(default_factory=list)
-    discovered_sources: list[DiscoveredSource] = Field(default_factory=list)
-    read_queue: list[ReadQueueEntry] = Field(default_factory=list)
-    read_results: list[ReadResultRecord] = Field(default_factory=list)
-    source_cards: list[SourceCard] = Field(default_factory=list)
-    fact_index: list[FactIndexRecord] = Field(default_factory=list)
-    section_briefs: list[SectionBrief] = Field(default_factory=list)
-    coverage_matrix: CoverageMatrix | None = None
     evidence_ledger: list[EvidenceItem] = Field(default_factory=list)
     skill_history: list[SkillResult] = Field(default_factory=list)
     observations: list[Observation] = Field(default_factory=list)
     critic_reports: list[dict[str, Any]] = Field(default_factory=list)
     latest_draft: str | None = None
     final_response: str | None = None
-    retrieval_wave_count: int = 0
     last_error: str | None = None
 
 

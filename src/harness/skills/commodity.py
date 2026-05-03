@@ -7,7 +7,7 @@ from typing import Any
 from src.tools.commodity.cftc import fetch_cot_report
 from src.tools.commodity.eia import fetch_eia_inventory
 from src.tools.commodity.futures import fetch_futures_curve
-from src.harness.skills.common import artifact_evidence, make_result, safe_read
+from src.harness.skills.common import artifact_evidence, make_result, safe_read, skill_artifact_dir
 from src.harness.types import HarnessState, SkillMetrics, SkillResult, SkillSpec
 
 
@@ -22,7 +22,7 @@ def fetch_eia_inventory_skill(arguments: dict[str, Any], _state: HarnessState) -
             error="Missing asset.",
         )
 
-    path, metadata = fetch_eia_inventory(asset)
+    path, metadata = fetch_eia_inventory(asset, output_dir=skill_artifact_dir(_state, "commodity"))
     if not path:
         return make_result(
             "fetch_eia_inventory",
@@ -62,7 +62,11 @@ def fetch_cot_report_skill(arguments: dict[str, Any], _state: HarnessState) -> S
             error="Missing asset.",
         )
 
-    path, metadata = fetch_cot_report(asset, num_weeks=num_weeks)
+    path, metadata = fetch_cot_report(
+        asset,
+        num_weeks=num_weeks,
+        output_dir=skill_artifact_dir(_state, "commodity"),
+    )
     if not path:
         return make_result(
             "fetch_cot_report",
@@ -102,7 +106,11 @@ def fetch_futures_curve_skill(arguments: dict[str, Any], _state: HarnessState) -
             error="Missing asset.",
         )
 
-    path, metadata = fetch_futures_curve(asset, num_contracts=num_contracts)
+    path, metadata = fetch_futures_curve(
+        asset,
+        num_contracts=num_contracts,
+        output_dir=skill_artifact_dir(_state, "commodity"),
+    )
     if not path:
         return make_result(
             "fetch_futures_curve",
@@ -133,25 +141,43 @@ def fetch_futures_curve_skill(arguments: dict[str, Any], _state: HarnessState) -
 COMMODITY_SKILLS = [
     SkillSpec(
         name="fetch_eia_inventory",
-        description="Fetch EIA inventory and production data for an energy commodity.",
+        description="Fetch EIA inventory, production, import, and spot-price data for supported energy commodities.",
         pack="commodity",
-        input_schema={"asset": "string"},
+        input_schema={
+            "type": "object",
+            "properties": {"asset": {"type": "string", "description": "Energy asset such as crude oil or natural gas."}},
+            "required": ["asset"],
+        },
         produces_artifacts=True,
         executor=fetch_eia_inventory_skill,
     ),
     SkillSpec(
         name="fetch_cot_report",
-        description="Fetch CFTC COT positioning for a commodity futures market.",
+        description="Fetch CFTC Commitments of Traders positioning for futures-market sentiment and crowding.",
         pack="commodity",
-        input_schema={"asset": "string", "num_weeks": "integer"},
+        input_schema={
+            "type": "object",
+            "properties": {
+                "asset": {"type": "string", "description": "Commodity such as crude oil, gold, copper, corn."},
+                "num_weeks": {"type": "integer", "default": 12, "minimum": 2},
+            },
+            "required": ["asset"],
+        },
         produces_artifacts=True,
         executor=fetch_cot_report_skill,
     ),
     SkillSpec(
         name="fetch_futures_curve",
-        description="Fetch futures-curve structure for a commodity.",
+        description="Fetch futures-curve prices and contango/backwardation structure for supported commodities.",
         pack="commodity",
-        input_schema={"asset": "string", "num_contracts": "integer"},
+        input_schema={
+            "type": "object",
+            "properties": {
+                "asset": {"type": "string", "description": "Commodity such as crude oil, gold, or natural gas."},
+                "num_contracts": {"type": "integer", "default": 12, "minimum": 2},
+            },
+            "required": ["asset"],
+        },
         produces_artifacts=True,
         executor=fetch_futures_curve_skill,
     ),

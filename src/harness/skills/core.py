@@ -9,17 +9,7 @@ import subprocess
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from src.harness.artifacts import agent_workspace_paths, sync_reduction_artifacts, write_json_atomic
-from src.harness.retrieval import (
-    build_query_buckets,
-    build_read_queue,
-    build_stage_output,
-    discover_sources,
-    extract_source_cards,
-    ingest_read_queue,
-    rank_discovered_sources,
-    refresh_reduction_state,
-)
+from src.harness.artifacts import agent_workspace_paths, write_json_atomic
 from src.harness.skills.common import (
     ensure_str_list,
     json_preview,
@@ -43,21 +33,7 @@ DEFAULT_SEARCH_MAX_RESULTS = 8
 DEFAULT_READ_WEB_MAX_URLS = 6
 DEFAULT_MAX_CHARS_PER_URL = 12000
 DEFAULT_CONDENSE_MAX_CHARS = 6000
-DEFAULT_QUERY_TARGET = 24
-DEFAULT_CANDIDATE_TARGET = 120
-DEFAULT_READ_QUEUE_TARGET = 40
-DEFAULT_INGEST_BATCH_SIZE = 10
 DEFAULT_FILE_SEARCH_MAX_RESULTS = 20
-RETRIEVAL_STAGES = {
-    "plan_queries",
-    "discover",
-    "rank",
-    "build_read_queue",
-    "ingest_batch",
-    "extract_batch",
-    "refresh_coverage",
-    "run_wave",
-}
 
 
 def _resolve_search_paths(state: HarnessState, raw_paths: list[str]) -> list[str]:
@@ -430,6 +406,58 @@ def search_web_skill(arguments: dict[str, Any], state: HarnessState) -> SkillRes
     )
 
 
+def search_news_skill(arguments: dict[str, Any], state: HarnessState) -> SkillResult:
+    query = str(arguments.get("query") or "").strip()
+    max_results = int(arguments.get("max_results", DEFAULT_SEARCH_MAX_RESULTS))
+    if not query:
+        return make_result(
+            "search_news",
+            arguments,
+            status="failed",
+            summary="search_news requires a non-empty query.",
+            error="Missing query.",
+        )
+
+    results = search_news(query, max_results=max_results)
+    results_path = _write_search_results(state, results, f"news_{query}")
+    compact_results = _compact_search_results(results)
+    evidence = [
+        url_evidence(
+            "search_news",
+            item.get("title", query),
+            _search_result_url(item),
+            content=item.get("body", ""),
+            metadata={"query": query, "date": item.get("date", ""), "type": "news"},
+        )
+        for item in results
+    ]
+    return make_result(
+        "search_news",
+        arguments,
+        status="ok",
+        summary=f"Found {len(results)} news results for '{query}'.",
+        details={
+            "query": query,
+            "type": "news",
+            "results_path": results_path,
+            "count": len(results),
+            "results": compact_results,
+        },
+        metrics=SkillMetrics(
+            evidence_count=len(evidence),
+            urls_discovered=len(results),
+            dated_evidence_count=sum(1 for item in results if item.get("date")),
+        ),
+        output_text=_render_search_results_output(
+            query=query,
+            results_path=results_path,
+            results=compact_results,
+        ),
+        artifacts=[results_path],
+        evidence=evidence,
+    )
+
+
 def read_web_pages_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillResult:
     urls = [str(item).strip() for item in arguments.get("urls") or [] if str(item).strip()]
     if not urls:
@@ -653,174 +681,25 @@ def read_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillResult:
     )
 
 
-def retrieve_sources_skill(arguments: dict[str, Any], state: HarnessState) -> SkillResult:
-    """Build, ingest, and reduce a retrieval corpus for the controller."""
-
-    stage = str(arguments.get("stage") or "run_wave").strip()
-    if stage not in RETRIEVAL_STAGES:
-        return make_result(
-            "retrieve_sources",
-            arguments,
-            status="failed",
-            summary="retrieve_sources received an illegal stage.",
-            error=f"Illegal stage '{stage}'.",
-        )
-
-    prompt = str(arguments.get("prompt") or state.request.user_prompt).strip()
-    query_target = int(arguments.get("query_target", DEFAULT_QUERY_TARGET))
-    candidate_target = int(arguments.get("candidate_target", DEFAULT_CANDIDATE_TARGET))
-    read_queue_target = int(arguments.get("read_queue_target", DEFAULT_READ_QUEUE_TARGET))
-    batch_size = int(arguments.get("ingest_batch_size", DEFAULT_INGEST_BATCH_SIZE))
-    max_chars_per_url = int(arguments.get("max_chars_per_url", DEFAULT_MAX_CHARS_PER_URL))
-    required_sections = ensure_str_list(arguments.get("required_sections")) or list(state.required_sections or [])
-    artifact_paths = [
-        state.dossier_paths.get("discovered_sources", ""),
-        state.dossier_paths.get("read_queue", ""),
-        state.dossier_paths.get("read_results", ""),
-        state.dossier_paths.get("source_cards", ""),
-        state.dossier_paths.get("fact_index", ""),
-        state.dossier_paths.get("section_briefs", ""),
-        state.dossier_paths.get("coverage_matrix", ""),
-    ]
-    artifact_paths = [path for path in artifact_paths if path]
-
-    if stage in {"plan_queries", "discover", "run_wave"} and not state.query_buckets:
-        state.query_buckets = build_query_buckets(
-            prompt,
-            [pack for pack in state.enabled_packs if pack != "core"],
-            query_target=query_target,
-        )
-
-    if stage == "plan_queries":
-        sync_reduction_artifacts(state)
-        stage_output = build_stage_output(state, stage, artifact_paths)
-        return make_result(
-            "retrieve_sources",
-            arguments,
-            status="ok",
-            summary=f"Planned {stage_output.query_count} retrieval querie(s).",
-            details=stage_output.model_dump(mode="json"),
-            metrics=SkillMetrics(
-                artifact_count=len(artifact_paths),
-                urls_discovered=stage_output.discovered_count,
-                urls_read=stage_output.successful_read_count,
-                extra={"coverage_status": stage_output.coverage_status},
-            ),
-            artifacts=artifact_paths,
-        )
-
-    if stage in {"discover", "run_wave"} and not state.discovered_sources:
-        candidates = discover_sources(
-            prompt,
-            state.query_buckets,
-            candidate_target=candidate_target,
-        )
-        state.discovered_sources = rank_discovered_sources(candidates, prompt)
-
-    if stage in {"rank", "run_wave"} and state.discovered_sources:
-        state.discovered_sources = rank_discovered_sources(state.discovered_sources, prompt)
-
-    if stage in {"build_read_queue", "run_wave"} and not state.read_queue:
-        state.read_queue = build_read_queue(state.discovered_sources, queue_target=read_queue_target)
-
-    if stage in {"ingest_batch", "run_wave"} and state.read_queue:
-        new_results = ingest_read_queue(
-            state.read_queue,
-            state.discovered_sources,
-            state.read_results,
-            batch_size=batch_size,
-            max_chars_per_url=max_chars_per_url,
-        )
-        if new_results:
-            state.read_results.extend(new_results)
-            state.retrieval_wave_count += 1
-
-    source_evidence = []
-    if stage in {"extract_batch", "run_wave"} and state.read_results:
-        new_cards = extract_source_cards(
-            state.read_results,
-            state.discovered_sources,
-            required_sections,
-            existing_cards=state.source_cards,
-        )
-        if new_cards:
-            next_evidence_index = len(state.evidence_ledger) + 2
-            for offset, card in enumerate(new_cards):
-                evidence_item = url_evidence(
-                    "retrieve_sources",
-                    card.title or card.summary[:120],
-                    card.canonical_url,
-                    content="\n".join(card.extracted_facts[:6]) or card.summary,
-                    metadata={
-                        "source_id": card.source_id,
-                        "date": card.publication_date,
-                        "domain": card.domain,
-                    },
-                )
-                evidence_item.id = f"E{next_evidence_index + offset}"
-                card.evidence_ids = [evidence_item.id]
-                source_evidence.append(evidence_item)
-            state.source_cards.extend(new_cards)
-
-    if stage in {"extract_batch", "refresh_coverage", "run_wave"}:
-        refresh_reduction_state(state)
-    else:
-        sync_reduction_artifacts(state)
-
-    stage_output = build_stage_output(state, stage, artifact_paths)
-    summary_evidence = note_evidence(
-        "retrieve_sources",
-        (
-            f"Retrieval stage '{stage}' now has {stage_output.discovered_count} discovered candidates, "
-            f"{stage_output.read_queue_count} queued reads, and {stage_output.source_card_count} source cards."
-        ),
-        metadata={
-            "stage": stage,
-            "coverage_status": stage_output.coverage_status,
-            "successful_read_count": stage_output.successful_read_count,
-        },
-    )
-    summary_evidence.id = f"E{len(state.evidence_ledger) + 1}"
-    evidence = [summary_evidence, *source_evidence]
-    return make_result(
-        "retrieve_sources",
-        arguments,
-        status="ok",
-        summary=(
-            f"Retrieval stage '{stage}' completed with {stage_output.discovered_count} candidates and "
-            f"{stage_output.successful_read_count} successful reads."
-        ),
-        details=stage_output.model_dump(mode="json"),
-        metrics=SkillMetrics(
-            evidence_count=len(evidence),
-            artifact_count=len(artifact_paths),
-            urls_discovered=stage_output.discovered_count,
-            urls_read=stage_output.successful_read_count,
-            fresh_evidence_count=sum(1 for item in source_evidence if item.metadata.get("date")),
-            dated_evidence_count=sum(1 for item in source_evidence if item.metadata.get("date")),
-            sections_touched=required_sections,
-            extra={
-                "stage": stage,
-                "coverage_status": stage_output.coverage_status,
-                "source_card_count": stage_output.source_card_count,
-            },
-        ),
-        artifacts=artifact_paths,
-        evidence=evidence,
-    )
-
-
 CORE_SKILLS = [
     SkillSpec(
         name="grep",
-        description="Search local files or directories for a keyword or exact text match, returning file paths, line numbers, and snippets.",
+        description="Search visible local files for exact text or regex-like patterns. Use before reading large local files.",
         pack="core",
         input_schema={
-            "pattern": "string",
-            "paths": "string[]",
-            "max_results": "integer",
-            "fixed_strings": "boolean",
-            "ignore_case": "boolean",
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Text or pattern to search for."},
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional visible files or directories. Defaults to the agent's visible workspace.",
+                },
+                "max_results": {"type": "integer", "default": DEFAULT_FILE_SEARCH_MAX_RESULTS, "minimum": 1},
+                "fixed_strings": {"type": "boolean", "description": "Treat pattern as literal text."},
+                "ignore_case": {"type": "boolean", "default": True},
+            },
+            "required": ["pattern"],
         },
         executor=grep_skill,
     ),
@@ -828,24 +707,61 @@ CORE_SKILLS = [
         name="get_current_datetime",
         description="Return the current local and UTC datetime so you can anchor time-sensitive work to an explicit date.",
         pack="core",
-        input_schema={"timezone": "string"},
+        input_schema={
+            "type": "object",
+            "properties": {
+                "timezone": {
+                    "type": "string",
+                    "description": "Optional IANA timezone, for example America/New_York.",
+                }
+            },
+        },
         executor=get_current_datetime_skill,
     ),
     SkillSpec(
         name="search_web",
-        description="Discover web URLs and dates for a query. Use type='news' for news results.",
+        description="Discover general web URLs and dates for a query. Use search_news instead for current news coverage.",
         pack="core",
-        input_schema={"query": "string", "max_results": "integer", "type": "string"},
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query."},
+                "max_results": {"type": "integer", "default": DEFAULT_SEARCH_MAX_RESULTS, "minimum": 1},
+            },
+            "required": ["query"],
+        },
         executor=search_web_skill,
     ),
     SkillSpec(
-        name="read_web_pages",
-        description="Read extracted text from specific web URLs returned by search_web results.",
+        name="search_news",
+        description="Discover news URLs and publication dates for current or time-sensitive events.",
         pack="core",
         input_schema={
-            "urls": "string[]",
-            "max_urls": "integer",
-            "max_chars_per_url": "integer",
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "News search query."},
+                "max_results": {"type": "integer", "default": DEFAULT_SEARCH_MAX_RESULTS, "minimum": 1},
+            },
+            "required": ["query"],
+        },
+        executor=search_news_skill,
+    ),
+    SkillSpec(
+        name="read_web_pages",
+        description="Read extracted text from specific URLs returned by search_web or search_news.",
+        pack="core",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "urls": {"type": "array", "items": {"type": "string"}, "description": "URLs to read."},
+                "max_urls": {"type": "integer", "default": DEFAULT_READ_WEB_MAX_URLS, "minimum": 1},
+                "max_chars_per_url": {
+                    "type": "integer",
+                    "default": DEFAULT_MAX_CHARS_PER_URL,
+                    "minimum": 500,
+                },
+            },
+            "required": ["urls"],
         },
         executor=read_web_pages_skill,
     ),
@@ -854,10 +770,13 @@ CORE_SKILLS = [
         description="Condense long text while preserving names, numbers, and key facts.",
         pack="core",
         input_schema={
-            "text": "string",
-            "max_chars": "integer",
-            "purpose": "string",
-            "focus_areas": "string",
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Text to condense. Defaults to recent skill output."},
+                "max_chars": {"type": "integer", "default": DEFAULT_CONDENSE_MAX_CHARS, "minimum": 200},
+                "purpose": {"type": "string", "default": "harness review"},
+                "focus_areas": {"type": "string", "description": "Optional facts or sections to preserve."},
+            },
         },
         executor=condense_context_skill,
     ),
@@ -866,29 +785,17 @@ CORE_SKILLS = [
         description="Read an exact local file path and return its content directly without hidden summarization.",
         pack="core",
         input_schema={
-            "path": "string",
-            "max_chars": "integer",
-            "start_char": "integer",
-            "start_line": "integer",
-            "max_lines": "integer",
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Exact visible file path."},
+                "max_chars": {"type": "integer", "default": DEFAULT_MAX_CHARS_PER_URL},
+                "start_char": {"type": "integer", "default": 0, "minimum": 0},
+                "start_line": {"type": "integer", "minimum": 1},
+                "max_lines": {"type": "integer", "description": "Line count to read from start_line."},
+            },
+            "required": ["path"],
         },
         produces_artifacts=False,
         executor=read_skill,
-    ),
-    SkillSpec(
-        name="retrieve_sources",
-        description="Build, rank, ingest, and reduce a retrieval corpus.",
-        pack="core",
-        input_schema={
-            "stage": "string",
-            "prompt": "string",
-            "query_target": "integer",
-            "candidate_target": "integer",
-            "read_queue_target": "integer",
-            "ingest_batch_size": "integer",
-            "max_chars_per_url": "integer",
-        },
-        produces_artifacts=True,
-        executor=retrieve_sources_skill,
     ),
 ]

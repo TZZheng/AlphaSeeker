@@ -145,7 +145,7 @@ Base model-visible tools come from `executor.py`:
 
 Skill packs are registered in `registry.py` and `skills/`:
 
-- `core`: local file reads/search, web search/read, context condensation, composite retrieval
+- `core`: local file reads/search, web/news search/read, context condensation
 - `equity`: market data, company profile, financials, SEC filings, insiders, peers
 - `macro`: macro indicator helpers
 - `commodity`: EIA inventory, COT, futures curve helpers
@@ -186,8 +186,7 @@ data/harness_runs/<run_id>/
         ├── scratch/               # Agent-authored working files only
         ├── artifacts/             # Tool outputs, readable by exact path
         │   ├── skills/
-        │   ├── search/
-        │   └── reduction/
+        │   └── search/
         └── _harness/              # Harness-private logs and state
             ├── state/
             │   ├── status.txt

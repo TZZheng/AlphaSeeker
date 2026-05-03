@@ -6,6 +6,7 @@ from src.harness.tool_catalog import (
     tool_schema_properties,
     tool_specs_for_names,
 )
+from src.harness.types import SkillSpec
 
 
 def test_harness_base_tool_schema_is_available_by_name() -> None:
@@ -30,15 +31,37 @@ def test_patch_tool_description_includes_compact_example() -> None:
     assert "+new line" in spec["description"]
 
 
-def test_skill_specs_convert_compact_schema_to_json_schema() -> None:
+def test_skill_specs_pass_through_full_json_schema() -> None:
     specs = tool_specs_for_names(["read", "grep"], available_skills=CORE_SKILLS)
     by_name = {spec["name"]: spec for spec in specs}
 
-    assert by_name["read"]["input_schema"]["properties"]["path"] == {"type": "string"}
-    assert by_name["read"]["input_schema"]["properties"]["max_chars"] == {"type": "integer"}
+    assert by_name["read"]["input_schema"]["required"] == ["path"]
+    assert by_name["read"]["input_schema"]["properties"]["path"]["type"] == "string"
+    assert by_name["read"]["input_schema"]["properties"]["max_chars"]["default"] == 12000
+    assert by_name["grep"]["input_schema"]["required"] == ["pattern"]
     assert by_name["grep"]["input_schema"]["properties"]["paths"] == {
         "type": "array",
         "items": {"type": "string"},
+        "description": "Optional visible files or directories. Defaults to the agent's visible workspace.",
+    }
+
+
+def test_skill_specs_convert_compact_schema_to_json_schema() -> None:
+    compact_skill = SkillSpec(
+        name="compact",
+        description="Compact schema test.",
+        pack="core",
+        input_schema={"name": "string", "tags": "string[]"},
+    )
+
+    spec = tool_specs_for_names(["compact"], available_skills=[compact_skill])[0]
+
+    assert spec["input_schema"] == {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+        },
     }
 
 
