@@ -22,7 +22,7 @@ src/harness/
 ├── prompt_builder.py        # Prompt bundle assembly for agents and commenters
 ├── presets.py               # Preset tool allowlists and visible-skill policy
 ├── registry.py              # Skill-pack registry builder
-├── retrieval.py             # Deterministic retrieval and reduction helpers
+├── evaluator.py             # Report-version quality evaluation and trajectory scoring
 ├── benchmark.py             # Benchmark cases, lanes, and metrics extraction
 ├── types.py                 # Pydantic contracts for requests, state, evidence, events
 ├── TASK.md                  # Local package notes
