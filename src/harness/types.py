@@ -102,6 +102,78 @@ class SkillSpec(BaseModel):
     )
 
 
+_TOOL_VIEW_DESCRIPTION_LIMIT = 600
+
+
+def _truncate_tool_view_description(text: str) -> str:
+    if len(text) <= _TOOL_VIEW_DESCRIPTION_LIMIT:
+        return text
+    return text[: max(0, _TOOL_VIEW_DESCRIPTION_LIMIT - 18)] + f"... [{len(text)} chars]"
+
+
+def _line_count(text: str) -> int:
+    return len(text.splitlines())
+
+
+class ToolView(BaseModel):
+    """Two views of one tool result: full audit log and compact model-visible state."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    log: dict[str, Any]
+    conversation: dict[str, Any]
+
+    @classmethod
+    def from_result(
+        cls,
+        tool_name: str,
+        result: dict[str, Any],
+        *,
+        arguments: dict[str, Any] | None = None,
+        canonical_path: str | None = None,
+        canonical_fields: dict[str, Any] | None = None,
+    ) -> "ToolView":
+        status = str(result.get("status") or "ok")
+        description = ""
+        for key in ("description", "summary", "message", "error"):
+            value = result.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                description = _truncate_tool_view_description(text)
+                break
+        if not description:
+            if status in {"error", "failed"}:
+                description = f"{tool_name} failed."
+            else:
+                description = f"{tool_name} completed with status {status}."
+        conversation = {
+            "tool_name": tool_name,
+            "status": status,
+            "description": description,
+        }
+        if tool_name == "write" and status == "ok":
+            path = canonical_path or result.get("path")
+            if path:
+                conversation["path"] = str(path)
+            conversation["operation"] = "overwrite"
+            if arguments is not None and "content" in arguments:
+                conversation["line_count"] = _line_count(str(arguments.get("content") or ""))
+        if canonical_fields:
+            conversation.update(
+                {
+                    key: value
+                    for key, value in canonical_fields.items()
+                    if value is not None
+                }
+            )
+        return cls(
+            log=dict(result),
+            conversation=conversation,
+        )
+
+
 AGENT_PRESETS = ("orchestrator", "research", "writer", "synthesizer", "evaluator")
 AGENT_STATUSES = (
     "queued",

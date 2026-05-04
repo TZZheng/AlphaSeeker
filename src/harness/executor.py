@@ -47,6 +47,7 @@ from src.harness.types import (
     Observation,
     SkillResult,
     SkillSpec,
+    ToolView,
 )
 from src.harness.visibility import (
     VisibilityError,
@@ -200,7 +201,7 @@ def execute_agent_command(session: AgentSession, command: AgentCommand) -> dict[
     return result
 
 
-def execute_model_tool(session: AgentSession, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+def execute_model_tool_view(session: AgentSession, tool_name: str, arguments: dict[str, Any]) -> ToolView:
     if tool_name in _HANDLERS:
         if tool_name not in session.allowed_tools:
             raise ValueError(f"Tool '{tool_name}' is not allowed for preset '{session.preset}'.")
@@ -221,7 +222,193 @@ def execute_model_tool(session: AgentSession, tool_name: str, arguments: dict[st
     append_tool_call_log(session.run_root, session.agent_id, tool_call_row)
     save_skill_state(session.state)
     refresh_progress_view(session.run_root)
-    return result
+    return ToolView.from_result(
+        tool_name,
+        result,
+        arguments=arguments,
+        canonical_path=_canonical_tool_read_path(session, tool_name, result),
+        canonical_fields=_canonical_tool_conversation_fields(session, tool_name, result, arguments),
+    )
+
+
+def execute_model_tool(session: AgentSession, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return execute_model_tool_view(session, tool_name, arguments).log
+
+
+def _canonical_tool_read_path(session: AgentSession, tool_name: str, result: dict[str, Any]) -> str | None:
+    if tool_name not in {"write", "edit", "patch"}:
+        return None
+    raw_path = result.get("path")
+    if not raw_path:
+        return None
+    return _agent_visible_path_for_model(session, str(raw_path))
+
+
+def _agent_visible_path_for_model(session: AgentSession, raw_path: str) -> str:
+    candidate = Path(str(raw_path)).expanduser()
+    if not candidate.is_absolute():
+        candidate = agent_workspace_paths(session.run_root, session.agent_id)["workspace"] / candidate
+    candidate = candidate.resolve(strict=False)
+    paths = agent_workspace_paths(session.run_root, session.agent_id)
+    for root_name, root_key in (
+        ("publish", "publish_root"),
+        ("scratch", "scratch_root"),
+        ("context", "context_root"),
+    ):
+        root = paths[root_key].resolve(strict=False)
+        try:
+            relative = candidate.relative_to(root)
+        except ValueError:
+            continue
+        if relative.parts:
+            return f"{root_name}/{relative.as_posix()}"
+    if candidate == paths["task"].resolve(strict=False):
+        return "task.md"
+    if candidate == paths["tools"].resolve(strict=False):
+        return "tools.md"
+    for record in latest_agent_records(session.run_root).values():
+        if record.parent_id != session.agent_id:
+            continue
+        child_publish = agent_workspace_paths(session.run_root, record.agent_id)["publish_root"].resolve(strict=False)
+        try:
+            relative = candidate.relative_to(child_publish)
+        except ValueError:
+            continue
+        if relative.parts:
+            return f"{record.agent_id}/publish/{relative.as_posix()}"
+    return raw_path
+
+
+def _line_count_for_file(path: str | None) -> int | None:
+    if not path:
+        return None
+    try:
+        return len(Path(path).read_text(encoding="utf-8").splitlines())
+    except OSError:
+        return None
+
+
+def _line_count_for_text(text: str) -> int:
+    return len(text.splitlines())
+
+
+def _grep_matches_for_canonical(session: AgentSession, result: dict[str, Any]) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    content = str(result.get("content") or "")
+    for block in content.split("\n\n"):
+        first_line = block.splitlines()[0] if block.splitlines() else ""
+        path_text, separator, line_text = first_line.rpartition(":")
+        if not separator:
+            continue
+        try:
+            line_number = int(line_text)
+        except ValueError:
+            continue
+        matches.append(
+            {
+                "path": _agent_visible_path_for_model(session, path_text),
+                "line": line_number,
+            }
+        )
+    return matches
+
+
+def _canonical_child_publish_files(child: dict[str, Any], agent_id: str) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for item in child.get("publish_files") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        rows.append(
+            {
+                "path": f"{agent_id}/publish/{name}",
+                "description": str(item.get("description") or ""),
+            }
+        )
+    return rows
+
+
+def _canonical_tool_conversation_fields(
+    session: AgentSession,
+    tool_name: str,
+    result: dict[str, Any],
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    if tool_name == "edit":
+        return {
+            "path": _canonical_tool_read_path(session, tool_name, result),
+            "operation": result.get("operation"),
+            "match_count": result.get("match_count"),
+            "line_count": _line_count_for_file(str(result.get("path") or "")),
+        }
+    if tool_name == "patch":
+        return {
+            "path": _canonical_tool_read_path(session, tool_name, result),
+            "operation": "patch",
+            "line_count": _line_count_for_file(str(result.get("path") or "")),
+        }
+    if tool_name == "read":
+        fields: dict[str, Any] = {
+            "status": "ok" if str(result.get("status") or "") == "truncated" else result.get("status"),
+            "description": "Read file content.",
+            "path": _agent_visible_path_for_model(session, str(arguments.get("path") or result.get("path") or "")),
+            "content": result.get("content") or "",
+            "line_count": _line_count_for_text(str(result.get("content") or "")),
+        }
+        if arguments.get("start_line") is not None:
+            fields["start_line"] = int(arguments.get("start_line") or 1)
+        else:
+            fields["start_char"] = int(arguments.get("start_char") or 0)
+        return fields
+    if tool_name == "grep":
+        matches = _grep_matches_for_canonical(session, result)
+        return {
+            "pattern": str(arguments.get("pattern") or arguments.get("query") or ""),
+            "match_count": len(matches),
+            "matches": matches,
+        }
+    if tool_name == "bash":
+        returncode = int(result.get("returncode", 0) or 0)
+        fields = {
+            "status": "ok" if returncode == 0 else "failed",
+            "argv": result.get("argv") or arguments.get("argv") or [],
+            "returncode": returncode,
+        }
+        stderr = str(result.get("stderr") or "")
+        stdout = str(result.get("stdout") or "")
+        if stdout and not stderr:
+            fields["stdout"] = stdout
+        return fields
+    if tool_name == "delegate":
+        return {
+            "agent_id": result.get("agent_id"),
+            "preset": result.get("preset"),
+        }
+    if tool_name == "agents":
+        children = []
+        for child in result.get("children") or []:
+            if not isinstance(child, dict):
+                continue
+            agent_id = str(child.get("agent_id") or "")
+            if not agent_id:
+                continue
+            children.append(
+                {
+                    "agent_id": agent_id,
+                    "preset": child.get("preset") or "",
+                    "status": child.get("status") or "",
+                    "description": child.get("description") or "",
+                    "publish_files": _canonical_child_publish_files(child, agent_id),
+                }
+            )
+        return {
+            "children": children,
+            "completed_count": result.get("completed_count"),
+            "running_count": result.get("running_count"),
+        }
+    return {}
 
 
 def _snapshot_final_report_after_tool(session: AgentSession, tool_name: str, result: dict[str, Any]) -> None:

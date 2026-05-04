@@ -16,12 +16,12 @@ from src.harness.artifacts import (
     write_status,
     write_text_atomic,
 )
-from src.harness.executor import _HANDLERS, create_or_load_session, execute_model_tool
+from src.harness.executor import _HANDLERS, create_or_load_session, execute_model_tool, execute_model_tool_view
 from src.harness.presets import default_tool_allowlist, visible_skills_for_preset
 from src.harness.prompt_builder import render_task_markdown, render_tools_markdown
 from src.harness.registry import build_skill_registry, get_skills_for_packs
 from src.harness.tool_catalog import harness_tool_definitions
-from src.harness.types import AGENT_PRESETS, HarnessRequest, SkillMetrics, SkillResult, SkillSpec
+from src.harness.types import AGENT_PRESETS, HarnessRequest, SkillMetrics, SkillResult, SkillSpec, ToolView
 
 
 def _create_basic_session(
@@ -70,6 +70,230 @@ def test_all_executor_handlers_are_exposed_by_a_preset_allowlist() -> None:
         exposed_tools.update(default_tool_allowlist(preset))
 
     assert set(_HANDLERS) <= exposed_tools
+
+
+def test_tool_view_fallback_keeps_full_log_and_minimal_conversation() -> None:
+    large_content = "A" * 2000
+    result = {
+        "status": "ok",
+        "summary": "Wrote publish/final.md",
+        "content": large_content,
+        "path": "/tmp/run/agents/agent_root/publish/final.md",
+    }
+
+    view = ToolView.from_result(
+        "write",
+        result,
+        arguments={"path": "publish/final.md", "content": "alpha\nbeta\n"},
+        canonical_path="publish/final.md",
+    )
+
+    assert view.log == result
+    assert view.conversation == {
+        "tool_name": "write",
+        "status": "ok",
+        "description": "Wrote publish/final.md",
+        "path": "publish/final.md",
+        "operation": "overwrite",
+        "line_count": 2,
+    }
+    assert "content" not in view.conversation
+    assert large_content not in json.dumps(view.conversation)
+
+
+def test_tool_view_fallback_uses_bounded_error_description() -> None:
+    error = "File mismatch. " + ("details " * 200)
+
+    view = ToolView.from_result("edit", {"status": "error", "error": error})
+
+    assert view.conversation["tool_name"] == "edit"
+    assert view.conversation["status"] == "error"
+    assert view.conversation["description"].startswith("File mismatch.")
+    assert len(view.conversation["description"]) <= 600
+    assert f"[{len(error.strip())} chars]" in view.conversation["description"]
+
+
+def test_execute_model_tool_view_write_adds_minimal_specific_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _run_root, _root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-write-toolview",
+        user_prompt="Write a file",
+    )
+
+    view = execute_model_tool_view(
+        session,
+        "write",
+        {"path": "scratch/notes.md", "content": "alpha\nbeta\n"},
+    )
+
+    assert view.log["path"].endswith("/scratch/notes.md")
+    assert view.conversation["path"] == "scratch/notes.md"
+    assert view.conversation["operation"] == "overwrite"
+    assert view.conversation["line_count"] == 2
+    assert view.log["path"] not in json.dumps(view.conversation)
+    assert set(view.conversation) == {
+        "tool_name",
+        "status",
+        "description",
+        "path",
+        "operation",
+        "line_count",
+    }
+
+
+def test_tool_view_file_edit_patch_read_and_grep_use_minimal_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _run_root, _root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-file-toolviews",
+        user_prompt="Edit files",
+        preset="research",
+    )
+
+    execute_model_tool_view(
+        session,
+        "write",
+        {"path": "scratch/notes.md", "content": "alpha\nneedle secret context\ngamma\n"},
+    )
+    edit_view = execute_model_tool_view(
+        session,
+        "edit",
+        {
+            "path": "scratch/notes.md",
+            "operation": "replace",
+            "target_text": "alpha",
+            "content": "ALPHA",
+        },
+    )
+    patch_view = execute_model_tool_view(
+        session,
+        "patch",
+        {
+            "patch": (
+                "*** Begin Patch\n"
+                "*** Update File: scratch/notes.md\n"
+                "@@\n"
+                "-gamma\n"
+                "+GAMMA\n"
+                "*** End Patch\n"
+            )
+        },
+    )
+    read_view = execute_model_tool_view(
+        session,
+        "read",
+        {"path": "scratch/notes.md", "start_line": 2, "max_lines": 1},
+    )
+    grep_view = execute_model_tool_view(
+        session,
+        "grep",
+        {"pattern": "needle", "paths": ["scratch/notes.md"]},
+    )
+
+    assert edit_view.conversation["path"] == "scratch/notes.md"
+    assert edit_view.conversation["operation"] == "replace"
+    assert edit_view.conversation["match_count"] == 1
+    assert edit_view.conversation["line_count"] == 3
+    assert "before_chars" not in edit_view.conversation
+    assert "after_chars" not in edit_view.conversation
+
+    assert patch_view.conversation["path"] == "scratch/notes.md"
+    assert patch_view.conversation["operation"] == "patch"
+    assert patch_view.conversation["line_count"] == 3
+    assert "hunks_applied" not in patch_view.conversation
+
+    rendered_read = json.dumps(read_view.conversation)
+    assert read_view.conversation["status"] == "ok"
+    assert read_view.conversation["path"] == "scratch/notes.md"
+    assert read_view.conversation["content"] == "needle secret context\n"
+    assert read_view.conversation["start_line"] == 2
+    assert read_view.conversation["line_count"] == 1
+    assert "truncated" not in rendered_read.lower()
+
+    assert grep_view.conversation["pattern"] == "needle"
+    assert grep_view.conversation["match_count"] == 1
+    assert grep_view.conversation["matches"] == [{"path": "scratch/notes.md", "line": 2}]
+    assert "secret context" not in json.dumps(grep_view.conversation)
+
+
+def test_tool_view_bash_delegate_agents_and_status_use_minimal_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-control-toolviews",
+        user_prompt="Coordinate agents",
+        preset="orchestrator",
+    )
+
+    bash_ok = execute_model_tool_view(session, "bash", {"argv": ["ls"]})
+    bash_stderr = execute_model_tool_view(session, "bash", {"argv": ["rg", "["]})
+    delegate_view = execute_model_tool_view(
+        session,
+        "delegate",
+        {
+            "task_name": "child",
+            "description": "Do focused work",
+            "preset": "research",
+            "expected_publish_files": ["publish/hidden.md"],
+        },
+    )
+    child_id = str(delegate_view.conversation["agent_id"])
+    child_session = create_or_load_session(
+        request=session.request,
+        run_root=str(run_root),
+        agent_id=child_id,
+        preset="research",
+        registry_map=session.registry_map,
+    )
+    execute_model_tool_view(child_session, "write", {"path": "publish/summary.md", "content": "# Child\n"})
+    agents_view = execute_model_tool_view(session, "agents", {})
+    status_view = execute_model_tool_view(session, "status", {"status": "done"})
+
+    assert bash_ok.conversation["argv"] == ["ls"]
+    assert bash_ok.conversation["returncode"] == 0
+    assert "stdout" in bash_ok.conversation
+    assert "stderr" not in bash_ok.conversation
+
+    assert bash_stderr.conversation["argv"] == ["rg", "["]
+    assert bash_stderr.conversation["returncode"] != 0
+    assert "stdout" not in bash_stderr.conversation
+    assert "stderr" not in bash_stderr.conversation
+
+    assert delegate_view.conversation["agent_id"] == child_id
+    assert delegate_view.conversation["preset"] == "research"
+    assert delegate_view.conversation["status"] == "queued"
+    assert "expected_publish_files" not in delegate_view.conversation
+
+    children = agents_view.conversation["children"]
+    assert children == [
+        {
+            "agent_id": child_id,
+            "preset": "research",
+            "status": "queued",
+            "description": "Do focused work",
+            "publish_files": [
+                {"path": f"{child_id}/publish/summary.md", "description": "# Child"}
+            ],
+        }
+    ]
+    assert agents_view.conversation["completed_count"] == 0
+    assert agents_view.conversation["running_count"] == 1
+
+    assert status_view.conversation == {
+        "tool_name": "status",
+        "status": "done",
+        "description": "status completed with status done.",
+    }
 
 
 def test_delegate_rejects_unknown_preset_and_lists_legal_presets(

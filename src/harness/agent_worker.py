@@ -35,10 +35,16 @@ from src.harness.artifacts import (
 )
 from src.harness.commenter import build_comment_feed_message
 from src.harness.commenter import commenter_gate_finished, open_commenter_gate
-from src.harness.executor import TERMINAL_STATUSES, create_or_load_session, execute_agent_command, execute_model_tool, model_tool_specs
+from src.harness.executor import (
+    TERMINAL_STATUSES,
+    create_or_load_session,
+    execute_agent_command,
+    execute_model_tool_view,
+    model_tool_specs,
+)
 from src.harness.presets import visible_skills_for_preset
 from src.harness.prompt_builder import build_agent_prompt_bundle, build_agent_runtime_delta_prompt
-from src.harness.types import AgentCommand, AgentEvent
+from src.harness.types import AgentCommand, AgentEvent, ToolView
 from src.shared.llm_manager import get_llm
 from src.shared.model_config import get_model
 from src.harness.transport import (
@@ -772,7 +778,9 @@ def _execute_model_tool_calls(
     tool_results: list[dict[str, Any]] = []
     for tool_call in tool_calls:
         try:
-            result = execute_model_tool(runtime.session, tool_call.name, tool_call.arguments)
+            tool_view = execute_model_tool_view(runtime.session, tool_call.name, tool_call.arguments)
+            result = tool_view.log
+            conversation_result = tool_view.conversation
             append_event(
                 run_root,
                 AgentEvent(
@@ -787,6 +795,7 @@ def _execute_model_tool_calls(
                 "status": "error",
                 "error": f"{type(exc).__name__}: {exc}",
             }
+            conversation_result = ToolView.from_result(tool_call.name, result, arguments=tool_call.arguments).conversation
             append_event(
                 run_root,
                 AgentEvent(
@@ -806,6 +815,7 @@ def _execute_model_tool_calls(
                 "name": tool_call.name,
                 "arguments": tool_call.arguments,
                 "result": result,
+                "conversation_result": conversation_result,
             }
         )
     return tool_results

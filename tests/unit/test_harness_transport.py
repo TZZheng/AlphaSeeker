@@ -19,8 +19,15 @@ from src.harness.artifacts import (
 from src.harness.presets import default_tool_allowlist
 from src.harness.prompt_builder import render_task_markdown, render_tools_markdown
 from src.harness.registry import build_skill_registry, get_skills_for_packs
-from src.harness.transport import BaseAgentTransport, MiniMaxAnthropicTransport, OpenAINativeTransport
 from src.harness.transport import (
+    AnthropicNativeTransport,
+    BaseAgentTransport,
+    MiniMaxAnthropicTransport,
+    MiniMaxOpenAITransport,
+    OpenAINativeTransport,
+)
+from src.harness.transport import (
+    _build_request_payload,
     _canonicalize_message_for_conversation,
     _conversation_messages,
     _persist_history_compaction_state,
@@ -510,6 +517,152 @@ def test_canonical_conversation_keeps_tool_results_paired_after_tool_calls(
     assert [message["role"] for message in messages] == ["user", "assistant", tool_result_role]
     assert messages[1]["role"] == "assistant"
     assert messages[2]["role"] == tool_result_role
+
+
+@pytest.mark.parametrize(
+    ("transport_name", "transport_class", "model_name", "env_key", "assistant_message", "tool_result_role"),
+    [
+        (
+            "minimax_anthropic",
+            MiniMaxAnthropicTransport,
+            "minimax/MiniMax-M2.7",
+            "MINIMAX_API_KEY",
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "call_write", "name": "write", "input": {"path": "publish/final.md"}}],
+            },
+            "user",
+        ),
+        (
+            "anthropic",
+            AnthropicNativeTransport,
+            "claude-sonnet-4-6",
+            "ANTHROPIC_API_KEY",
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "call_write", "name": "write", "input": {"path": "publish/final.md"}}],
+            },
+            "user",
+        ),
+        (
+            "minimax_openai",
+            MiniMaxOpenAITransport,
+            "minimax/MiniMax-M2.7",
+            "MINIMAX_API_KEY",
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_write",
+                        "type": "function",
+                        "function": {"name": "write", "arguments": '{"path":"publish/final.md"}'},
+                    }
+                ],
+            },
+            "tool",
+        ),
+        (
+            "openai",
+            OpenAINativeTransport,
+            "gpt-4o",
+            "OPENAI_API_KEY",
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_write",
+                        "type": "function",
+                        "function": {"name": "write", "arguments": '{"path":"publish/final.md"}'},
+                    }
+                ],
+            },
+            "tool",
+        ),
+    ],
+)
+def test_native_tool_results_use_toolview_conversation_and_full_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    transport_name: str,
+    transport_class: type[BaseAgentTransport],
+    model_name: str,
+    env_key: str,
+    assistant_message: dict[str, object],
+    tool_result_role: str,
+) -> None:
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+    monkeypatch.setenv(env_key, "test-key")
+    if transport_name in {"anthropic", "minimax_anthropic"}:
+        monkeypatch.setattr("src.harness.transport.anthropic.Anthropic", lambda **_: _FakeAnthropicClient())
+    else:
+        monkeypatch.setattr("src.harness.transport.OpenAI", lambda **_: _FakeOpenAIClient())
+    transport = transport_class(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name=model_name,
+        system_prompt="System v1",
+    )
+    full_content = "RAW_FILE_CONTENT_" + ("A" * 1800)
+    conversation_result = {
+        "tool_name": "write",
+        "status": "ok",
+        "description": "Wrote publish/final.md",
+        "path": "publish/final.md",
+        "operation": "overwrite",
+        "line_count": 12,
+    }
+
+    transport.append_user_text("Initial prompt")
+    _append_model_visible_entry(
+        run_root,
+        agent_id,
+        kind="assistant_response",
+        message=assistant_message,
+        transport=transport_name,
+    )
+    transport.append_tool_results(
+        [
+            {
+                "call_id": "call_write",
+                "name": "write",
+                "result": {"status": "ok", "content": full_content},
+                "conversation_result": conversation_result,
+            }
+        ]
+    )
+
+    transcript_tool_result = next(
+        entry for entry in reversed(load_transcript_entries(run_root, agent_id)) if entry["kind"] == "tool_result"
+    )
+    conversation_tool_result = next(
+        entry for entry in reversed(load_conversation_entries(run_root, agent_id)) if entry["kind"] == "tool_result"
+    )
+    replay_messages = _conversation_messages(str(run_root), agent_id)
+    request_payload = _build_request_payload(
+        transport_name=transport_name,
+        model_name=model_name,
+        system_prompt="System v1",
+        transcript_messages=replay_messages,
+        tool_specs=[],
+    )
+    rendered_transcript = json.dumps(transcript_tool_result["message"], ensure_ascii=True)
+    rendered_conversation = json.dumps(conversation_tool_result["message"], ensure_ascii=True)
+    rendered_request = json.dumps(request_payload, ensure_ascii=True)
+    replay_tool_message = replay_messages[2]
+    if tool_result_role == "user":
+        replay_tool_result = json.loads(replay_tool_message["content"][0]["content"])
+    else:
+        replay_tool_result = json.loads(replay_tool_message["content"])
+
+    assert full_content in rendered_transcript
+    assert full_content not in rendered_conversation
+    assert full_content not in rendered_request
+    assert replay_tool_result == conversation_result
+    assert "Wrote publish/final.md" in rendered_conversation
+    assert "Wrote publish/final.md" in rendered_request
+    assert [message["role"] for message in replay_messages] == ["user", "assistant", tool_result_role]
 
 
 def test_missing_canonical_conversation_is_hard_cutover_error(

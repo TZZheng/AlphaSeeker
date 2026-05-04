@@ -192,6 +192,14 @@ def _serialize_payload(payload: Any) -> Any:
     return payload
 
 
+def _tool_result_log_payload(tool_result: dict[str, Any]) -> Any:
+    return tool_result.get("result", {})
+
+
+def _tool_result_conversation_payload(tool_result: dict[str, Any]) -> Any:
+    return tool_result.get("conversation_result", _tool_result_log_payload(tool_result))
+
+
 def _truncate_text(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
@@ -1553,21 +1561,30 @@ class MiniMaxAnthropicTransport(BaseAgentTransport):
         )
 
     def append_tool_results(self, tool_results: list[dict[str, Any]]) -> None:
-        content = [
+        transcript_content = [
             {
                 "type": "tool_result",
                 "tool_use_id": result["call_id"],
-                "content": json.dumps(result["result"], ensure_ascii=True),
+                "content": json.dumps(_tool_result_log_payload(result), ensure_ascii=True),
             }
             for result in tool_results
         ]
-        message = {"role": "user", "content": content}
+        conversation_content = [
+            {
+                "type": "tool_result",
+                "tool_use_id": result["call_id"],
+                "content": json.dumps(_tool_result_conversation_payload(result), ensure_ascii=True),
+            }
+            for result in tool_results
+        ]
+        transcript_message = {"role": "user", "content": transcript_content}
+        conversation_message = {"role": "user", "content": conversation_content}
         append_transcript_entry(
             self.run_root,
             self.agent_id,
-            {"kind": "tool_result", "message": message},
+            {"kind": "tool_result", "message": transcript_message},
         )
-        self._append_conversation_message(kind="tool_result", message=message)
+        self._append_conversation_message(kind="tool_result", message=conversation_message)
 
 
 class MiniMaxOpenAITransport(BaseAgentTransport):
@@ -1655,17 +1672,22 @@ class MiniMaxOpenAITransport(BaseAgentTransport):
 
     def append_tool_results(self, tool_results: list[dict[str, Any]]) -> None:
         for result in tool_results:
-            message = {
+            transcript_message = {
                 "role": "tool",
                 "tool_call_id": result["call_id"],
-                "content": json.dumps(result["result"], ensure_ascii=True),
+                "content": json.dumps(_tool_result_log_payload(result), ensure_ascii=True),
+            }
+            conversation_message = {
+                "role": "tool",
+                "tool_call_id": result["call_id"],
+                "content": json.dumps(_tool_result_conversation_payload(result), ensure_ascii=True),
             }
             append_transcript_entry(
                 self.run_root,
                 self.agent_id,
-                {"kind": "tool_result", "message": message},
+                {"kind": "tool_result", "message": transcript_message},
             )
-            self._append_conversation_message(kind="tool_result", message=message)
+            self._append_conversation_message(kind="tool_result", message=conversation_message)
 
 
 class AnthropicNativeTransport(BaseAgentTransport):
@@ -1890,21 +1912,30 @@ class AnthropicNativeTransport(BaseAgentTransport):
 
     def append_tool_results(self, tool_results: list[dict[str, Any]]) -> None:
         # Anthropic format: tool_result blocks with tool_use_id
-        content = [
+        transcript_content = [
             {
                 "type": "tool_result",
                 "tool_use_id": result["call_id"],
-                "content": json.dumps(result["result"], ensure_ascii=True),
+                "content": json.dumps(_tool_result_log_payload(result), ensure_ascii=True),
             }
             for result in tool_results
         ]
-        message = {"role": "user", "content": content}
+        conversation_content = [
+            {
+                "type": "tool_result",
+                "tool_use_id": result["call_id"],
+                "content": json.dumps(_tool_result_conversation_payload(result), ensure_ascii=True),
+            }
+            for result in tool_results
+        ]
+        transcript_message = {"role": "user", "content": transcript_content}
+        conversation_message = {"role": "user", "content": conversation_content}
         append_transcript_entry(
             self.run_root,
             self.agent_id,
-            {"kind": "tool_result", "message": message},
+            {"kind": "tool_result", "message": transcript_message},
         )
-        self._append_conversation_message(kind="tool_result", message=message)
+        self._append_conversation_message(kind="tool_result", message=conversation_message)
 
 
 class OpenAINativeTransport(BaseAgentTransport):
@@ -1997,17 +2028,22 @@ class OpenAINativeTransport(BaseAgentTransport):
     def append_tool_results(self, tool_results: list[dict[str, Any]]) -> None:
         # OpenAI format: one role=tool message per result with tool_call_id
         for result in tool_results:
-            message = {
+            transcript_message = {
                 "role": "tool",
                 "tool_call_id": result["call_id"],
-                "content": json.dumps(result["result"], ensure_ascii=True),
+                "content": json.dumps(_tool_result_log_payload(result), ensure_ascii=True),
+            }
+            conversation_message = {
+                "role": "tool",
+                "tool_call_id": result["call_id"],
+                "content": json.dumps(_tool_result_conversation_payload(result), ensure_ascii=True),
             }
             append_transcript_entry(
                 self.run_root,
                 self.agent_id,
-                {"kind": "tool_result", "message": message},
+                {"kind": "tool_result", "message": transcript_message},
             )
-            self._append_conversation_message(kind="tool_result", message=message)
+            self._append_conversation_message(kind="tool_result", message=conversation_message)
 
 
 def create_transport(
