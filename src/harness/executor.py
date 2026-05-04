@@ -408,6 +408,25 @@ def _canonical_tool_conversation_fields(
             "completed_count": result.get("completed_count"),
             "running_count": result.get("running_count"),
         }
+    if tool_name in {"search_web", "search_news"}:
+        results = result.get("results") or []
+        return {
+            "query": str(arguments.get("query") or ""),
+            "result_count": len(results),
+            "results": results,
+        }
+    if tool_name == "read_web_pages":
+        urls = [str(item) for item in arguments.get("urls") or [] if str(item).strip()]
+        max_urls = max(1, int(arguments.get("max_urls", len(urls) or 1)))
+        selected_urls = urls[:max_urls]
+        return {
+            "urls": selected_urls,
+            "page_count": len(selected_urls),
+        }
+    if tool_name == "condense_context":
+        return {
+            "content": result.get("content") or "",
+        }
     return {}
 
 

@@ -903,6 +903,107 @@ def test_openai_transport_request_uses_canonical_conversation_not_transcript(
     assert "transcript-only" not in rendered_messages
 
 
+def test_condense_context_result_cuts_prior_canonical_content(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+    transport = DummyTransport(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name="gpt-4o",
+        system_prompt="System v1",
+    )
+    old_page_body = "OLD_RAW_WEB_CONTENT_SHOULD_DISAPPEAR"
+
+    transport.append_user_text("Old turn")
+    _append_model_visible_entry(
+        run_root,
+        agent_id,
+        kind="assistant_response",
+        message={
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_read_web",
+                    "type": "function",
+                    "function": {
+                        "name": "read_web_pages",
+                        "arguments": '{"urls":["https://example.com/old"]}',
+                    },
+                }
+            ],
+        },
+    )
+    _append_model_visible_entry(
+        run_root,
+        agent_id,
+        kind="tool_result",
+        message={
+            "role": "tool",
+            "tool_call_id": "call_read_web",
+            "content": json.dumps(
+                {
+                    "tool_name": "read_web_pages",
+                    "status": "ok",
+                    "description": "Read page.",
+                    "content": old_page_body,
+                },
+                ensure_ascii=True,
+            ),
+        },
+    )
+    transport.append_user_text("Condense now")
+    _append_model_visible_entry(
+        run_root,
+        agent_id,
+        kind="assistant_response",
+        message={
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_condense",
+                    "type": "function",
+                    "function": {
+                        "name": "condense_context",
+                        "arguments": '{"purpose":"continue research"}',
+                    },
+                }
+            ],
+        },
+    )
+    _append_model_visible_entry(
+        run_root,
+        agent_id,
+        kind="tool_result",
+        message={
+            "role": "tool",
+            "tool_call_id": "call_condense",
+            "content": json.dumps(
+                {
+                    "tool_name": "condense_context",
+                    "status": "ok",
+                    "description": "Condensed context.",
+                    "content": "Condensed durable context.",
+                },
+                ensure_ascii=True,
+            ),
+        },
+    )
+    transport.append_user_text("Continue")
+
+    messages = _conversation_messages(str(run_root), agent_id)
+    rendered = json.dumps(messages, ensure_ascii=True)
+
+    assert [message["role"] for message in messages] == ["user", "assistant", "tool", "user"]
+    assert "Condensed durable context." in rendered
+    assert old_page_body not in rendered
+    assert "Old turn" not in rendered
+    assert "Continue" in rendered
+
+
 def test_openai_transport_canonical_request_omits_large_write_arguments(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

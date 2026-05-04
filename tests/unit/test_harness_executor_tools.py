@@ -551,6 +551,78 @@ def test_search_news_result_matches_search_web_shape(
     assert f"Results artifact: {artifact_path}" in output_path.read_text(encoding="utf-8")
 
 
+def test_web_tool_canonical_views_are_minimal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _run_root, _root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-web-toolviews",
+        user_prompt="Search and read web pages.",
+        preset="research",
+    )
+    search_results = [
+        {
+            "title": "Energy policy update",
+            "href": "https://example.com/energy",
+            "date": "2026-01-02",
+            "body": "Search snippet that should stay out of canonical view.",
+        }
+    ]
+    page_text = "Long web page body that should be stripped from read_web_pages canonical view."
+    monkeypatch.setattr(
+        "src.harness.skills.core.search_web",
+        lambda _query, max_results=8: search_results[:max_results],
+    )
+    monkeypatch.setattr(
+        "src.harness.skills.core.search_news",
+        lambda _query, max_results=8: search_results[:max_results],
+    )
+    monkeypatch.setattr(
+        "src.harness.skills.core.read_urls_parallel",
+        lambda urls, **_kwargs: {url: page_text for url in urls},
+    )
+    monkeypatch.setattr(
+        "src.harness.skills.core.condense_context",
+        lambda **_kwargs: "Condensed durable context.",
+    )
+
+    web_view = execute_model_tool_view(session, "search_web", {"query": "xom policy", "max_results": 1})
+    news_view = execute_model_tool_view(session, "search_news", {"query": "xom news", "max_results": 1})
+    read_pages_view = execute_model_tool_view(
+        session,
+        "read_web_pages",
+        {"urls": ["https://example.com/energy"], "max_urls": 1},
+    )
+    condense_view = execute_model_tool_view(
+        session,
+        "condense_context",
+        {"text": "Very long previous context.", "purpose": "continue research"},
+    )
+
+    assert web_view.conversation["query"] == "xom policy"
+    assert web_view.conversation["result_count"] == 1
+    assert web_view.conversation["results"] == [
+        {"title": "Energy policy update", "url": "https://example.com/energy", "date": "2026-01-02"}
+    ]
+    assert "Search snippet" not in json.dumps(web_view.conversation)
+
+    assert news_view.conversation["query"] == "xom news"
+    assert news_view.conversation["result_count"] == 1
+    assert news_view.conversation["results"] == web_view.conversation["results"]
+
+    assert page_text in read_pages_view.log["content"]
+    assert read_pages_view.conversation["urls"] == ["https://example.com/energy"]
+    assert read_pages_view.conversation["page_count"] == 1
+    assert "content" not in read_pages_view.conversation
+    assert page_text not in json.dumps(read_pages_view.conversation)
+
+    assert condense_view.log["content"] == "Condensed durable context."
+    assert condense_view.conversation["content"] == "Condensed durable context."
+    assert "Very long previous context" not in json.dumps(condense_view.conversation)
+
+
 def test_domain_skill_passes_run_scoped_output_dir_to_provider(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

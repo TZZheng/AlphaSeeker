@@ -405,6 +405,95 @@ def _entry_has_tool_calls(entry: dict[str, Any]) -> bool:
     return isinstance(raw_message, dict) and _assistant_message_has_tool_calls(raw_message)
 
 
+def _assistant_message_calls_tool(message: dict[str, Any], tool_name: str) -> bool:
+    content = message.get("content")
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "tool_use" and item.get("name") == tool_name:
+                return True
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function")
+            if isinstance(function, dict) and function.get("name") == tool_name:
+                return True
+    function_call = message.get("function_call")
+    return isinstance(function_call, dict) and function_call.get("name") == tool_name
+
+
+def _tool_result_payloads(message: dict[str, Any]) -> list[dict[str, Any]]:
+    bodies: list[str] = []
+    content = message.get("content")
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "tool_result":
+                body = item.get("content")
+                if isinstance(body, str):
+                    bodies.append(body)
+    elif isinstance(content, str):
+        bodies.append(content)
+
+    payloads: list[dict[str, Any]] = []
+    for body in bodies:
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return payloads
+
+
+def _entry_is_condense_context_result(entry: dict[str, Any]) -> bool:
+    if entry.get("kind") != "tool_result":
+        return False
+    message = entry.get("message")
+    if not isinstance(message, dict):
+        return False
+    return any(payload.get("tool_name") == "condense_context" for payload in _tool_result_payloads(message))
+
+
+def _latest_condense_context_slice(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    condense_result_index: int | None = None
+    for index, entry in enumerate(entries):
+        if _entry_is_condense_context_result(entry):
+            condense_result_index = index
+    if condense_result_index is None:
+        return entries
+
+    assistant_index: int | None = None
+    for index in range(condense_result_index - 1, -1, -1):
+        entry = entries[index]
+        if entry.get("kind") != "assistant_response":
+            continue
+        message = entry.get("message")
+        if isinstance(message, dict) and _assistant_message_calls_tool(message, "condense_context"):
+            assistant_index = index
+            break
+    if assistant_index is None:
+        return entries
+
+    user_index: int | None = None
+    for index in range(assistant_index - 1, -1, -1):
+        if entries[index].get("kind") == "user_message":
+            user_index = index
+            break
+    if user_index is None:
+        return entries
+
+    tool_group_end = assistant_index + 1
+    while tool_group_end < len(entries) and entries[tool_group_end].get("kind") == "tool_result":
+        tool_group_end += 1
+    return [
+        entries[user_index],
+        entries[assistant_index],
+        *entries[assistant_index + 1 : tool_group_end],
+        *entries[tool_group_end:],
+    ]
+
+
 def _sanitize_assistant_tool_payloads(message: dict[str, Any]) -> dict[str, Any]:
     sanitized = dict(message)
     content = sanitized.get("content")
@@ -818,6 +907,7 @@ def _conversation_messages(
         replay_entries = []
     else:
         replay_entries = entries
+    replay_entries = _latest_condense_context_slice(replay_entries)
 
     unconsumed_tool_result = _latest_unconsumed_tool_result_entry(replay_entries)
     pending_user_entry = None
