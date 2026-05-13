@@ -14,11 +14,17 @@ Usage::
     llm = get_llm("gemini-3-flash-preview")   # extraction tasks
     llm = get_llm("kimi-k2.5")                # writing tasks
     llm = get_llm("minimax/MiniMax-M2.5")     # MiniMax via OpenAI-compatible API
+    llm = get_llm("codex/gpt-5.5")             # Native ChatGPT Codex Responses backend
 """
 
 import os
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, Protocol, cast
 from pydantic import SecretStr
+
+from openai import OpenAI
+
+from src.shared.codex_auth import CodexTokenManager
 
 # ---------------------------------------------------------------------------
 # Rate Limit Handling (Wait & Alert)
@@ -97,6 +103,145 @@ def _normalize_minimax_model_name(name: str) -> str:
 
 def _minimax_base_url() -> str:
     return os.getenv("MINIMAX_BASE_URL", "https://api.minimaxi.com/v1")
+
+
+CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
+
+
+def _is_codex_model(name: str) -> bool:
+    return name.lower().startswith("codex/")
+
+
+def _normalize_codex_model_name(name: str) -> str:
+    if name.lower().startswith("codex/"):
+        return name.split("/", 1)[1]
+    return name
+
+
+def _message_content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content")
+                if isinstance(text, str):
+                    parts.append(text)
+            else:
+                text = getattr(item, "text", None) or getattr(item, "content", None)
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(part for part in parts if part)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _codex_messages_to_responses_input(messages: Any) -> tuple[str, list[dict[str, Any]]]:
+    if isinstance(messages, str):
+        return "", [{"role": "user", "content": messages}]
+
+    instructions: list[str] = []
+    input_items: list[dict[str, Any]] = []
+    for message in messages:
+        role = getattr(message, "type", None) or getattr(message, "role", None)
+        if isinstance(message, dict):
+            role = message.get("type") or message.get("role") or role
+            content = message.get("content")
+            tool_call_id = message.get("tool_call_id")
+        else:
+            content = getattr(message, "content", "")
+            tool_call_id = getattr(message, "tool_call_id", None)
+
+        text = _message_content_to_text(content)
+        if role in {"system", "developer"}:
+            if text:
+                instructions.append(text)
+        elif role in {"human", "user"}:
+            input_items.append({"role": "user", "content": text})
+        elif role in {"ai", "assistant"}:
+            input_items.append({"role": "assistant", "content": text})
+        elif role == "tool":
+            input_items.append({
+                "type": "function_call_output",
+                "call_id": str(tool_call_id or ""),
+                "output": text,
+            })
+        elif text:
+            input_items.append({"role": "user", "content": text})
+
+    return "\n\n".join(instructions), input_items
+
+
+def _completed_response_text(response: Any) -> str:
+    output = getattr(response, "output", None)
+    if isinstance(output, list):
+        parts: list[str] = []
+        for item in output:
+            content = getattr(item, "content", None)
+            if isinstance(content, list):
+                for block in content:
+                    text = getattr(block, "text", None)
+                    if isinstance(text, str):
+                        parts.append(text)
+            text = getattr(item, "text", None)
+            if isinstance(text, str):
+                parts.append(text)
+        if parts:
+            return "\n".join(parts)
+    output_text = getattr(response, "output_text", None)
+    return output_text if isinstance(output_text, str) else ""
+
+
+class CodexNativeChatModel:
+    """Minimal invoke-compatible native Codex model for non-agent LLM calls.
+
+    Used by condense/summarization code paths that go through get_llm(), while
+    harness agents use CodexNativeTransport directly. This uses the same
+    ChatGPT Codex Responses backend and OAuth token file; it does not use the
+    OpenAI API-key path or Codex CLI.
+    """
+
+    def __init__(self, model_name: str) -> None:
+        self.model_name = model_name
+        self.token_manager = CodexTokenManager()
+        self.client = OpenAI(
+            api_key=self.token_manager.get_access_token(),
+            base_url=CODEX_BASE_URL,
+        )
+
+    def invoke(self, messages: Any, **_: Any) -> Any:
+        instructions, input_items = _codex_messages_to_responses_input(messages)
+        self.client.api_key = self.token_manager.get_access_token()
+        payload: dict[str, Any] = {
+            "model": _normalize_codex_model_name(self.model_name),
+            "input": input_items,
+            "instructions": instructions or "You are a helpful text-processing assistant.",
+            "stream": True,
+            "store": False,
+        }
+
+        text_parts: list[str] = []
+        completed_response: Any = None
+        for event in self.client.responses.create(**payload):
+            event_type = getattr(event, "type", "")
+            if event_type == "response.output_text.delta":
+                delta = getattr(event, "delta", "")
+                if delta:
+                    text_parts.append(str(delta))
+            elif event_type == "response.completed":
+                completed_response = getattr(event, "response", None)
+
+        text = "".join(text_parts)
+        if not text and completed_response is not None:
+            text = _completed_response_text(completed_response)
+        return SimpleNamespace(content=text)
+
+    def stream(self, messages: Any, **kwargs: Any) -> Any:
+        yield self.invoke(messages, **kwargs)
 
 
 def _normalize_structured_output_kwargs_for_model(
@@ -302,6 +447,8 @@ def _build_model(model_name: str) -> RateLimitWrapper:
                 api_key=_secret_from_env("KIMI_API_KEY"),
                 max_retries=2,
             )
+        elif _is_codex_model(name):
+            return CodexNativeChatModel(name)
         elif name.startswith("gpt-") or name.startswith("o1") or name.startswith("o3") or name.startswith("o4"):
             from langchain_openai import ChatOpenAI
             return ChatOpenAI(

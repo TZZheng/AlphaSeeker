@@ -9,7 +9,7 @@ Users can override any model via:
 Example:
     from src.shared.model_config import get_model
     MODEL_AGENT = get_model("harness", "agent")       # → "codex/gpt-5.5"
-    MODEL_CONDENSE = get_model("harness", "condense")  # → "minimax/Minimax-M2.7"
+    MODEL_CONDENSE = get_model("harness", "condense")  # → "codex/gpt-5.5"
 """
 
 import os
@@ -26,7 +26,7 @@ import yaml
 _DEFAULTS: Dict[str, Dict[str, str]] = {
     "harness": {
         "agent": "codex/gpt-5.5",
-        "condense": "minimax/Minimax-M2.7",
+        "condense": "codex/gpt-5.5",
     },
 }
 

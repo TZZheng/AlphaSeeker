@@ -139,7 +139,7 @@ Model assignments live in `config/models.yaml`. API-key providers require the co
 | `gemini-` | `GOOGLE_API_KEY` |
 | `claude-` | `ANTHROPIC_API_KEY` |
 
-**Current harness default: native Codex.** `config/models.yaml` sets the harness agent to `codex/gpt-5.5`, which uses the ChatGPT Codex Responses backend at `https://chatgpt.com/backend-api/codex` with OAuth tokens from `~/.lingtai-tui/codex-auth.json`. This is not the OpenAI API-key path and does not shell out to the Codex CLI. Keep the condense model on MiniMax unless explicitly changing it.
+**Current harness default: native Codex.** `config/models.yaml` sets both the harness agent and condense role to `codex/gpt-5.5`, which uses the ChatGPT Codex Responses backend at `https://chatgpt.com/backend-api/codex` with OAuth tokens from `~/.lingtai-tui/codex-auth.json`. This is not the OpenAI API-key path and does not shell out to the Codex CLI.
 
 MiniMax endpoint defaults to `https://api.minimaxi.com/v1`. Override with `MINIMAX_BASE_URL` if needed.
 

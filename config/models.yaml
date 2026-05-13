@@ -22,4 +22,4 @@
 # ---------------------------------------------------------------------------
 harness:
   agent: "codex/gpt-5.5"
-  condense: "minimax/Minimax-M2.7"
+  condense: "codex/gpt-5.5"

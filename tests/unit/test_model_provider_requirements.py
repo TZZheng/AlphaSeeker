@@ -15,9 +15,9 @@ def _clear_config_cache() -> None:
 def test_required_provider_env_vars_from_default_config() -> None:
     required = model_config.get_required_provider_env_vars()
 
-    # The harness agent defaults to native Codex OAuth (no API-key env var),
-    # while the condense role remains on MiniMax.
-    assert required == {"MINIMAX_API_KEY"}
+    # The harness agent and condense role both default to native Codex OAuth,
+    # so the model layer itself requires no API-key env var.
+    assert required == set()
 
 
 def test_hardcoded_fallback_defaults_to_native_codex(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -26,7 +26,7 @@ def test_hardcoded_fallback_defaults_to_native_codex(monkeypatch: pytest.MonkeyP
     monkeypatch.delenv("ALPHASEEKER_MODEL_HARNESS_CONDENSE", raising=False)
 
     assert model_config.get_model("harness", "agent") == "codex/gpt-5.5"
-    assert model_config.get_model("harness", "condense") == "minimax/Minimax-M2.7"
+    assert model_config.get_model("harness", "condense") == "codex/gpt-5.5"
 
 
 def test_missing_provider_env_vars_without_keys(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -35,10 +35,11 @@ def test_missing_provider_env_vars_without_keys(monkeypatch: pytest.MonkeyPatch)
 
     missing = model_config.get_missing_provider_env_vars()
 
-    assert missing == {"minimax/*": "MINIMAX_API_KEY"}
+    assert missing == {}
 
 
 def test_minimax_requires_dedicated_key_no_openai_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPHASEEKER_MODEL_HARNESS_AGENT", "minimax/MiniMax-M2.5")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key-present")
     monkeypatch.setenv("KIMI_API_KEY", "kimi-key-present")
     monkeypatch.setenv("SILICONFLOW_API_KEY", "sf-key-present")
