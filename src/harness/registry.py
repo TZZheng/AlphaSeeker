@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.harness.skills import COMMODITY_SKILLS, CORE_SKILLS, EQUITY_SKILLS, MACRO_SKILLS
+from src.harness.skills import COMMODITY_SKILLS, CORE_SKILLS, EQUITY_SKILLS, MACRO_SKILLS, VAULT_SKILLS
 from src.harness.types import SkillSpec
 
 
@@ -10,7 +10,7 @@ def build_skill_registry() -> dict[str, SkillSpec]:
     """Build the full harness skill registry."""
 
     registry: dict[str, SkillSpec] = {}
-    for spec in [*CORE_SKILLS, *EQUITY_SKILLS, *MACRO_SKILLS, *COMMODITY_SKILLS]:
+    for spec in [*CORE_SKILLS, *EQUITY_SKILLS, *MACRO_SKILLS, *COMMODITY_SKILLS, *VAULT_SKILLS]:
         registry[spec.name] = spec
     return registry
 

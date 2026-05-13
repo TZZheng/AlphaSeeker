@@ -10,7 +10,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-DOMAIN_PACKS = ("equity", "macro", "commodity")
+DOMAIN_PACKS = ("equity", "macro", "commodity", "vault")
 ALL_PACKS = ("core", *DOMAIN_PACKS)
 
 
