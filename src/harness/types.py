@@ -263,6 +263,7 @@ class HarnessRequest(BaseModel):
     per_agent_wall_clock_seconds: int = 1800
     stale_heartbeat_seconds: int = 45
     available_skill_packs: list[str] | None = None
+    context_files: list[str] = Field(default_factory=list)
     continuous_refinement: bool = False
     resume_from_run_root: str | None = None
     commenter_interval_seconds: float | None = None

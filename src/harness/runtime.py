@@ -159,6 +159,7 @@ def _ensure_root_workspace(
             available_tools=default_tool_allowlist(request.root_preset),
             available_skills=_root_skills(registry_map, request),
         ),
+        context_files=request.context_files,
     )
 
 

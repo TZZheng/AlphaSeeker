@@ -10,6 +10,7 @@ from src.vault.extract import extract_company_records
 from src.vault.ingest import ingest_file
 from src.vault.onboard import onboard_company
 from src.vault.store import VaultStore
+from src.vault.synthesis import synthesize_company_research_state
 from src.vault.wiki import render_company_wiki
 
 
@@ -119,6 +120,55 @@ def vault_update_company_wiki_skill(arguments: dict[str, Any], _state: HarnessSt
     )
 
 
+def vault_synthesize_research_state_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillResult:
+    ticker = str(arguments.get("ticker") or "").strip().upper()
+    if not ticker:
+        return make_result(
+            "vault_synthesize_research_state",
+            arguments,
+            status="failed",
+            summary="vault_synthesize_research_state requires a ticker.",
+            error="Missing ticker.",
+        )
+    try:
+        result = synthesize_company_research_state(
+            ticker=ticker,
+            company_name=arguments.get("company_name"),
+            model_name=arguments.get("model_name"),
+            limit=int(arguments.get("limit") or 5),
+            doc_char_limit=int(arguments.get("doc_char_limit") or 6000),
+            bundle_char_limit=int(arguments.get("bundle_char_limit") or 24000),
+        )
+    except Exception as exc:
+        return make_result(
+            "vault_synthesize_research_state",
+            arguments,
+            status="failed",
+            summary=f"Failed to synthesize LLM research state for {ticker}.",
+            error=str(exc),
+        )
+    preview = safe_read(str(result["wiki_path"]), max_chars=5000)
+    return make_result(
+        "vault_synthesize_research_state",
+        arguments,
+        status="ok",
+        summary=(
+            f"Synthesized LLM research state for {ticker}: "
+            f"{result['source_count']} sources, {result['citation_count']} citations, "
+            f"{result['question_count']} open questions."
+        ),
+        details=result,
+        metrics=SkillMetrics(
+            evidence_count=result["citation_count"],
+            artifact_count=2,
+            sections_touched=["business_summary", "key_metrics", "guidance", "risks", "thesis", "open_questions"],
+        ),
+        output_text=preview,
+        artifacts=[str(result["wiki_path"]), str(result["raw_response_path"])],
+        evidence=[artifact_evidence("vault_synthesize_research_state", f"LLM-generated research state for {ticker}.", str(result["wiki_path"]), content=preview)],
+    )
+
+
 def vault_onboard_company_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillResult:
     ticker = str(arguments.get("ticker") or "").strip().upper()
     if not ticker:
@@ -203,6 +253,26 @@ VAULT_SKILLS: list[SkillSpec] = [
         produces_artifacts=True,
         input_schema={"type": "object", "properties": {"ticker": {"type": "string"}}, "required": ["ticker"]},
         executor=vault_update_company_wiki_skill,
+    ),
+    SkillSpec(
+        name="vault_synthesize_research_state",
+        description="Use an LLM to synthesize a cited company research-state wiki and open questions from vault source documents.",
+        pack="vault",
+        produces_artifacts=True,
+        timeout_budget_seconds=120,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string"},
+                "company_name": {"type": "string"},
+                "model_name": {"type": "string"},
+                "limit": {"type": "integer", "default": 5},
+                "doc_char_limit": {"type": "integer", "default": 6000},
+                "bundle_char_limit": {"type": "integer", "default": 24000},
+            },
+            "required": ["ticker"],
+        },
+        executor=vault_synthesize_research_state_skill,
     ),
     SkillSpec(
         name="vault_onboard_company",
