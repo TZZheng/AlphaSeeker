@@ -8,6 +8,10 @@ IMPORTANT: SEC requires a User-Agent header with company name and email.
 """
 
 import datetime
+from html.parser import HTMLParser
+import re
+from urllib.parse import urljoin
+
 import requests
 import time
 from typing import List, Dict, Optional
@@ -27,6 +31,90 @@ SEC_HEADERS = {
     "Accept-Encoding": "gzip, deflate",
 }
 
+
+
+class _FilingDocumentParser(HTMLParser):
+    """Extract the primary filing document link from an SEC filing detail page."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.in_table = False
+        self.current_row: Dict[str, str] | None = None
+        self.current_cell = ""
+        self.current_cell_index = -1
+        self.current_link = ""
+        self.rows: List[Dict[str, str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attr = {key: value or "" for key, value in attrs}
+        if tag == "table" and attr.get("summary") == "Document Format Files":
+            self.in_table = True
+        elif self.in_table and tag == "tr":
+            self.current_row = {"seq": "", "description": "", "document": "", "type": "", "size": "", "href": ""}
+            self.current_cell = ""
+            self.current_cell_index = -1
+        elif self.in_table and tag in {"td", "th"}:
+            # SEC filing table columns: Seq, Description, Document, Type, Size.
+            if self.current_row is None:
+                return
+            order = ["seq", "description", "document", "type", "size"]
+            self.current_cell_index += 1
+            self.current_cell = order[min(self.current_cell_index, len(order) - 1)]
+        elif self.in_table and tag == "a" and self.current_row is not None:
+            self.current_link = attr.get("href", "")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "table" and self.in_table:
+            self.in_table = False
+        elif self.in_table and tag == "tr" and self.current_row is not None:
+            if self.current_row.get("href") and self.current_row.get("type"):
+                self.rows.append(self.current_row)
+            self.current_row = None
+            self.current_cell = ""
+            self.current_cell_index = -1
+        elif self.in_table and tag == "a":
+            self.current_link = ""
+
+    def handle_data(self, data: str) -> None:
+        if not self.in_table or self.current_row is None or not self.current_cell:
+            return
+        text = data.strip()
+        if not text:
+            return
+        if self.current_cell in self.current_row:
+            existing = self.current_row.get(self.current_cell, "")
+            self.current_row[self.current_cell] = (existing + " " + text).strip()
+        if self.current_link:
+            self.current_row["href"] = self.current_link
+
+
+def resolve_sec_primary_document_url(index_url: str) -> str:
+    """Resolve an SEC filing detail/index page to its primary filing document URL."""
+
+    if "-index.htm" not in index_url and "-index.html" not in index_url:
+        return index_url
+    html = request_text(
+        index_url,
+        headers=SEC_HEADERS,
+        timeout=15,
+        ttl_seconds=21600,
+        attempts=2,
+    )
+    if not html:
+        return index_url
+    parser = _FilingDocumentParser()
+    parser.feed(html)
+    for row in parser.rows:
+        filing_type = row.get("type", "").upper()
+        href = row.get("href", "")
+        if not href:
+            continue
+        if filing_type in {"10-K", "10-Q", "8-K", "DEF 14A"} or not filing_type.startswith("EX-"):
+            # iXBRL links use /ix?doc=/Archives/...; trafilatura reads the raw filing better.
+            if href.startswith("/ix?doc="):
+                href = href.split("/ix?doc=", 1)[1]
+            return urljoin(index_url, href)
+    return index_url
 
 def search_sec_filings(
     company_name: str,
@@ -164,6 +252,34 @@ def search_sec_filings(
     return filings
 
 
+
+def _extract_sec_text_from_html(html: str, max_chars: int) -> Optional[str]:
+    text = trafilatura.extract(
+        html,
+        include_comments=False,
+        include_tables=True,
+        favor_precision=False,
+        deduplicate=True,
+    )
+    if not text:
+        return None
+    # Inline XBRL pages can begin with a very noisy taxonomy preamble. Keep the
+    # filing narrative from the first recognizable annual/quarterly report marker.
+    markers = [
+        "UNITED STATES SECURITIES AND EXCHANGE COMMISSION",
+        "FORM 10-K",
+        "FORM 10-Q",
+        "FORM 8-K",
+    ]
+    upper_text = text.upper()
+    positions = [upper_text.find(marker) for marker in markers if upper_text.find(marker) >= 0]
+    if positions:
+        text = text[min(positions):]
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    if len(text) > max_chars:
+        text = text[:max_chars] + f"\n... [truncated at {max_chars} chars]"
+    return text
+
 def fetch_filing_text(url: str, max_chars: int = 15000) -> Optional[str]:
     """
     Fetches and extracts readable text from a SEC filing URL.
@@ -179,22 +295,25 @@ def fetch_filing_text(url: str, max_chars: int = 15000) -> Optional[str]:
         return None
 
     def _load() -> Optional[str]:
-        downloaded = trafilatura.fetch_url(url)
-        if not downloaded:
-            return None
-        text = trafilatura.extract(
-            downloaded,
-            include_comments=False,
-            include_tables=True,
-            favor_precision=False,
-            deduplicate=True,
+        resolved_url = resolve_sec_primary_document_url(url)
+        downloaded = trafilatura.fetch_url(resolved_url)
+        if downloaded:
+            text = _extract_sec_text_from_html(downloaded, max_chars)
+            if text:
+                return text
+        html = request_text(
+            resolved_url,
+            headers=SEC_HEADERS,
+            timeout=20,
+            ttl_seconds=21600,
+            attempts=2,
         )
-        if text and len(text) > max_chars:
-            text = text[:max_chars] + f"\n... [truncated at {max_chars} chars]"
-        return text
+        if not html:
+            return None
+        return _extract_sec_text_from_html(html, max_chars)
     try:
         return cached_retry_call(
-            "sec_filing_text",
+            "sec_filing_text_v2",
             {"url": url, "max_chars": max_chars},
             _load,
             ttl_seconds=21600,
