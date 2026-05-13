@@ -19,7 +19,13 @@ def test_render_company_wiki_creates_obsidian_pages(tmp_path):
     store.add_metric("XOM", "Capital Expenditures", "-28358000000", period="FY2025", unit="USD", source_doc_id=doc["doc_id"], source_grade="B")
     store.add_metric("XOM", "EV/EBITDA", "11.966", period="TTM", unit="x", source_doc_id=doc["doc_id"], source_grade="B")
     store.add_question("XOM", "How durable is Guyana growth?", priority="high")
-    store.add_conflict("XOM", "metric_mismatch", "FCF differs between market data and filing-derived estimate.")
+    store.add_conflict(
+        "XOM",
+        "metric_mismatch",
+        "FCF differs between market data and filing-derived estimate.",
+        left_ref="metric_a",
+        right_ref="metric_b",
+    )
 
     wiki_path = render_company_wiki("xom", root=root)
 
@@ -27,6 +33,7 @@ def test_render_company_wiki_creates_obsidian_pages(tmp_path):
     assert "# XOM — Exxon Mobil" in wiki
     assert "[[source_index]]" in wiki
     assert "[[question_list]]" in wiki
+    assert "[[status_patrol]]" in wiki
     assert "Free cash flow" in wiki
     assert "Capital Expenditures" in wiki
     assert "EV/EBITDA" in wiki
@@ -35,13 +42,20 @@ def test_render_company_wiki_creates_obsidian_pages(tmp_path):
     assert "Management discusses business results" in wiki
     assert "commodity price risk" in wiki
     assert "Valuation-relevant metrics" in wiki
+    assert "Status patrol / review queue" in wiki
+    assert "missing_a_grade_valuation_support" in wiki
     assert "How durable is Guyana growth?" in wiki
     assert "FCF differs" in wiki
     assert (root / "companies" / "XOM" / "source_index.md").exists()
     question_list = (root / "companies" / "XOM" / "question_list.md").read_text(encoding="utf-8")
     conflicts = (root / "companies" / "XOM" / "conflicts.md").read_text(encoding="utf-8")
+    status_patrol = (root / "companies" / "XOM" / "status_patrol.md").read_text(encoding="utf-8")
     assert "How durable is Guyana growth?" in question_list
     assert "FCF differs" in conflicts
+    assert "metric_a" in conflicts
+    assert "metric_b" in conflicts
+    assert "Suggested Action" in conflicts
+    assert "unresolved_conflicts" in status_patrol
 
     second_path = render_company_wiki("XOM", root=root)
     assert second_path == wiki_path

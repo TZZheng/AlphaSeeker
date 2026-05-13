@@ -13,6 +13,7 @@ from src.vault.extract import extract_company_records
 from src.vault.ingest import ingest_file
 from src.vault.paths import default_vault_paths
 from src.vault.sec_import import import_sec_filings
+from src.vault.status import seed_status_patrol_questions
 from src.vault.store import VaultStore
 from src.vault.wiki import render_company_wiki
 
@@ -100,6 +101,7 @@ def onboard_company(
                 )
 
     extracted_records = extract_company_records(ticker_norm, root=root, store=store)
+    status_checks = seed_status_patrol_questions(ticker_norm, root=root, store=store)
     wiki_path = render_company_wiki(ticker_norm, root=root)
     vault_paths = default_vault_paths(root).ensure()
     return {
@@ -112,6 +114,7 @@ def onboard_company(
         "support_documents": imported_support,
         "manual_documents": imported_manual,
         "extracted_records": extracted_records,
+        "status_patrol": status_checks,
     }
 
 

@@ -57,6 +57,7 @@ def test_onboard_company_ties_sec_import_and_wiki_render(monkeypatch, tmp_path):
     assert Path(result["database_path"]).exists()
     assert result["extracted_records"]["counts"]["facts"] == 1
     assert result["extracted_records"]["counts"]["questions"] == 1
+    assert any(check["check_type"] == "no_recent_sec_source" and check["status"] == "ok" for check in result["status_patrol"])
     context = VaultStore(root).company_context("XOM")
     assert context["documents"][0]["source_grade"] == "A"
     assert context["facts"][0]["section"] == "SEC source registry"
@@ -85,9 +86,11 @@ def test_onboard_company_extracts_derived_financial_metrics(monkeypatch, tmp_pat
 
     assert result["extracted_records"]["counts"]["metrics"] == 5
     assert result["extracted_records"]["counts"]["questions"] == 2
+    assert any(check["check_type"] == "missing_a_grade_valuation_support" and check["status"] == "open" for check in result["status_patrol"])
     context = VaultStore(root).company_context("XOM", limit=20)
     assert {metric["metric_name"] for metric in context["metrics"]} >= {"Current Price", "Free Cash Flow"}
     assert any("valuation support metrics" in question["question"] for question in context["questions"])
+    assert any(question["question"].startswith("[Status patrol]") for question in context["questions"])
     wiki = Path(result["wiki_path"]).read_text(encoding="utf-8")
     assert "Current Price" in wiki
     assert "Free Cash Flow" in wiki

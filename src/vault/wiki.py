@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 
 from src.vault.paths import default_vault_paths
+from src.vault.status import evaluate_status_patrol, render_status_patrol
 from src.vault.store import VaultStore, new_id
 
 
@@ -97,6 +98,16 @@ def render_source_index(ticker: str, *, root: str | Path | None = None) -> Path:
     return path
 
 
+def _conflicts_with_actions(conflicts: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        {
+            **conflict,
+            "suggested_action": "Compare left/right refs, choose trusted source, resolve conflict, or convert the gap into a follow-up question.",
+        }
+        for conflict in conflicts
+    ]
+
+
 def render_support_pages(
     ticker: str,
     *,
@@ -111,6 +122,7 @@ def render_support_pages(
     question_path = company_dir / "question_list.md"
     conflict_path = company_dir / "conflicts.md"
     catalyst_path = company_dir / "catalysts.md"
+    status_patrol_path = company_dir / "status_patrol.md"
     if questions is None:
         if not question_path.exists():
             question_path.write_text(f"# {ticker_norm} Question List\n\n_Open questions will appear here._\n", encoding="utf-8")
@@ -134,14 +146,27 @@ def render_support_pages(
                 [
                     f"# {ticker_norm} Conflicts",
                     "",
-                    _md_table(conflicts, [("Type", "conflict_type"), ("Summary", "summary"), ("Severity", "severity"), ("Status", "status")]),
+                    _md_table(
+                        _conflicts_with_actions(conflicts),
+                        [
+                            ("Type", "conflict_type"),
+                            ("Summary", "summary"),
+                            ("Left Ref", "left_ref"),
+                            ("Right Ref", "right_ref"),
+                            ("Severity", "severity"),
+                            ("Status", "status"),
+                            ("Suggested Action", "suggested_action"),
+                        ],
+                    ),
                 ]
             ),
             encoding="utf-8",
         )
     if not catalyst_path.exists():
         catalyst_path.write_text(f"# {ticker_norm} Catalysts\n\n_Catalysts will appear here._\n", encoding="utf-8")
-    return {"question_list": question_path, "conflicts": conflict_path, "catalysts": catalyst_path}
+    if not status_patrol_path.exists():
+        render_status_patrol(ticker_norm, root=root)
+    return {"question_list": question_path, "conflicts": conflict_path, "catalysts": catalyst_path, "status_patrol": status_patrol_path}
 
 
 def render_company_wiki(ticker: str, *, root: str | Path | None = None, run_id: str | None = None) -> Path:
@@ -177,6 +202,8 @@ def render_company_wiki(ticker: str, *, root: str | Path | None = None, run_id: 
     risk_facts = _filter_facts(context["facts"], RISK_SECTIONS)
     capital_return_metrics = _metrics_named(context["metrics"], CAPITAL_RETURN_METRIC_NAMES)
     valuation_metrics = _metrics_named(context["metrics"], VALUATION_METRIC_NAMES)
+    status_checks = evaluate_status_patrol(ticker_norm, root=root, store=store, context=context)
+    open_status_checks = [check for check in status_checks if check["status"] != "ok"]
     text = "\n".join(
         [
             f"# {ticker_norm} — {name}",
@@ -184,7 +211,7 @@ def render_company_wiki(ticker: str, *, root: str | Path | None = None, run_id: 
             f"Last updated: {timestamp}",
             "Source policy: A-grade sources first in MVP v1; derived market data is clearly labeled support evidence.",
             "",
-            "Navigation: [[source_index]] · [[question_list]] · [[conflicts]] · [[catalysts]]",
+            "Navigation: [[source_index]] · [[question_list]] · [[conflicts]] · [[catalysts]] · [[status_patrol]]",
             "",
             "## 1. One-line company summary",
             "_To be filled from active A-grade facts._",
@@ -209,16 +236,20 @@ def render_company_wiki(ticker: str, *, root: str | Path | None = None, run_id: 
                 valuation_metrics,
                 [("Metric", "metric_name"), ("Period", "period"), ("Value", "value"), ("Unit", "unit"), ("Source", "source_doc_id"), ("Grade", "source_grade")],
             ),
-            "## 8. Open questions",
+            "## 8. Status patrol / review queue",
+            "See [[status_patrol]]. Open patrol checks are workflow-QC items that should become review questions.",
+            _md_table(open_status_checks, [("Check", "check_type"), ("Severity", "severity"), ("Summary", "summary"), ("Action", "action")]),
+            "## 9. Open questions",
             _md_table(context["questions"], [("Question", "question"), ("Priority", "priority"), ("Created", "created_at")]),
-            "## 9. Conflicts / items needing human judgment",
+            "## 10. Conflicts / items needing human judgment",
             _md_table(context["conflicts"], [("Type", "conflict_type"), ("Summary", "summary"), ("Severity", "severity"), ("Status", "status")]),
-            "## 10. Source index",
+            "## 11. Source index",
             "See [[source_index]]. Latest registered sources:",
             _md_table(context["documents"], [("Doc ID", "doc_id"), ("Title", "title"), ("Type", "source_type"), ("Grade", "source_grade"), ("Published", "published_at")]),
         ]
     )
     wiki_path.write_text(text, encoding="utf-8")
     render_source_index(ticker_norm, root=root)
+    render_status_patrol(ticker_norm, root=root, checks=status_checks)
     render_support_pages(ticker_norm, root=root, questions=context["questions"], conflicts=context["conflicts"])
     return wiki_path
