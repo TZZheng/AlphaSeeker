@@ -46,12 +46,21 @@ def _metrics_named(metrics: list[dict[str, object]], names: set[str]) -> list[di
     return [metric for metric in metrics if metric.get("metric_name") in names]
 
 
-def _has_non_a_grade(metrics: list[dict[str, object]]) -> bool:
-    return any(str(metric.get("source_grade") or "").upper() != "A" for metric in metrics)
+def _has_unconfirmed_non_a_grade(metrics: list[dict[str, object]]) -> bool:
+    confirmed = {
+        (str(metric.get("metric_name") or ""), metric.get("period"))
+        for metric in metrics
+        if str(metric.get("source_grade") or "").upper() == "A"
+    }
+    return any(
+        str(metric.get("source_grade") or "").upper() != "A"
+        and (str(metric.get("metric_name") or ""), metric.get("period")) not in confirmed
+        for metric in metrics
+    )
 
 
 def _support_note(metrics: list[dict[str, object]]) -> str:
-    if not _has_non_a_grade(metrics):
+    if not _has_unconfirmed_non_a_grade(metrics):
         return ""
     return "Note: non-A-grade rows are support metrics pending confirmation against A-grade filing tables or company-primary disclosures.\n"
 

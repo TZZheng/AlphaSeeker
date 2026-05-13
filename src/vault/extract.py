@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 from typing import Any
 
+from src.shared.reliability import request_json
 from src.vault.store import VaultStore
 
 _KEY_RATIO_RE = re.compile(r"^-\s+\*\*(?P<name>[^*]+)\*\*:\s*(?P<value>.+?)\s*$")
@@ -47,6 +48,14 @@ _CAPITAL_RETURN_ROWS = {
 }
 _CAPITAL_RETURN_METRIC_NAMES = {metric_name for metric_name, _ in _CAPITAL_RETURN_ROWS.values()}
 _VALUATION_METRIC_NAMES = set(_VALUATION_METRICS)
+_SEC_HEADERS = {"User-Agent": "AlphaSeeker Research research@alphaseeker.dev", "Accept-Encoding": "gzip, deflate"}
+
+_XBRL_CAPITAL_RETURN_CONCEPTS = {
+    "Annual Operating Cash Flow": ("NetCashProvidedByUsedInOperatingActivities", Decimal("1")),
+    "Capital Expenditures": ("PaymentsToAcquirePropertyPlantAndEquipment", Decimal("-1")),
+    "Share Repurchases": ("PaymentsForRepurchaseOfCommonStock", Decimal("-1")),
+    "Cash Dividends Paid": ("PaymentsOfDividendsCommonStock", Decimal("-1")),
+}
 
 _SEC_SECTION_RULES = [
     (
@@ -188,6 +197,195 @@ def parse_key_ratio_metrics(text: str) -> list[dict[str, str | None]]:
     return metrics
 
 
+def _format_decimal(value: Decimal) -> str:
+    if value == value.to_integral_value():
+        return str(int(value))
+    return format(value.normalize(), "f")
+
+
+def fetch_sec_companyfacts(cik: str) -> dict[str, Any]:
+    cik_number = str(int(cik))
+    return request_json(
+        f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik_number.zfill(10)}.json",
+        headers=_SEC_HEADERS,
+        timeout=20,
+        ttl_seconds=21600,
+        attempts=2,
+    )
+
+
+def _cik_from_sec_documents(documents: list[dict[str, Any]]) -> str | None:
+    for document in documents:
+        meta = _metadata(document)
+        candidates = [meta.get("cik"), meta.get("CIK"), document.get("url"), meta.get("url")]
+        for candidate in candidates:
+            text = str(candidate or "")
+            if text.isdigit():
+                return text
+            match = re.search(r"/data/(\d+)/", text)
+            if match:
+                return match.group(1)
+    return None
+
+
+def _accession_key(value: object) -> str:
+    return re.sub(r"[^0-9]", "", str(value or ""))
+
+
+def _documents_by_accession(documents: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    mapped: dict[str, dict[str, Any]] = {}
+    for document in documents:
+        meta = _metadata(document)
+        for candidate in (document.get("url"), meta.get("url")):
+            text = str(candidate or "")
+            match = re.search(r"/data/\d+/(\d+)/", text)
+            if match:
+                mapped[_accession_key(match.group(1))] = document
+    return mapped
+
+
+def _latest_annual_usd_fact(companyfacts: dict[str, Any], concept: str) -> dict[str, Any] | None:
+    concept_data = companyfacts.get("facts", {}).get("us-gaap", {}).get(concept, {})
+    units = concept_data.get("units", {}) if isinstance(concept_data, dict) else {}
+    rows = units.get("USD", []) if isinstance(units, dict) else []
+    candidates = [
+        row
+        for row in rows
+        if row.get("fp") == "FY"
+        and str(row.get("form") or "").upper().startswith("10-K")
+        and row.get("val") is not None
+        and row.get("end")
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda row: (str(row.get("end") or ""), str(row.get("filed") or "")))
+
+
+def parse_sec_companyfacts_capital_return_metrics(companyfacts: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract latest FY capital-return metrics from SEC companyfacts data."""
+
+    metrics: list[dict[str, Any]] = []
+    by_name: dict[str, dict[str, Any]] = {}
+    for metric_name, (concept, sign) in _XBRL_CAPITAL_RETURN_CONCEPTS.items():
+        row = _latest_annual_usd_fact(companyfacts, concept)
+        if not row:
+            continue
+        value = Decimal(str(row["val"])) * sign
+        metric = {
+            "metric_name": metric_name,
+            "value": _format_decimal(value),
+            "period": f"FY{row.get('fy') or str(row.get('end', ''))[:4]}",
+            "unit": "USD",
+            "concept": concept,
+            "accn": row.get("accn"),
+            "filed": row.get("filed"),
+        }
+        metrics.append(metric)
+        by_name[metric_name] = metric
+
+    operating_cash_flow = by_name.get("Annual Operating Cash Flow")
+    capital_expenditures = by_name.get("Capital Expenditures")
+    if operating_cash_flow and capital_expenditures and operating_cash_flow.get("period") == capital_expenditures.get("period"):
+        fcf_value = Decimal(str(operating_cash_flow["value"])) + Decimal(str(capital_expenditures["value"]))
+        metrics.append(
+            {
+                "metric_name": "Annual Free Cash Flow",
+                "value": _format_decimal(fcf_value),
+                "period": operating_cash_flow.get("period"),
+                "unit": "USD",
+                "concept": "NetCashProvidedByUsedInOperatingActivities - PaymentsToAcquirePropertyPlantAndEquipment",
+                "accn": operating_cash_flow.get("accn"),
+                "filed": operating_cash_flow.get("filed"),
+            }
+        )
+    return metrics
+
+
+def extract_sec_companyfacts_metrics(
+    ticker: str,
+    sec_documents: list[dict[str, Any]],
+    *,
+    store: VaultStore,
+) -> list[dict[str, Any]]:
+    cik = _cik_from_sec_documents(sec_documents)
+    if not cik:
+        return []
+    try:
+        companyfacts = fetch_sec_companyfacts(cik)
+    except Exception:
+        return []
+    documents_by_accession = _documents_by_accession(sec_documents)
+    fallback_doc_id = str(sec_documents[0].get("doc_id") or "") if sec_documents else ""
+    extracted: list[dict[str, Any]] = []
+    for metric in parse_sec_companyfacts_capital_return_metrics(companyfacts):
+        source_document = documents_by_accession.get(_accession_key(metric.get("accn")))
+        source_doc_id = str((source_document or {}).get("doc_id") or fallback_doc_id)
+        metric_id = _stable_id("metric", ticker.upper(), "sec_companyfacts", metric["metric_name"], metric.get("period"), metric.get("accn"))
+        extracted.append(
+            store.add_metric(
+                ticker,
+                str(metric["metric_name"]),
+                str(metric["value"]),
+                period=metric.get("period"),
+                unit=metric.get("unit"),
+                source_doc_id=source_doc_id,
+                source_grade="A",
+                observed_at=str(metric.get("filed") or "") or None,
+                metric_id=metric_id,
+            )
+        )
+    return extracted
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def compare_a_b_metrics(ticker: str, metrics: list[dict[str, Any]], *, store: VaultStore) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str | None], dict[str, list[dict[str, Any]]]] = {}
+    for metric in metrics:
+        key = (str(metric.get("metric_name") or ""), metric.get("period"))
+        grade = str(metric.get("source_grade") or "").upper()
+        grouped.setdefault(key, {"A": [], "non_a": []})
+        if grade == "A":
+            grouped[key]["A"].append(metric)
+        else:
+            grouped[key]["non_a"].append(metric)
+
+    conflicts: list[dict[str, Any]] = []
+    for (metric_name, period), buckets in grouped.items():
+        for a_metric in buckets["A"]:
+            a_value = _decimal_or_none(a_metric.get("value"))
+            if a_value is None:
+                continue
+            for b_metric in buckets["non_a"]:
+                b_value = _decimal_or_none(b_metric.get("value"))
+                if b_value is None:
+                    continue
+                tolerance = max(abs(a_value), Decimal("1")) * Decimal("0.001")
+                if abs(a_value - b_value) <= tolerance:
+                    continue
+                summary = (
+                    f"{ticker.upper()} {period or ''} {metric_name} differs between A-grade SEC companyfacts "
+                    f"({a_metric.get('value')}) and non-A support metric ({b_metric.get('value')})."
+                ).replace("  ", " ")
+                conflicts.append(
+                    store.add_conflict(
+                        ticker,
+                        "metric_mismatch",
+                        summary,
+                        left_ref=str(a_metric.get("metric_id") or ""),
+                        right_ref=str(b_metric.get("metric_id") or ""),
+                        severity="medium",
+                        conflict_id=_stable_id("conflict", ticker.upper(), metric_name, period, a_metric.get("metric_id"), b_metric.get("metric_id")),
+                    )
+                )
+    return conflicts
+
+
 def extract_financial_metrics(
     ticker: str,
     document: dict[str, Any],
@@ -306,11 +504,18 @@ def extract_latest_sec_section_facts(
     return extracted
 
 
-def _metric_names_with_non_a_grade(metrics: list[dict[str, Any]], target_names: set[str]) -> set[str]:
+def _metric_names_needing_a_confirmation(metrics: list[dict[str, Any]], target_names: set[str]) -> set[str]:
+    confirmed = {
+        (str(metric.get("metric_name") or ""), metric.get("period"))
+        for metric in metrics
+        if metric.get("metric_name") in target_names and str(metric.get("source_grade") or "").upper() == "A"
+    }
     return {
         str(metric.get("metric_name") or "")
         for metric in metrics
-        if metric.get("metric_name") in target_names and str(metric.get("source_grade") or "").upper() != "A"
+        if metric.get("metric_name") in target_names
+        and str(metric.get("source_grade") or "").upper() != "A"
+        and (str(metric.get("metric_name") or ""), metric.get("period")) not in confirmed
     }
 
 
@@ -332,12 +537,12 @@ def add_default_research_questions(
     if "derived_financials" in source_types:
         questions.append(("normal", f"Which derived market-data metrics for {ticker_norm} need confirmation against A-grade filings or company releases?"))
 
-    b_grade_capital_metrics = _metric_names_with_non_a_grade(metrics, _CAPITAL_RETURN_METRIC_NAMES)
+    b_grade_capital_metrics = _metric_names_needing_a_confirmation(metrics, _CAPITAL_RETURN_METRIC_NAMES)
     if b_grade_capital_metrics:
         names = ", ".join(sorted(b_grade_capital_metrics))
         questions.append(("high", f"Confirm {ticker_norm}'s latest annual capital-return metrics ({names}) against A-grade filing tables or company-primary disclosures."))
 
-    b_grade_valuation_metrics = _metric_names_with_non_a_grade(metrics, _VALUATION_METRIC_NAMES)
+    b_grade_valuation_metrics = _metric_names_needing_a_confirmation(metrics, _VALUATION_METRIC_NAMES)
     if b_grade_valuation_metrics:
         names = ", ".join(sorted(b_grade_valuation_metrics))
         questions.append(("normal", f"Confirm {ticker_norm}'s valuation support metrics ({names}) against A-grade filing-derived shares/debt/cash data or company-primary releases before relying on them."))
@@ -389,12 +594,15 @@ def extract_company_records(
     if sec_documents:
         latest_sec = max(sec_documents, key=lambda doc: str(doc.get("published_at") or doc.get("ingested_at") or ""))
         facts.extend(extract_latest_sec_section_facts(ticker_norm, latest_sec, store=active_store))
+        metrics.extend(extract_sec_companyfacts_metrics(ticker_norm, sec_documents, store=active_store))
 
+    conflicts = compare_a_b_metrics(ticker_norm, metrics, store=active_store)
     questions = add_default_research_questions(ticker_norm, store=active_store, documents=documents, metrics=metrics)
     return {
         "ticker": ticker_norm,
         "metrics": metrics,
         "facts": facts,
         "questions": questions,
-        "counts": {"metrics": len(metrics), "facts": len(facts), "questions": len(questions)},
+        "conflicts": conflicts,
+        "counts": {"metrics": len(metrics), "facts": len(facts), "questions": len(questions), "conflicts": len(conflicts)},
     }
