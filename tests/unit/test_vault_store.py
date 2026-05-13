@@ -48,7 +48,15 @@ def test_store_round_trip_company_document_and_context(tmp_path):
     fact = store.add_fact("xom", "XOM is an integrated oil and gas company.", source_doc_id="doc_test", source_grade="A")
     metric = store.add_metric("xom", "Revenue", "100", period="FY2025", unit="USD", source_doc_id="doc_test", source_grade="A")
     question = store.add_question("xom", "What is mid-cycle FCF?", priority="high")
-    conflict = store.add_conflict("xom", "metric_mismatch", "Revenue differs across sources.")
+    conflict = store.add_conflict("xom", "metric_mismatch", "Revenue differs across sources.", conflict_id="conflict_revenue")
+    updated_conflict = store.add_conflict(
+        "xom",
+        "metric_mismatch",
+        "Revenue matches after source refresh.",
+        severity="low",
+        status="resolved",
+        conflict_id="conflict_revenue",
+    )
 
     context = store.company_context("XOM")
 
@@ -58,9 +66,11 @@ def test_store_round_trip_company_document_and_context(tmp_path):
     assert metric["metric_name"] == "Revenue"
     assert question["priority"] == "high"
     assert conflict["status"] == "open"
+    assert updated_conflict["summary"] == "Revenue matches after source refresh."
+    assert updated_conflict["severity"] == "low"
     assert context["company"]["name"] == "Exxon Mobil"
     assert [doc["doc_id"] for doc in context["documents"]] == ["doc_test"]
     assert context["facts"][0]["statement"].startswith("XOM is")
     assert context["metrics"][0]["value"] == "100"
     assert context["questions"][0]["question"] == "What is mid-cycle FCF?"
-    assert context["conflicts"][0]["summary"].startswith("Revenue differs")
+    assert context["conflicts"] == []

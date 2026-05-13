@@ -334,6 +334,14 @@ class VaultStore:
                   severity, status, created_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(conflict_id) DO UPDATE SET
+                  ticker=excluded.ticker,
+                  conflict_type=excluded.conflict_type,
+                  summary=excluded.summary,
+                  left_ref=excluded.left_ref,
+                  right_ref=excluded.right_ref,
+                  severity=excluded.severity,
+                  status=excluded.status
                 """,
                 (resolved_id, ticker_norm, conflict_type, summary, left_ref, right_ref, severity, status, utc_now_iso()),
             )
