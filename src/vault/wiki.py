@@ -11,6 +11,7 @@ from src.vault.store import VaultStore, new_id
 
 
 VALUATION_METRIC_NAMES = {"Current Price", "Market Cap", "Enterprise Value", "Trailing P/E", "Forward P/E", "EV/EBITDA"}
+CAPITAL_RETURN_METRIC_NAMES = {"Annual Free Cash Flow", "Annual Operating Cash Flow", "Capital Expenditures", "Share Repurchases", "Cash Dividends Paid"}
 SEC_REGISTRY_SECTION = "SEC source registry"
 BUSINESS_SECTIONS = {"Business overview", SEC_REGISTRY_SECTION}
 COMMENTARY_SECTIONS = {"Management commentary / official commentary"}
@@ -138,8 +139,10 @@ def render_company_wiki(ticker: str, *, root: str | Path | None = None, run_id: 
             "## 3. Revenue / earnings / cash flow snapshot",
             _md_table(context["metrics"], [("Metric", "metric_name"), ("Period", "period"), ("Value", "value"), ("Unit", "unit"), ("Source", "source_doc_id")]),
             "## 4. Balance sheet and capital return",
-            "_To be filled from active A-grade facts/metrics._",
-            "",
+            _md_table(
+                [metric for metric in context["metrics"] if metric.get("metric_name") in CAPITAL_RETURN_METRIC_NAMES],
+                [("Metric", "metric_name"), ("Period", "period"), ("Value", "value"), ("Unit", "unit"), ("Source", "source_doc_id"), ("Grade", "source_grade")],
+            ),
             "## 5. Management guidance / official commentary",
             _md_table(commentary_facts, [("Fact", "statement"), ("Source", "source_doc_id"), ("Grade", "source_grade")]),
             "## 6. Key risks from official filings",

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.vault.extract import extract_company_records, parse_key_ratio_metrics
+from src.vault.extract import extract_company_records, parse_capital_return_metrics, parse_key_ratio_metrics
 from src.vault.ingest import ingest_text
 from src.vault.store import VaultStore
 
@@ -24,6 +24,17 @@ FINANCIALS_MD = """# Financial Analysis for XOM
 
 ## ESG Data
 ESG data not available.
+
+### Annual Cash Flow Statement
+|                                                |   2025-12-31 00:00:00 |   2024-12-31 00:00:00 |
+|:-----------------------------------------------|----------------------:|----------------------:|
+| Free Cash Flow                                 |            2.3612e+10 |            3.0716e+10 |
+| Repurchase Of Capital Stock                    |           -2.0273e+10 |           -1.9629e+10 |
+| Capital Expenditure                            |           -2.8358e+10 |           -2.4306e+10 |
+| Cash Dividends Paid                            |           -1.7231e+10 |           -1.6704e+10 |
+| Operating Cash Flow                            |            5.197e+10  |            5.5022e+10 |
+
+### Quarterly Financial Statements
 """
 
 
@@ -37,6 +48,17 @@ def test_parse_key_ratio_metrics_keeps_supported_non_missing_values():
     assert "Fiscal Year End" not in names
     assert {metric["metric_name"]: metric["unit"] for metric in metrics}["EV/EBITDA"] == "x"
     assert {metric["metric_name"]: metric["period"] for metric in metrics}["Free Cash Flow"] == "TTM"
+
+
+def test_parse_capital_return_metrics_reads_latest_annual_cash_flow_rows():
+    metrics = parse_capital_return_metrics(FINANCIALS_MD)
+
+    by_name = {metric["metric_name"]: metric for metric in metrics}
+    assert by_name["Capital Expenditures"]["period"] == "FY2025"
+    assert by_name["Capital Expenditures"]["value"] == "-28358000000"
+    assert by_name["Share Repurchases"]["value"] == "-20273000000"
+    assert by_name["Cash Dividends Paid"]["value"] == "-17231000000"
+    assert by_name["Annual Operating Cash Flow"]["value"] == "51970000000"
 
 
 def test_extract_company_records_populates_metrics_facts_questions_idempotently(tmp_path):
@@ -74,13 +96,13 @@ The oil, gas, and petrochemical businesses are fundamentally commodity businesse
     context = store.company_context("XOM", limit=50)
 
     assert first["counts"] == second["counts"]
-    assert first["counts"]["metrics"] == 11
+    assert first["counts"]["metrics"] == 16
     assert first["counts"]["facts"] == 4
     assert first["counts"]["questions"] == 2
-    assert len(context["metrics"]) == 11
+    assert len(context["metrics"]) == 16
     assert len(context["facts"]) == 4
     assert len(context["questions"]) == 2
-    assert {metric["metric_name"] for metric in context["metrics"]} >= {"Current Price", "Free Cash Flow"}
+    assert {metric["metric_name"] for metric in context["metrics"]} >= {"Current Price", "Free Cash Flow", "Capital Expenditures", "Share Repurchases"}
     assert {metric["source_doc_id"] for metric in context["metrics"]} == {financials_doc["doc_id"]}
     assert {fact["source_doc_id"] for fact in context["facts"]} == {sec_doc["doc_id"]}
     sections = {fact["section"] for fact in context["facts"]}

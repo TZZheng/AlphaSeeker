@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 from pathlib import Path
@@ -36,6 +37,14 @@ _FINANCIAL_METRICS = {
 
 _METRIC_METADATA = {**_VALUATION_METRICS, **_FINANCIAL_METRICS}
 _FORM_TYPE_RE = re.compile(r"^(10-K|10-Q|8-K|DEF 14A)\b", re.IGNORECASE)
+
+_CAPITAL_RETURN_ROWS = {
+    "Free Cash Flow": ("Annual Free Cash Flow", "USD"),
+    "Operating Cash Flow": ("Annual Operating Cash Flow", "USD"),
+    "Capital Expenditure": ("Capital Expenditures", "USD"),
+    "Repurchase Of Capital Stock": ("Share Repurchases", "USD"),
+    "Cash Dividends Paid": ("Cash Dividends Paid", "USD"),
+}
 
 _SEC_SECTION_RULES = [
     (
@@ -88,6 +97,69 @@ def _first_paragraph_containing(text: str, needle: str) -> str | None:
     return None
 
 
+def _table_cells(line: str) -> list[str]:
+    stripped = line.strip()
+    if not stripped.startswith("|") or not stripped.endswith("|"):
+        return []
+    return [cell.strip() for cell in stripped.strip("|").split("|")]
+
+
+def _is_separator_row(cells: list[str]) -> bool:
+    return bool(cells) and all(set(cell.replace(":", "").strip()) <= {"-"} for cell in cells)
+
+
+def _period_from_header(header: str) -> str:
+    match = re.search(r"(20\d{2})", header)
+    return f"FY{match.group(1)}" if match else header.strip()
+
+
+def _normalize_table_number(value: str) -> str | None:
+    cleaned = value.strip().replace(",", "")
+    if cleaned in _MISSING_VALUES or cleaned.lower() == "nan":
+        return None
+    try:
+        number = Decimal(cleaned)
+    except InvalidOperation:
+        return cleaned if cleaned else None
+    if number == number.to_integral_value():
+        return str(int(number))
+    return format(number.normalize(), "f")
+
+
+def parse_capital_return_metrics(text: str) -> list[dict[str, str | None]]:
+    """Parse latest annual cash-flow capital allocation rows from financials Markdown."""
+
+    lines = text.splitlines()
+    in_section = False
+    header: list[str] | None = None
+    metrics: list[dict[str, str | None]] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "### Annual Cash Flow Statement":
+            in_section = True
+            header = None
+            continue
+        if in_section and stripped.startswith("### "):
+            break
+        if not in_section or not stripped.startswith("|"):
+            continue
+        cells = _table_cells(stripped)
+        if not cells or _is_separator_row(cells):
+            continue
+        if header is None:
+            header = cells
+            continue
+        row_name = cells[0].strip()
+        if row_name not in _CAPITAL_RETURN_ROWS or len(cells) < 2 or not header or len(header) < 2:
+            continue
+        value = _normalize_table_number(cells[1])
+        if value is None:
+            continue
+        metric_name, unit = _CAPITAL_RETURN_ROWS[row_name]
+        metrics.append({"metric_name": metric_name, "value": value, "period": _period_from_header(header[1]), "unit": unit})
+    return metrics
+
+
 def parse_key_ratio_metrics(text: str) -> list[dict[str, str | None]]:
     """Parse the deterministic ``## Key Ratios`` bullets emitted by the financials tool."""
 
@@ -124,7 +196,7 @@ def extract_financial_metrics(
 
     text = _read_document_text(document)
     extracted: list[dict[str, Any]] = []
-    for metric in parse_key_ratio_metrics(text):
+    for metric in [*parse_key_ratio_metrics(text), *parse_capital_return_metrics(text)]:
         metric_id = _stable_id(
             "metric",
             ticker.upper(),
