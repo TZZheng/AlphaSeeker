@@ -44,7 +44,11 @@ def test_extract_company_records_populates_metrics_facts_questions_idempotently(
     store = VaultStore(root)
     store.upsert_company("XOM", name="Exxon Mobil")
     sec_doc = ingest_text(
-        "FORM 10-K official filing text",
+        """FORM 10-K official filing text
+Exxon Mobil Corporation's principal business involves exploration for, and production of, crude oil and natural gas; manufacture, trade, transport and sale of crude oil, natural gas, petroleum products, petrochemicals, and a wide variety of specialty products.
+Operating data and industry segment information for the Corporation are contained in the Financial Section of this report under the following: “Management's Discussion and Analysis of Financial Condition and Results of Operations: Business Results” and Note 3.
+The oil, gas, and petrochemical businesses are fundamentally commodity businesses. This means ExxonMobil’s operations and earnings may be significantly affected by changes in oil, gas, and petrochemical prices and by changes in margins on refined products.
+""",
         ticker="XOM",
         source_type="sec",
         title="XOM 10-K 2026-02-25",
@@ -71,12 +75,15 @@ def test_extract_company_records_populates_metrics_facts_questions_idempotently(
 
     assert first["counts"] == second["counts"]
     assert first["counts"]["metrics"] == 11
-    assert first["counts"]["facts"] == 1
+    assert first["counts"]["facts"] == 4
     assert first["counts"]["questions"] == 2
     assert len(context["metrics"]) == 11
-    assert len(context["facts"]) == 1
+    assert len(context["facts"]) == 4
     assert len(context["questions"]) == 2
     assert {metric["metric_name"] for metric in context["metrics"]} >= {"Current Price", "Free Cash Flow"}
     assert {metric["source_doc_id"] for metric in context["metrics"]} == {financials_doc["doc_id"]}
-    assert context["facts"][0]["source_doc_id"] == sec_doc["doc_id"]
-    assert "A-grade SEC 10-K filing" in context["facts"][0]["statement"]
+    assert {fact["source_doc_id"] for fact in context["facts"]} == {sec_doc["doc_id"]}
+    sections = {fact["section"] for fact in context["facts"]}
+    assert {"SEC source registry", "Business overview", "Management commentary / official commentary", "Key risks from official filings"}.issubset(sections)
+    assert any("A-grade SEC 10-K filing" in fact["statement"] for fact in context["facts"])
+    assert any("principal business involves" in fact["statement"] for fact in context["facts"])

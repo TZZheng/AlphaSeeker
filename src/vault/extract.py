@@ -37,6 +37,21 @@ _FINANCIAL_METRICS = {
 _METRIC_METADATA = {**_VALUATION_METRICS, **_FINANCIAL_METRICS}
 _FORM_TYPE_RE = re.compile(r"^(10-K|10-Q|8-K|DEF 14A)\b", re.IGNORECASE)
 
+_SEC_SECTION_RULES = [
+    (
+        "Business overview",
+        "principal business involves",
+    ),
+    (
+        "Management commentary / official commentary",
+        "Management's Discussion and Analysis of Financial Condition and Results of Operations",
+    ),
+    (
+        "Key risks from official filings",
+        "oil, gas, and petrochemical businesses are fundamentally commodity businesses",
+    ),
+]
+
 
 def _stable_id(prefix: str, *parts: object) -> str:
     raw = "\n".join("" if part is None else str(part) for part in parts)
@@ -48,6 +63,29 @@ def _read_document_text(document: dict[str, Any]) -> str:
     if not path.exists():
         return ""
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _clean_space(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _clip(text: str, *, max_chars: int = 650) -> str:
+    cleaned = _clean_space(text)
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[: max_chars - 1].rstrip() + "…"
+
+
+def _paragraphs(text: str) -> list[str]:
+    return [_clean_space(line) for line in text.splitlines() if _clean_space(line) and not line.lstrip().startswith("|")]
+
+
+def _first_paragraph_containing(text: str, needle: str) -> str | None:
+    needle_lower = needle.lower()
+    for paragraph in _paragraphs(text):
+        if needle_lower in paragraph.lower():
+            return paragraph
+    return None
 
 
 def parse_key_ratio_metrics(text: str) -> list[dict[str, str | None]]:
@@ -159,6 +197,41 @@ def extract_sec_filing_facts(
     ]
 
 
+def extract_latest_sec_section_facts(
+    ticker: str,
+    document: dict[str, Any],
+    *,
+    store: VaultStore,
+) -> list[dict[str, Any]]:
+    """Extract a few high-signal A-grade snippets from the latest SEC filing text."""
+
+    text = _read_document_text(document)
+    if not text:
+        return []
+    meta = _metadata(document)
+    filing_date = str(meta.get("filing_date") or document.get("published_at") or "").strip() or None
+    extracted: list[dict[str, Any]] = []
+    for section, needle in _SEC_SECTION_RULES:
+        paragraph = _first_paragraph_containing(text, needle)
+        if not paragraph:
+            continue
+        statement = _clip(paragraph)
+        extracted.append(
+            store.add_fact(
+                ticker,
+                statement,
+                section=section,
+                source_doc_id=str(document.get("doc_id") or ""),
+                source_quote=statement,
+                source_grade=str(document.get("source_grade") or "A"),
+                confidence=0.8,
+                observed_at=filing_date,
+                fact_id=_stable_id("fact", ticker.upper(), document.get("doc_id"), section, statement),
+            )
+        )
+    return extracted
+
+
 def add_default_research_questions(ticker: str, *, store: VaultStore, documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Seed a small deterministic question list once source coverage exists."""
 
@@ -204,12 +277,18 @@ def extract_company_records(
 
     metrics: list[dict[str, Any]] = []
     facts: list[dict[str, Any]] = []
+    sec_documents: list[dict[str, Any]] = []
     for document in documents:
         source_type = str(document.get("source_type") or "")
         if source_type == "derived_financials":
             metrics.extend(extract_financial_metrics(ticker_norm, document, store=active_store))
         elif source_type == "sec":
+            sec_documents.append(document)
             facts.extend(extract_sec_filing_facts(ticker_norm, document, store=active_store))
+
+    if sec_documents:
+        latest_sec = max(sec_documents, key=lambda doc: str(doc.get("published_at") or doc.get("ingested_at") or ""))
+        facts.extend(extract_latest_sec_section_facts(ticker_norm, latest_sec, store=active_store))
 
     questions = add_default_research_questions(ticker_norm, store=active_store, documents=documents)
     return {

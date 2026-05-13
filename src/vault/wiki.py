@@ -11,10 +11,18 @@ from src.vault.store import VaultStore, new_id
 
 
 VALUATION_METRIC_NAMES = {"Current Price", "Market Cap", "Enterprise Value", "Trailing P/E", "Forward P/E", "EV/EBITDA"}
+SEC_REGISTRY_SECTION = "SEC source registry"
+BUSINESS_SECTIONS = {"Business overview", SEC_REGISTRY_SECTION}
+COMMENTARY_SECTIONS = {"Management commentary / official commentary"}
+RISK_SECTIONS = {"Key risks from official filings"}
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _filter_facts(facts: list[dict[str, object]], sections: set[str]) -> list[dict[str, object]]:
+    return [fact for fact in facts if str(fact.get("section") or "") in sections]
 
 
 def _md_table(rows: list[dict[str, object]], columns: list[tuple[str, str]]) -> str:
@@ -110,6 +118,9 @@ def render_company_wiki(ticker: str, *, root: str | Path | None = None, run_id: 
             )
 
     name = company.get("name") or ticker_norm
+    business_facts = _filter_facts(context["facts"], BUSINESS_SECTIONS)
+    commentary_facts = _filter_facts(context["facts"], COMMENTARY_SECTIONS)
+    risk_facts = _filter_facts(context["facts"], RISK_SECTIONS)
     text = "\n".join(
         [
             f"# {ticker_norm} — {name}",
@@ -123,18 +134,16 @@ def render_company_wiki(ticker: str, *, root: str | Path | None = None, run_id: 
             "_To be filled from active A-grade facts._",
             "",
             "## 2. Business overview",
-            _md_table(context["facts"], [("Fact", "statement"), ("Section", "section"), ("Source", "source_doc_id"), ("Grade", "source_grade")]),
+            _md_table(business_facts, [("Fact", "statement"), ("Section", "section"), ("Source", "source_doc_id"), ("Grade", "source_grade")]),
             "## 3. Revenue / earnings / cash flow snapshot",
             _md_table(context["metrics"], [("Metric", "metric_name"), ("Period", "period"), ("Value", "value"), ("Unit", "unit"), ("Source", "source_doc_id")]),
             "## 4. Balance sheet and capital return",
             "_To be filled from active A-grade facts/metrics._",
             "",
             "## 5. Management guidance / official commentary",
-            "_To be filled from filings, company releases, and official transcripts._",
-            "",
+            _md_table(commentary_facts, [("Fact", "statement"), ("Source", "source_doc_id"), ("Grade", "source_grade")]),
             "## 6. Key risks from official filings",
-            "_To be filled from 10-K/10-Q risk factors and official disclosures._",
-            "",
+            _md_table(risk_facts, [("Fact", "statement"), ("Source", "source_doc_id"), ("Grade", "source_grade")]),
             "## 7. Valuation-relevant metrics",
             _md_table(
                 [metric for metric in context["metrics"] if metric.get("metric_name") in VALUATION_METRIC_NAMES],

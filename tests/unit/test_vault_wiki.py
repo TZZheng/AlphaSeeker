@@ -12,7 +12,9 @@ def test_render_company_wiki_creates_obsidian_pages(tmp_path):
     store = VaultStore(root)
     store.upsert_company("XOM", name="Exxon Mobil")
     doc = ingest_text("Official filing text", ticker="XOM", source_type="sec", source_grade="A", title="XOM 10-K", root=root)
-    store.add_fact("XOM", "XOM operates integrated upstream and downstream assets.", source_doc_id=doc["doc_id"], source_grade="A")
+    store.add_fact("XOM", "XOM operates integrated upstream and downstream assets.", section="Business overview", source_doc_id=doc["doc_id"], source_grade="A")
+    store.add_fact("XOM", "Management discusses business results in MD&A.", section="Management commentary / official commentary", source_doc_id=doc["doc_id"], source_grade="A")
+    store.add_fact("XOM", "XOM is exposed to commodity price risk.", section="Key risks from official filings", source_doc_id=doc["doc_id"], source_grade="A")
     store.add_metric("XOM", "Free cash flow", "11630499840", period="TTM", unit="USD", source_doc_id=doc["doc_id"], source_grade="A")
     store.add_question("XOM", "How durable is Guyana growth?", priority="high")
     store.add_conflict("XOM", "metric_mismatch", "FCF differs between market data and filing-derived estimate.")
@@ -24,6 +26,8 @@ def test_render_company_wiki_creates_obsidian_pages(tmp_path):
     assert "[[source_index]]" in wiki
     assert "[[question_list]]" in wiki
     assert "Free cash flow" in wiki
+    assert "Management discusses business results" in wiki
+    assert "commodity price risk" in wiki
     assert "Valuation-relevant metrics" in wiki
     assert "How durable is Guyana growth?" in wiki
     assert "FCF differs" in wiki
