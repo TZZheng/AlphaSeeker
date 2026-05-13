@@ -42,6 +42,20 @@ def _md_table(rows: list[dict[str, object]], columns: list[tuple[str, str]]) -> 
     return "\n".join([header, sep, *body]) + "\n"
 
 
+def _metrics_named(metrics: list[dict[str, object]], names: set[str]) -> list[dict[str, object]]:
+    return [metric for metric in metrics if metric.get("metric_name") in names]
+
+
+def _has_non_a_grade(metrics: list[dict[str, object]]) -> bool:
+    return any(str(metric.get("source_grade") or "").upper() != "A" for metric in metrics)
+
+
+def _support_note(metrics: list[dict[str, object]]) -> str:
+    if not _has_non_a_grade(metrics):
+        return ""
+    return "Note: non-A-grade rows are support metrics pending confirmation against A-grade filing tables or company-primary disclosures.\n"
+
+
 def render_source_index(ticker: str, *, root: str | Path | None = None) -> Path:
     store = VaultStore(root)
     paths = default_vault_paths(root).ensure()
@@ -74,7 +88,13 @@ def render_source_index(ticker: str, *, root: str | Path | None = None) -> Path:
     return path
 
 
-def render_support_pages(ticker: str, *, root: str | Path | None = None) -> dict[str, Path]:
+def render_support_pages(
+    ticker: str,
+    *,
+    root: str | Path | None = None,
+    questions: list[dict[str, object]] | None = None,
+    conflicts: list[dict[str, object]] | None = None,
+) -> dict[str, Path]:
     paths = default_vault_paths(root).ensure()
     ticker_norm = ticker.upper()
     company_dir = paths.company_dir(ticker_norm)
@@ -82,10 +102,34 @@ def render_support_pages(ticker: str, *, root: str | Path | None = None) -> dict
     question_path = company_dir / "question_list.md"
     conflict_path = company_dir / "conflicts.md"
     catalyst_path = company_dir / "catalysts.md"
-    if not question_path.exists():
-        question_path.write_text(f"# {ticker_norm} Question List\n\n_Open questions will appear here._\n", encoding="utf-8")
-    if not conflict_path.exists():
-        conflict_path.write_text(f"# {ticker_norm} Conflicts\n\n_Open conflicts will appear here._\n", encoding="utf-8")
+    if questions is None:
+        if not question_path.exists():
+            question_path.write_text(f"# {ticker_norm} Question List\n\n_Open questions will appear here._\n", encoding="utf-8")
+    else:
+        question_path.write_text(
+            "\n".join(
+                [
+                    f"# {ticker_norm} Question List",
+                    "",
+                    _md_table(questions, [("Question", "question"), ("Priority", "priority"), ("Created", "created_at")]),
+                ]
+            ),
+            encoding="utf-8",
+        )
+    if conflicts is None:
+        if not conflict_path.exists():
+            conflict_path.write_text(f"# {ticker_norm} Conflicts\n\n_Open conflicts will appear here._\n", encoding="utf-8")
+    else:
+        conflict_path.write_text(
+            "\n".join(
+                [
+                    f"# {ticker_norm} Conflicts",
+                    "",
+                    _md_table(conflicts, [("Type", "conflict_type"), ("Summary", "summary"), ("Severity", "severity"), ("Status", "status")]),
+                ]
+            ),
+            encoding="utf-8",
+        )
     if not catalyst_path.exists():
         catalyst_path.write_text(f"# {ticker_norm} Catalysts\n\n_Catalysts will appear here._\n", encoding="utf-8")
     return {"question_list": question_path, "conflicts": conflict_path, "catalysts": catalyst_path}
@@ -122,6 +166,8 @@ def render_company_wiki(ticker: str, *, root: str | Path | None = None, run_id: 
     business_facts = _filter_facts(context["facts"], BUSINESS_SECTIONS)
     commentary_facts = _filter_facts(context["facts"], COMMENTARY_SECTIONS)
     risk_facts = _filter_facts(context["facts"], RISK_SECTIONS)
+    capital_return_metrics = _metrics_named(context["metrics"], CAPITAL_RETURN_METRIC_NAMES)
+    valuation_metrics = _metrics_named(context["metrics"], VALUATION_METRIC_NAMES)
     text = "\n".join(
         [
             f"# {ticker_norm} — {name}",
@@ -139,8 +185,9 @@ def render_company_wiki(ticker: str, *, root: str | Path | None = None, run_id: 
             "## 3. Revenue / earnings / cash flow snapshot",
             _md_table(context["metrics"], [("Metric", "metric_name"), ("Period", "period"), ("Value", "value"), ("Unit", "unit"), ("Source", "source_doc_id")]),
             "## 4. Balance sheet and capital return",
+            _support_note(capital_return_metrics),
             _md_table(
-                [metric for metric in context["metrics"] if metric.get("metric_name") in CAPITAL_RETURN_METRIC_NAMES],
+                capital_return_metrics,
                 [("Metric", "metric_name"), ("Period", "period"), ("Value", "value"), ("Unit", "unit"), ("Source", "source_doc_id"), ("Grade", "source_grade")],
             ),
             "## 5. Management guidance / official commentary",
@@ -148,8 +195,9 @@ def render_company_wiki(ticker: str, *, root: str | Path | None = None, run_id: 
             "## 6. Key risks from official filings",
             _md_table(risk_facts, [("Fact", "statement"), ("Source", "source_doc_id"), ("Grade", "source_grade")]),
             "## 7. Valuation-relevant metrics",
+            _support_note(valuation_metrics),
             _md_table(
-                [metric for metric in context["metrics"] if metric.get("metric_name") in VALUATION_METRIC_NAMES],
+                valuation_metrics,
                 [("Metric", "metric_name"), ("Period", "period"), ("Value", "value"), ("Unit", "unit"), ("Source", "source_doc_id"), ("Grade", "source_grade")],
             ),
             "## 8. Open questions",
@@ -163,5 +211,5 @@ def render_company_wiki(ticker: str, *, root: str | Path | None = None, run_id: 
     )
     wiki_path.write_text(text, encoding="utf-8")
     render_source_index(ticker_norm, root=root)
-    render_support_pages(ticker_norm, root=root)
+    render_support_pages(ticker_norm, root=root, questions=context["questions"], conflicts=context["conflicts"])
     return wiki_path

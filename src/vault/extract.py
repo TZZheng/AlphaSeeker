@@ -45,6 +45,8 @@ _CAPITAL_RETURN_ROWS = {
     "Repurchase Of Capital Stock": ("Share Repurchases", "USD"),
     "Cash Dividends Paid": ("Cash Dividends Paid", "USD"),
 }
+_CAPITAL_RETURN_METRIC_NAMES = {metric_name for metric_name, _ in _CAPITAL_RETURN_ROWS.values()}
+_VALUATION_METRIC_NAMES = set(_VALUATION_METRICS)
 
 _SEC_SECTION_RULES = [
     (
@@ -304,24 +306,50 @@ def extract_latest_sec_section_facts(
     return extracted
 
 
-def add_default_research_questions(ticker: str, *, store: VaultStore, documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Seed a small deterministic question list once source coverage exists."""
+def _metric_names_with_non_a_grade(metrics: list[dict[str, Any]], target_names: set[str]) -> set[str]:
+    return {
+        str(metric.get("metric_name") or "")
+        for metric in metrics
+        if metric.get("metric_name") in target_names and str(metric.get("source_grade") or "").upper() != "A"
+    }
 
+
+def add_default_research_questions(
+    ticker: str,
+    *,
+    store: VaultStore,
+    documents: list[dict[str, Any]],
+    metrics: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Seed deterministic question list once source coverage and B-grade support metrics exist."""
+
+    ticker_norm = ticker.upper()
     source_types = {str(doc.get("source_type") or "") for doc in documents}
+    metrics = metrics or []
     questions: list[tuple[str, str]] = []
     if "sec" in source_types:
-        questions.append(("high", f"What are the material risk factors, segment trends, and capital allocation signals in {ticker.upper()}'s latest SEC filings?"))
+        questions.append(("high", f"What are the material risk factors, segment trends, and capital allocation signals in {ticker_norm}'s latest SEC filings?"))
     if "derived_financials" in source_types:
-        questions.append(("normal", f"Which derived market-data metrics for {ticker.upper()} need confirmation against A-grade filings or company releases?"))
+        questions.append(("normal", f"Which derived market-data metrics for {ticker_norm} need confirmation against A-grade filings or company releases?"))
+
+    b_grade_capital_metrics = _metric_names_with_non_a_grade(metrics, _CAPITAL_RETURN_METRIC_NAMES)
+    if b_grade_capital_metrics:
+        names = ", ".join(sorted(b_grade_capital_metrics))
+        questions.append(("high", f"Confirm {ticker_norm}'s latest annual capital-return metrics ({names}) against A-grade filing tables or company-primary disclosures."))
+
+    b_grade_valuation_metrics = _metric_names_with_non_a_grade(metrics, _VALUATION_METRIC_NAMES)
+    if b_grade_valuation_metrics:
+        names = ", ".join(sorted(b_grade_valuation_metrics))
+        questions.append(("normal", f"Confirm {ticker_norm}'s valuation support metrics ({names}) against A-grade filing-derived shares/debt/cash data or company-primary releases before relying on them."))
 
     inserted: list[dict[str, Any]] = []
     for priority, question in questions:
         inserted.append(
             store.add_question(
-                ticker,
+                ticker_norm,
                 question,
                 priority=priority,
-                question_id=_stable_id("question", ticker.upper(), question),
+                question_id=_stable_id("question", ticker_norm, question),
             )
         )
     return inserted
@@ -362,7 +390,7 @@ def extract_company_records(
         latest_sec = max(sec_documents, key=lambda doc: str(doc.get("published_at") or doc.get("ingested_at") or ""))
         facts.extend(extract_latest_sec_section_facts(ticker_norm, latest_sec, store=active_store))
 
-    questions = add_default_research_questions(ticker_norm, store=active_store, documents=documents)
+    questions = add_default_research_questions(ticker_norm, store=active_store, documents=documents, metrics=metrics)
     return {
         "ticker": ticker_norm,
         "metrics": metrics,

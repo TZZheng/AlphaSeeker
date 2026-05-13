@@ -84,9 +84,10 @@ def test_onboard_company_extracts_derived_financial_metrics(monkeypatch, tmp_pat
     result = onboard_company(ticker="xom", company_name="Exxon Mobil", include_market_support=True, root=root)
 
     assert result["extracted_records"]["counts"]["metrics"] == 5
-    assert result["extracted_records"]["counts"]["questions"] == 1
+    assert result["extracted_records"]["counts"]["questions"] == 2
     context = VaultStore(root).company_context("XOM", limit=20)
     assert {metric["metric_name"] for metric in context["metrics"]} >= {"Current Price", "Free Cash Flow"}
+    assert any("valuation support metrics" in question["question"] for question in context["questions"])
     wiki = Path(result["wiki_path"]).read_text(encoding="utf-8")
     assert "Current Price" in wiki
     assert "Free Cash Flow" in wiki

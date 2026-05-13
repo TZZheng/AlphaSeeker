@@ -98,10 +98,10 @@ The oil, gas, and petrochemical businesses are fundamentally commodity businesse
     assert first["counts"] == second["counts"]
     assert first["counts"]["metrics"] == 16
     assert first["counts"]["facts"] == 4
-    assert first["counts"]["questions"] == 2
+    assert first["counts"]["questions"] == 4
     assert len(context["metrics"]) == 16
     assert len(context["facts"]) == 4
-    assert len(context["questions"]) == 2
+    assert len(context["questions"]) == 4
     assert {metric["metric_name"] for metric in context["metrics"]} >= {"Current Price", "Free Cash Flow", "Capital Expenditures", "Share Repurchases"}
     assert {metric["source_doc_id"] for metric in context["metrics"]} == {financials_doc["doc_id"]}
     assert {fact["source_doc_id"] for fact in context["facts"]} == {sec_doc["doc_id"]}
@@ -109,3 +109,8 @@ The oil, gas, and petrochemical businesses are fundamentally commodity businesse
     assert {"SEC source registry", "Business overview", "Management commentary / official commentary", "Key risks from official filings"}.issubset(sections)
     assert any("A-grade SEC 10-K filing" in fact["statement"] for fact in context["facts"])
     assert any("principal business involves" in fact["statement"] for fact in context["facts"])
+    questions = {question["question"]: question for question in context["questions"]}
+    assert any("latest annual capital-return metrics" in question for question in questions)
+    assert any("Capital Expenditures" in question and "Share Repurchases" in question for question in questions)
+    assert any("valuation support metrics" in question for question in questions)
+    assert any("Enterprise Value" in question and "EV/EBITDA" in question for question in questions)

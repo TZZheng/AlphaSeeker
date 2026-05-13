@@ -17,6 +17,7 @@ def test_render_company_wiki_creates_obsidian_pages(tmp_path):
     store.add_fact("XOM", "XOM is exposed to commodity price risk.", section="Key risks from official filings", source_doc_id=doc["doc_id"], source_grade="A")
     store.add_metric("XOM", "Free cash flow", "11630499840", period="TTM", unit="USD", source_doc_id=doc["doc_id"], source_grade="A")
     store.add_metric("XOM", "Capital Expenditures", "-28358000000", period="FY2025", unit="USD", source_doc_id=doc["doc_id"], source_grade="B")
+    store.add_metric("XOM", "EV/EBITDA", "11.966", period="TTM", unit="x", source_doc_id=doc["doc_id"], source_grade="B")
     store.add_question("XOM", "How durable is Guyana growth?", priority="high")
     store.add_conflict("XOM", "metric_mismatch", "FCF differs between market data and filing-derived estimate.")
 
@@ -28,14 +29,19 @@ def test_render_company_wiki_creates_obsidian_pages(tmp_path):
     assert "[[question_list]]" in wiki
     assert "Free cash flow" in wiki
     assert "Capital Expenditures" in wiki
+    assert "EV/EBITDA" in wiki
+    assert "support metrics pending confirmation against A-grade filing tables" in wiki
+    assert wiki.count("support metrics pending confirmation") == 2
     assert "Management discusses business results" in wiki
     assert "commodity price risk" in wiki
     assert "Valuation-relevant metrics" in wiki
     assert "How durable is Guyana growth?" in wiki
     assert "FCF differs" in wiki
     assert (root / "companies" / "XOM" / "source_index.md").exists()
-    assert (root / "companies" / "XOM" / "question_list.md").exists()
-    assert (root / "companies" / "XOM" / "conflicts.md").exists()
+    question_list = (root / "companies" / "XOM" / "question_list.md").read_text(encoding="utf-8")
+    conflicts = (root / "companies" / "XOM" / "conflicts.md").read_text(encoding="utf-8")
+    assert "How durable is Guyana growth?" in question_list
+    assert "FCF differs" in conflicts
 
     second_path = render_company_wiki("XOM", root=root)
     assert second_path == wiki_path
