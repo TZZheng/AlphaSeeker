@@ -217,3 +217,38 @@ def test_compare_a_b_metrics_creates_idempotent_conflict_for_mismatch(tmp_path):
     assert "Capital Expenditures differs" in context["conflicts"][0]["summary"]
     assert context["conflicts"][0]["left_ref"] == "metric_a"
     assert context["conflicts"][0]["right_ref"] == "metric_b"
+
+
+def test_compare_a_b_metrics_keeps_resolved_conflict_closed(tmp_path):
+    store = VaultStore(tmp_path / "research_vault")
+    metrics = [
+        {"metric_id": "metric_a", "metric_name": "Capital Expenditures", "period": "FY2025", "value": "-28000000000", "source_grade": "A"},
+        {"metric_id": "metric_b", "metric_name": "Capital Expenditures", "period": "FY2025", "value": "-28358000000", "source_grade": "B"},
+    ]
+
+    created = compare_a_b_metrics("XOM", metrics, store=store)
+    store.resolve_conflict(created[0]["conflict_id"], resolved_at="2026-01-01T00:00:00+00:00")
+    reopened = compare_a_b_metrics("XOM", metrics, store=store)
+
+    assert reopened == []
+    assert store.company_context("XOM")["conflicts"] == []
+    assert store.get_conflict(created[0]["conflict_id"])["status"] == "resolved"
+
+
+def test_compare_a_b_metrics_resolves_open_conflict_when_values_converge(tmp_path):
+    store = VaultStore(tmp_path / "research_vault")
+    mismatch = [
+        {"metric_id": "metric_a", "metric_name": "Capital Expenditures", "period": "FY2025", "value": "-28000000000", "source_grade": "A"},
+        {"metric_id": "metric_b", "metric_name": "Capital Expenditures", "period": "FY2025", "value": "-28358000000", "source_grade": "B"},
+    ]
+    created = compare_a_b_metrics("XOM", mismatch, store=store)
+    matching = [
+        {"metric_id": "metric_a", "metric_name": "Capital Expenditures", "period": "FY2025", "value": "-28358000000", "source_grade": "A"},
+        {"metric_id": "metric_b", "metric_name": "Capital Expenditures", "period": "FY2025", "value": "-28358000000", "source_grade": "B"},
+    ]
+
+    resolved = compare_a_b_metrics("XOM", matching, store=store)
+
+    assert resolved == []
+    assert store.company_context("XOM")["conflicts"] == []
+    assert store.get_conflict(created[0]["conflict_id"])["status"] == "resolved"

@@ -365,8 +365,13 @@ def compare_a_b_metrics(ticker: str, metrics: list[dict[str, Any]], *, store: Va
                 b_value = _decimal_or_none(b_metric.get("value"))
                 if b_value is None:
                     continue
+                conflict_id = _stable_id("conflict", ticker.upper(), metric_name, period, a_metric.get("metric_id"), b_metric.get("metric_id"))
                 tolerance = max(abs(a_value), Decimal("1")) * Decimal("0.001")
                 if abs(a_value - b_value) <= tolerance:
+                    store.resolve_conflict(conflict_id)
+                    continue
+                existing = store.get_conflict(conflict_id)
+                if existing and existing.get("status") == "resolved":
                     continue
                 summary = (
                     f"{ticker.upper()} {period or ''} {metric_name} differs between A-grade SEC companyfacts "
@@ -380,7 +385,7 @@ def compare_a_b_metrics(ticker: str, metrics: list[dict[str, Any]], *, store: Va
                         left_ref=str(a_metric.get("metric_id") or ""),
                         right_ref=str(b_metric.get("metric_id") or ""),
                         severity="medium",
-                        conflict_id=_stable_id("conflict", ticker.upper(), metric_name, period, a_metric.get("metric_id"), b_metric.get("metric_id")),
+                        conflict_id=conflict_id,
                     )
                 )
     return conflicts

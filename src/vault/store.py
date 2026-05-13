@@ -341,7 +341,10 @@ class VaultStore:
                   left_ref=excluded.left_ref,
                   right_ref=excluded.right_ref,
                   severity=excluded.severity,
-                  status=excluded.status
+                  status=CASE
+                    WHEN conflicts.status = 'resolved' AND excluded.status = 'open' THEN conflicts.status
+                    ELSE excluded.status
+                  END
                 """,
                 (resolved_id, ticker_norm, conflict_type, summary, left_ref, right_ref, severity, status, utc_now_iso()),
             )
@@ -349,6 +352,21 @@ class VaultStore:
         result = _row_to_dict(row)
         assert result is not None
         return result
+
+    def get_conflict(self, conflict_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM conflicts WHERE conflict_id = ?", (conflict_id,)).fetchone()
+        return _row_to_dict(row)
+
+    def resolve_conflict(self, conflict_id: str, *, resolved_at: str | None = None) -> dict[str, Any] | None:
+        timestamp = resolved_at or utc_now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE conflicts SET status = 'resolved', resolved_at = ? WHERE conflict_id = ?",
+                (timestamp, conflict_id),
+            )
+            row = conn.execute("SELECT * FROM conflicts WHERE conflict_id = ?", (conflict_id,)).fetchone()
+        return _row_to_dict(row)
 
     def company_context(self, ticker: str, *, limit: int = 20) -> dict[str, Any]:
         ticker_norm = ticker.strip().upper()
