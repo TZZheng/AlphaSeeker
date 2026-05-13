@@ -24,6 +24,7 @@ def test_render_company_wiki_creates_obsidian_pages(tmp_path):
     assert "[[source_index]]" in wiki
     assert "[[question_list]]" in wiki
     assert "Free cash flow" in wiki
+    assert "Valuation-relevant metrics" in wiki
     assert "How durable is Guyana growth?" in wiki
     assert "FCF differs" in wiki
     assert (root / "companies" / "XOM" / "source_index.md").exists()

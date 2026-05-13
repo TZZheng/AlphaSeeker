@@ -10,6 +10,9 @@ from src.vault.paths import default_vault_paths
 from src.vault.store import VaultStore, new_id
 
 
+VALUATION_METRIC_NAMES = {"Current Price", "Market Cap", "Enterprise Value", "Trailing P/E", "Forward P/E", "EV/EBITDA"}
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -133,8 +136,10 @@ def render_company_wiki(ticker: str, *, root: str | Path | None = None, run_id: 
             "_To be filled from 10-K/10-Q risk factors and official disclosures._",
             "",
             "## 7. Valuation-relevant metrics",
-            "_Derived market-data support can appear here, with source labels._",
-            "",
+            _md_table(
+                [metric for metric in context["metrics"] if metric.get("metric_name") in VALUATION_METRIC_NAMES],
+                [("Metric", "metric_name"), ("Period", "period"), ("Value", "value"), ("Unit", "unit"), ("Source", "source_doc_id"), ("Grade", "source_grade")],
+            ),
             "## 8. Open questions",
             _md_table(context["questions"], [("Question", "question"), ("Priority", "priority"), ("Created", "created_at")]),
             "## 9. Conflicts / items needing human judgment",

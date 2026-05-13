@@ -9,6 +9,7 @@ from typing import Any
 
 from src.tools.equity.company_profile import fetch_company_profile
 from src.tools.equity.financials import fetch_financial_metrics
+from src.vault.extract import extract_company_records
 from src.vault.ingest import ingest_file
 from src.vault.paths import default_vault_paths
 from src.vault.sec_import import import_sec_filings
@@ -98,6 +99,7 @@ def onboard_company(
                     )
                 )
 
+    extracted_records = extract_company_records(ticker_norm, root=root, store=store)
     wiki_path = render_company_wiki(ticker_norm, root=root)
     vault_paths = default_vault_paths(root).ensure()
     return {
@@ -109,6 +111,7 @@ def onboard_company(
         "sec_documents": imported_sec,
         "support_documents": imported_support,
         "manual_documents": imported_manual,
+        "extracted_records": extracted_records,
     }
 
 

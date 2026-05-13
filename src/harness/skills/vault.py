@@ -6,6 +6,7 @@ from typing import Any
 
 from src.harness.skills.common import artifact_evidence, json_preview, make_result, safe_read
 from src.harness.types import HarnessState, SkillMetrics, SkillResult, SkillSpec
+from src.vault.extract import extract_company_records
 from src.vault.ingest import ingest_file
 from src.vault.onboard import onboard_company
 from src.vault.store import VaultStore
@@ -64,6 +65,32 @@ def vault_get_company_context_skill(arguments: dict[str, Any], _state: HarnessSt
         details=context,
         metrics=SkillMetrics(evidence_count=len(context["documents"]), artifact_count=0),
         output_text=json_preview(context),
+    )
+
+
+def vault_extract_company_records_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillResult:
+    ticker = str(arguments.get("ticker") or "").strip().upper()
+    if not ticker:
+        return make_result(
+            "vault_extract_company_records",
+            arguments,
+            status="failed",
+            summary="vault_extract_company_records requires a ticker.",
+            error="Missing ticker.",
+        )
+    result = extract_company_records(ticker)
+    return make_result(
+        "vault_extract_company_records",
+        arguments,
+        status="ok",
+        summary=(
+            f"Extracted deterministic vault records for {ticker}: "
+            f"{result['counts']['metrics']} metrics, {result['counts']['facts']} facts, "
+            f"{result['counts']['questions']} questions."
+        ),
+        details=result,
+        metrics=SkillMetrics(evidence_count=result["counts"]["facts"], artifact_count=0),
+        output_text=json_preview({"ticker": ticker, "counts": result["counts"]}),
     )
 
 
@@ -160,6 +187,14 @@ VAULT_SKILLS: list[SkillSpec] = [
             "required": ["ticker"],
         },
         executor=vault_get_company_context_skill,
+    ),
+
+    SkillSpec(
+        name="vault_extract_company_records",
+        description="Populate deterministic first-pass facts, metrics, and questions from a company's vault documents.",
+        pack="vault",
+        input_schema={"type": "object", "properties": {"ticker": {"type": "string"}}, "required": ["ticker"]},
+        executor=vault_extract_company_records_skill,
     ),
     SkillSpec(
         name="vault_update_company_wiki",

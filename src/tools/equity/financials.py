@@ -64,11 +64,6 @@ def fetch_financial_metrics(ticker: str, output_dir: str | Path | None = None) -
         # --- Key Ratios ---
         # yfinance 404s often result in empty info or missing keys, but no exception.
         
-        # DEBUG: Print info to see what's actually returned on 404
-        print(f"DEBUG info keys: {list(info.keys())}")
-        print(f"DEBUG marketCap: {info.get('marketCap')}")
-        print(f"DEBUG totalRevenue: {info.get('totalRevenue')}")
-
         pe_ratio = info.get('trailingPE', 'N/A')
         forward_pe = info.get('forwardPE', 'N/A')
         market_cap = info.get('marketCap', 'N/A')

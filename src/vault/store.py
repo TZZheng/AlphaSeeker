@@ -194,6 +194,16 @@ class VaultStore:
                   source_grade, confidence, observed_at, created_at, status
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(fact_id) DO UPDATE SET
+                  ticker=excluded.ticker,
+                  statement=excluded.statement,
+                  section=excluded.section,
+                  source_doc_id=excluded.source_doc_id,
+                  source_quote=excluded.source_quote,
+                  source_grade=excluded.source_grade,
+                  confidence=excluded.confidence,
+                  observed_at=excluded.observed_at,
+                  status=excluded.status
                 """,
                 (
                     resolved_id,
@@ -239,6 +249,16 @@ class VaultStore:
                   source_doc_id, source_grade, observed_at, created_at, status
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(metric_id) DO UPDATE SET
+                  ticker=excluded.ticker,
+                  metric_name=excluded.metric_name,
+                  period=excluded.period,
+                  value=excluded.value,
+                  unit=excluded.unit,
+                  source_doc_id=excluded.source_doc_id,
+                  source_grade=excluded.source_grade,
+                  observed_at=excluded.observed_at,
+                  status=excluded.status
                 """,
                 (
                     resolved_id,
@@ -277,6 +297,12 @@ class VaultStore:
                 """
                 INSERT INTO questions(question_id, ticker, question, status, priority, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(question_id) DO UPDATE SET
+                  ticker=excluded.ticker,
+                  question=excluded.question,
+                  status=excluded.status,
+                  priority=excluded.priority,
+                  updated_at=excluded.updated_at
                 """,
                 (resolved_id, ticker_norm, question, status, priority, timestamp, timestamp),
             )
