@@ -15,7 +15,18 @@ def _clear_config_cache() -> None:
 def test_required_provider_env_vars_from_default_config() -> None:
     required = model_config.get_required_provider_env_vars()
 
+    # The harness agent defaults to native Codex OAuth (no API-key env var),
+    # while the condense role remains on MiniMax.
     assert required == {"MINIMAX_API_KEY"}
+
+
+def test_hardcoded_fallback_defaults_to_native_codex(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(model_config, "_load_config", lambda: {})
+    monkeypatch.delenv("ALPHASEEKER_MODEL_HARNESS_AGENT", raising=False)
+    monkeypatch.delenv("ALPHASEEKER_MODEL_HARNESS_CONDENSE", raising=False)
+
+    assert model_config.get_model("harness", "agent") == "codex/gpt-5.5"
+    assert model_config.get_model("harness", "condense") == "minimax/Minimax-M2.7"
 
 
 def test_missing_provider_env_vars_without_keys(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -61,3 +72,8 @@ def test_minimax_provider_detection_accepts_raw_model_names() -> None:
     assert model_config._provider_label("MiniMax-M2.5") == "minimax/*"
     assert model_config._provider_label("codex-MiniMax-M2.5") == "minimax/*"
     assert model_config._provider_env_candidates("MiniMax-M2.5") == ("MINIMAX_API_KEY",)
+
+
+def test_codex_provider_uses_oauth_token_file_not_api_key_env() -> None:
+    assert model_config._provider_label("codex/gpt-5.5") == "codex/*"
+    assert model_config._provider_env_candidates("codex/gpt-5.5") is None

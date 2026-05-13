@@ -25,9 +25,11 @@ from src.harness.transport import (
     MiniMaxAnthropicTransport,
     MiniMaxOpenAITransport,
     OpenAINativeTransport,
+    CodexNativeTransport,
 )
 from src.harness.transport import (
     _build_request_payload,
+    _codex_responses_tool_specs,
     _canonicalize_message_for_conversation,
     _conversation_messages,
     _persist_history_compaction_state,
@@ -215,6 +217,39 @@ class _FakeOpenAIClient:
         self.chat = _FakeChat()
 
 
+class _FakeCodexResponses:
+    def __init__(self, events: list[object] | None = None) -> None:
+        self.calls: list[dict[str, object]] = []
+        self._events = list(events or [])
+
+    def create(self, **kwargs: object) -> list[object]:
+        self.calls.append(dict(kwargs))
+        return list(self._events)
+
+
+class _FakeCodexClient:
+    def __init__(self, events: list[object] | None = None) -> None:
+        self.api_key = "initial-token"
+        self.responses = _FakeCodexResponses(events)
+
+
+def _fake_codex_tool_stream() -> list[object]:
+    return [
+        SimpleNamespace(type="response.output_text.delta", delta="Need data."),
+        SimpleNamespace(
+            type="response.output_item.added",
+            item=SimpleNamespace(type="function_call", call_id="call_1", name="read"),
+        ),
+        SimpleNamespace(type="response.function_call_arguments.delta", delta='{"path"'),
+        SimpleNamespace(type="response.function_call_arguments.delta", delta=':"publish/final.md"}'),
+        SimpleNamespace(
+            type="response.output_item.done",
+            item=SimpleNamespace(type="function_call", call_id="call_1", name="read", arguments='{"path":"publish/final.md"}'),
+        ),
+        SimpleNamespace(type="response.completed", response=SimpleNamespace(id="resp_1", usage=None)),
+    ]
+
+
 def _fake_openai_tool_call(call_id: str, name: str, arguments: dict[str, object]) -> object:
     return SimpleNamespace(
         id=call_id,
@@ -310,6 +345,7 @@ def _append_model_visible_entry(
 def test_auto_transport_routing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MINIMAX_BASE_URL", raising=False)
 
+    assert resolve_agent_transport("auto", "codex/gpt-5.5") == "codex"
     assert resolve_agent_transport("auto", "minimax/MiniMax-M2.7") == "minimax_anthropic"
     assert resolve_agent_transport("auto", "claude-sonnet-4-6") == "anthropic"
     assert resolve_agent_transport("auto", "gpt-4o") == "openai"
@@ -580,6 +616,24 @@ def test_canonical_conversation_keeps_tool_results_paired_after_tool_calls(
             },
             "tool",
         ),
+        (
+            "codex",
+            CodexNativeTransport,
+            "codex/gpt-5.5",
+            "",
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_write",
+                        "type": "function",
+                        "function": {"name": "write", "arguments": '{"path":"publish/final.md"}'},
+                    }
+                ],
+            },
+            "tool",
+        ),
     ],
 )
 def test_native_tool_results_use_toolview_conversation_and_full_transcript(
@@ -593,9 +647,13 @@ def test_native_tool_results_use_toolview_conversation_and_full_transcript(
     tool_result_role: str,
 ) -> None:
     run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
-    monkeypatch.setenv(env_key, "test-key")
+    if env_key:
+        monkeypatch.setenv(env_key, "test-key")
     if transport_name in {"anthropic", "minimax_anthropic"}:
         monkeypatch.setattr("src.harness.transport.anthropic.Anthropic", lambda **_: _FakeAnthropicClient())
+    elif transport_name == "codex":
+        monkeypatch.setattr("src.harness.transport.CodexTokenManager", lambda: SimpleNamespace(get_access_token=lambda: "codex-token"))
+        monkeypatch.setattr("src.harness.transport.OpenAI", lambda **_: _FakeCodexClient())
     else:
         monkeypatch.setattr("src.harness.transport.OpenAI", lambda **_: _FakeOpenAIClient())
     transport = transport_class(
@@ -1053,6 +1111,138 @@ def test_openai_transport_canonical_request_omits_large_write_arguments(
     assert "[omitted " in rendered_second_request
     assert "read the current file before revising" in rendered_second_request
     assert "FULL_CONTENT_END" not in rendered_second_request
+
+
+def test_codex_tool_specs_are_flat_and_scrub_top_level_combinators() -> None:
+    tools = _codex_responses_tool_specs(
+        [
+            {
+                "name": "read",
+                "description": "Read a file",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string", "enum": ["a.md"]}},
+                    "required": ["path"],
+                    "oneOf": [],
+                    "enum": [],
+                },
+            }
+        ]
+    )
+
+    assert tools == [
+        {
+            "type": "function",
+            "name": "read",
+            "description": "Read a file",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "enum": ["a.md"]}},
+                "required": ["path"],
+            },
+        }
+    ]
+
+
+def test_codex_native_transport_sends_stateless_streaming_responses_request(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+    fake_client = _FakeCodexClient(_fake_codex_tool_stream())
+    monkeypatch.setattr("src.harness.transport.CodexTokenManager", lambda: SimpleNamespace(get_access_token=lambda: "fresh-token"))
+    monkeypatch.setattr("src.harness.transport.OpenAI", lambda **kwargs: fake_client)
+    transport = CodexNativeTransport(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name="codex/gpt-5.5",
+        system_prompt="System v1",
+    )
+    tool_specs = [
+        {
+            "name": "read",
+            "description": "Read a file",
+            "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}},
+        }
+    ]
+
+    transport.ensure_initialized("Initial prompt")
+    result = transport.execute_turn(tool_specs)
+
+    call = fake_client.responses.calls[0]
+    assert call["model"] == "gpt-5.5"
+    assert call["instructions"] == "System v1"
+    assert call["stream"] is True
+    assert call["store"] is False
+    assert "previous_response_id" not in call
+    assert "context_management" not in call
+    assert call["tools"][0]["name"] == "read"
+    assert call["input"][0] == {"role": "user", "content": "Initial prompt"}
+    assert result.text_blocks == ["Need data."]
+    assert result.tool_calls[0].call_id == "call_1"
+    assert result.tool_calls[0].name == "read"
+    assert result.tool_calls[0].arguments == {"path": "publish/final.md"}
+
+
+def test_codex_native_transport_replays_tool_outputs_as_function_call_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, agent_id = _create_agent_workspace(tmp_path, monkeypatch)
+    fake_client = _FakeCodexClient([SimpleNamespace(type="response.completed", response=SimpleNamespace(id="resp_2", usage=None))])
+    monkeypatch.setattr("src.harness.transport.CodexTokenManager", lambda: SimpleNamespace(get_access_token=lambda: "fresh-token"))
+    monkeypatch.setattr("src.harness.transport.OpenAI", lambda **kwargs: fake_client)
+    transport = CodexNativeTransport(
+        run_root=str(run_root),
+        agent_id=agent_id,
+        model_name="codex/gpt-5.5",
+        system_prompt="System v1",
+    )
+
+    transport.append_user_text("Initial prompt")
+    _append_model_visible_entry(
+        run_root,
+        agent_id,
+        kind="assistant_response",
+        message={
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_read",
+                    "type": "function",
+                    "function": {"name": "read", "arguments": '{"path":"a.md"}'},
+                }
+            ],
+        },
+        transport="codex",
+    )
+    transport.append_tool_results(
+        [
+            {
+                "call_id": "call_read",
+                "result": {"status": "ok", "content": "RAW"},
+                "conversation_result": {"status": "ok", "description": "Read a.md"},
+            }
+        ]
+    )
+    transport.append_user_text("Continue")
+
+    transport.execute_turn([])
+
+    input_items = fake_client.responses.calls[0]["input"]
+    assert {
+        "type": "function_call",
+        "call_id": "call_read",
+        "name": "read",
+        "arguments": '{"path": "a.md"}',
+    } in input_items
+    assert {
+        "type": "function_call_output",
+        "call_id": "call_read",
+        "output": json.dumps({"status": "ok", "description": "Read a.md"}, ensure_ascii=True),
+    } in input_items
+    assert {"role": "user", "content": "Continue"} in input_items
 
 
 def test_model_request_artifact_records_compaction_preflight_metadata(

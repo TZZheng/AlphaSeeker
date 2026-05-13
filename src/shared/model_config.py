@@ -8,8 +8,8 @@ Users can override any model via:
 
 Example:
     from src.shared.model_config import get_model
-    MODEL_AGENT = get_model("harness", "agent")       # → "minimax/MiniMax-M2.7"
-    MODEL_CONDENSE = get_model("harness", "condense")  # → "kimi-k2.5"
+    MODEL_AGENT = get_model("harness", "agent")       # → "codex/gpt-5.5"
+    MODEL_CONDENSE = get_model("harness", "condense")  # → "minimax/Minimax-M2.7"
 """
 
 import os
@@ -25,8 +25,8 @@ import yaml
 
 _DEFAULTS: Dict[str, Dict[str, str]] = {
     "harness": {
-        "agent": "kimi-k2.5",
-        "condense": "sf/Qwen/Qwen3-8B",
+        "agent": "codex/gpt-5.5",
+        "condense": "minimax/Minimax-M2.7",
     },
 }
 
@@ -107,6 +107,8 @@ def _provider_label(model_name: str) -> str | None:
         return "gemini-*"
     if model_name.startswith("kimi-"):
         return "kimi-*"
+    if normalized.startswith("codex/"):
+        return "codex/*"
     if (
         normalized.startswith("minimax/")
         or normalized.startswith("minimax-")
@@ -129,6 +131,8 @@ def _provider_env_candidates(model_name: str) -> Tuple[str, ...] | None:
         return ("GOOGLE_API_KEY",)
     if model_name.startswith("kimi-"):
         return ("KIMI_API_KEY",)
+    if normalized.startswith("codex/"):
+        return None
     if (
         normalized.startswith("minimax/")
         or normalized.startswith("minimax-")

@@ -10,7 +10,8 @@
 #   - "kimi-*"     → Moonshot Kimi (e.g. "kimi-k2.5")
 #   - "minimax/*"  → MiniMax via OpenAI-compatible API (e.g. "minimax/MiniMax-M2.5")
 #   - "gemini-*"   → Google Gemini (e.g. "gemini-2.5-flash")
-#   - "gpt-*"      → OpenAI (e.g. "gpt-4o")
+#   - "gpt-*"      → OpenAI API (e.g. "gpt-4o")
+#   - "codex/*"    → ChatGPT Codex subscription via ~/.lingtai-tui/codex-auth.json (e.g. "codex/gpt-5.5")
 #   - "claude-*"   → Anthropic (e.g. "claude-sonnet-4-20250514")
 #
 # Environment variable override: ALPHASEEKER_MODEL_HARNESS_<ROLE>
@@ -20,5 +21,5 @@
 # Harness Runtime
 # ---------------------------------------------------------------------------
 harness:
-  agent: "minimax/Minimax-M2.7"
+  agent: "codex/gpt-5.5"
   condense: "minimax/Minimax-M2.7"

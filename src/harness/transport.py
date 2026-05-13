@@ -34,9 +34,12 @@ from src.harness.artifacts import (
 )
 from src.shared.llm_manager import get_llm
 from src.shared.model_config import get_model
+from src.shared.codex_auth import CodexTokenManager
 
 
 DEFAULT_MAX_TOKENS = 8192
+CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
+_CODEX_RESPONSES_SCHEMA_DISALLOWED_TOP_LEVEL_KEYS = ("allOf", "oneOf", "anyOf", "not", "enum")
 
 _RATE_LIMIT_INITIAL_DELAY = 5.0
 _RATE_LIMIT_MAX_DELAY = 60.0
@@ -118,9 +121,21 @@ def is_openai_model(model_name: str) -> bool:
     return normalized.startswith("gpt-") or normalized.startswith("o1") or normalized.startswith("o3") or normalized.startswith("o4")
 
 
+def is_codex_model(model_name: str) -> bool:
+    return model_name.lower().startswith("codex/")
+
+
+def normalize_codex_model_name(model_name: str) -> str:
+    if model_name.lower().startswith("codex/"):
+        return model_name.split("/", 1)[1]
+    return model_name
+
+
 def resolve_agent_transport(requested: str, model_name: str) -> str:
     if requested != "auto":
         return requested
+    if is_codex_model(model_name):
+        return "codex"
     if is_minimax_model(model_name):
         return "minimax_anthropic"
     if is_anthropic_model(model_name):
@@ -165,6 +180,132 @@ def _openai_tool_specs(tool_specs: list[dict[str, Any]]) -> list[dict[str, Any]]
         }
         for spec in tool_specs
     ]
+
+
+def _codex_responses_tool_specs(tool_specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    tools: list[dict[str, Any]] = []
+    for spec in tool_specs:
+        parameters = dict(spec.get("input_schema") or {"type": "object", "properties": {}})
+        for key in _CODEX_RESPONSES_SCHEMA_DISALLOWED_TOP_LEVEL_KEYS:
+            parameters.pop(key, None)
+        tools.append(
+            {
+                "type": "function",
+                "name": spec["name"],
+                "description": spec.get("description", ""),
+                "parameters": parameters,
+            }
+        )
+    return tools
+
+
+def _json_arguments_string(value: Any) -> str:
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+        return json.dumps(parsed, ensure_ascii=True)
+    return json.dumps(value or {}, ensure_ascii=True)
+
+
+def _responses_text_from_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                item_type = item.get("type")
+                if item_type in {"text", "input_text", "output_text"}:
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+        return "\n".join(part for part in parts if part)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _responses_input_from_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role") or "")
+        content = message.get("content")
+        if role == "tool":
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": str(message.get("tool_call_id", "")),
+                    "output": content if isinstance(content, str) else json.dumps(content, ensure_ascii=True, default=str),
+                }
+            )
+            continue
+
+        if role == "user":
+            if isinstance(content, list) and content and all(
+                isinstance(block, dict) and block.get("type") == "tool_result" for block in content
+            ):
+                for block in content:
+                    output = block.get("content", "")
+                    items.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": str(block.get("tool_use_id") or block.get("tool_call_id") or ""),
+                            "output": output if isinstance(output, str) else json.dumps(output, ensure_ascii=True, default=str),
+                        }
+                    )
+            else:
+                items.append({"role": "user", "content": _responses_text_from_content(content)})
+            continue
+
+        if role == "assistant":
+            text = _responses_text_from_content(content)
+            if text:
+                items.append({"role": "assistant", "content": text})
+
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        items.append(
+                            {
+                                "type": "function_call",
+                                "call_id": str(block.get("id", "")),
+                                "name": str(block.get("name", "")),
+                                "arguments": _json_arguments_string(block.get("input") or {}),
+                            }
+                        )
+
+            tool_calls = message.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for call in tool_calls:
+                    if not isinstance(call, dict):
+                        continue
+                    function = call.get("function") or {}
+                    if not isinstance(function, dict):
+                        continue
+                    items.append(
+                        {
+                            "type": "function_call",
+                            "call_id": str(call.get("id", "")),
+                            "name": str(function.get("name", "")),
+                            "arguments": _json_arguments_string(function.get("arguments") or {}),
+                        }
+                    )
+
+            function_call = message.get("function_call")
+            if isinstance(function_call, dict):
+                items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": str(function_call.get("id") or function_call.get("call_id") or ""),
+                        "name": str(function_call.get("name", "")),
+                        "arguments": _json_arguments_string(function_call.get("arguments") or {}),
+                    }
+                )
+    return items
 
 
 def _user_message_for_transport(transport_name: str, text: str) -> dict[str, Any]:
@@ -983,6 +1124,18 @@ def _build_request_payload(
             "tool_choice": "auto",
             "max_tokens": DEFAULT_MAX_TOKENS,
         }
+    if transport_name == "codex":
+        payload: dict[str, Any] = {
+            "model": normalize_codex_model_name(model_name),
+            "input": _responses_input_from_messages(transcript_messages),
+            "instructions": system_prompt,
+            "stream": True,
+            "store": False,
+        }
+        tools = _codex_responses_tool_specs(tool_specs)
+        if tools:
+            payload["tools"] = tools
+        return payload
     raise ValueError(f"Unsupported transport for request payload build: {transport_name}")
 
 
@@ -1255,7 +1408,7 @@ class BaseAgentTransport:
                 "api_name": api_name,
                 "artifact_path": artifact_path,
                 "summary": {
-                    "message_count": len(request_payload.get("messages", [])),
+                    "message_count": len(request_payload.get("messages", request_payload.get("input", []))),
                     "tool_count": len(request_payload.get("tools", [])),
                     "system_prompt_chars": len(str(request_payload.get("system", self.system_prompt))),
                     "estimated_input_tokens_before": preflight.get("estimated_input_tokens_before"),
@@ -2136,6 +2289,144 @@ class OpenAINativeTransport(BaseAgentTransport):
             self._append_conversation_message(kind="tool_result", message=conversation_message)
 
 
+class CodexNativeTransport(BaseAgentTransport):
+    """Native Codex transport using LingTai/TUI OAuth and ChatGPT Codex Responses."""
+
+    transport_name = "codex"
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.token_manager = CodexTokenManager()
+        self.client = OpenAI(
+            api_key=self.token_manager.get_access_token(),
+            base_url=CODEX_BASE_URL,
+        )
+
+    def append_user_text(self, text: str) -> None:
+        message = {"role": "user", "content": text}
+        append_transcript_entry(
+            self.run_root,
+            self.agent_id,
+            {"kind": "user_message", "message": message},
+        )
+        self._append_conversation_message(kind="user_message", message=message)
+
+    def execute_turn(self, tool_specs: list[dict[str, Any]]) -> ModelTurnResult:
+        request_payload = _build_request_payload(
+            transport_name=self.transport_name,
+            model_name=self.model_name,
+            system_prompt=self.system_prompt,
+            transcript_messages=_conversation_messages(self.run_root, self.agent_id),
+            tool_specs=tool_specs,
+        )
+        turn_index, request_artifact_path = self._record_model_request(
+            api_name="openai.responses.create",
+            request_payload=request_payload,
+        )
+
+        self.client.api_key = self.token_manager.get_access_token()
+        stream = self.client.responses.create(**request_payload)
+
+        raw_events: list[Any] = []
+        text_parts: list[str] = []
+        tool_calls: list[ModelToolCall] = []
+        current_call_id: str | None = None
+        current_tool_name: str | None = None
+        current_arguments = ""
+        stop_reason: str | None = None
+
+        for event in stream:
+            raw_events.append(event)
+            event_type = str(getattr(event, "type", ""))
+            if event_type == "response.output_text.delta":
+                delta = str(getattr(event, "delta", ""))
+                if delta:
+                    text_parts.append(delta)
+            elif event_type == "response.output_item.added":
+                item = getattr(event, "item", None)
+                if getattr(item, "type", None) == "function_call":
+                    current_call_id = str(getattr(item, "call_id", ""))
+                    current_tool_name = str(getattr(item, "name", ""))
+                    current_arguments = ""
+            elif event_type == "response.function_call_arguments.delta":
+                current_arguments += str(getattr(event, "delta", ""))
+            elif event_type == "response.output_item.done":
+                item = getattr(event, "item", None)
+                if getattr(item, "type", None) == "function_call":
+                    call_id = str(getattr(item, "call_id", current_call_id or ""))
+                    name = str(getattr(item, "name", current_tool_name or ""))
+                    raw_arguments = str(getattr(item, "arguments", "") or current_arguments or "{}")
+                    try:
+                        arguments = json.loads(raw_arguments)
+                    except json.JSONDecodeError:
+                        arguments = {}
+                    tool_calls.append(ModelToolCall(call_id=call_id, name=name, arguments=arguments))
+                    current_call_id = None
+                    current_tool_name = None
+                    current_arguments = ""
+            elif event_type == "response.completed":
+                stop_reason = "completed"
+
+        if current_call_id and current_tool_name:
+            try:
+                arguments = json.loads(current_arguments or "{}")
+            except json.JSONDecodeError:
+                arguments = {}
+            tool_calls.append(
+                ModelToolCall(call_id=current_call_id, name=current_tool_name, arguments=arguments)
+            )
+
+        text = "".join(text_parts)
+        text_blocks = [text] if text else []
+        assistant_message: dict[str, Any] = {"role": "assistant", "content": text if text else ""}
+        if tool_calls:
+            assistant_message["tool_calls"] = [
+                {
+                    "id": tc.call_id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": json.dumps(tc.arguments, ensure_ascii=True),
+                    },
+                }
+                for tc in tool_calls
+            ]
+
+        self._record_model_response(
+            turn_index=turn_index,
+            request_artifact_path=request_artifact_path,
+            assistant_message=assistant_message,
+            raw_response={"events": raw_events},
+            stop_reason=stop_reason or ("tool_calls" if tool_calls else None),
+            tool_calls=tool_calls,
+            text_blocks=text_blocks,
+        )
+        return ModelTurnResult(
+            tool_calls=tool_calls,
+            text_blocks=text_blocks,
+            stop_reason=stop_reason or ("tool_calls" if tool_calls else None),
+        )
+
+    def append_tool_results(self, tool_results: list[dict[str, Any]]) -> None:
+        for result in tool_results:
+            transcript_message = {
+                "role": "tool",
+                "tool_call_id": result["call_id"],
+                "content": json.dumps(_tool_result_log_payload(result), ensure_ascii=True),
+            }
+            conversation_message = {
+                "role": "tool",
+                "tool_call_id": result["call_id"],
+                "content": json.dumps(_tool_result_conversation_payload(result), ensure_ascii=True),
+            }
+            append_transcript_entry(
+                self.run_root,
+                self.agent_id,
+                {"kind": "tool_result", "message": transcript_message},
+            )
+            self._append_conversation_message(kind="tool_result", message=conversation_message)
+
+
 def create_transport(
     *,
     transport_name: str,
@@ -2167,6 +2458,13 @@ def create_transport(
         )
     if transport_name == "openai":
         return OpenAINativeTransport(
+            run_root=run_root,
+            agent_id=agent_id,
+            model_name=model_name,
+            system_prompt=system_prompt,
+        )
+    if transport_name == "codex":
+        return CodexNativeTransport(
             run_root=run_root,
             agent_id=agent_id,
             model_name=model_name,

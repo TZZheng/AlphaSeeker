@@ -188,7 +188,7 @@ AGENT_STATUSES = (
     "timed_out",
     "timed_out_with_deliverable",
 )
-AGENT_TRANSPORTS = ("auto", "minimax_anthropic", "minimax_openai", "anthropic", "openai", "text_json")
+AGENT_TRANSPORTS = ("auto", "minimax_anthropic", "minimax_openai", "anthropic", "openai", "codex", "text_json")
 
 
 class AgentCommand(BaseModel):
@@ -254,7 +254,7 @@ class HarnessRequest(BaseModel):
     runtime: str = "harness"
     run_id: str | None = None
     root_preset: Literal["orchestrator", "research", "writer", "synthesizer", "evaluator"] = "orchestrator"
-    agent_transport: Literal["auto", "minimax_anthropic", "minimax_openai", "anthropic", "openai", "text_json"] = "auto"
+    agent_transport: Literal["auto", "minimax_anthropic", "minimax_openai", "anthropic", "openai", "codex", "text_json"] = "auto"
     wall_clock_budget_seconds: int = 1200
     root_wall_clock_seconds: int | None = None
     max_agents_per_run: int = 64

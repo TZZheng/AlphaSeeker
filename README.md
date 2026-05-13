@@ -127,7 +127,7 @@ uv run python main.py
 
 ### Model providers
 
-Model assignments live in `config/models.yaml`. Each provider requires a corresponding API key:
+Model assignments live in `config/models.yaml`. API-key providers require the corresponding key; the Codex subscription transport uses the LingTai/TUI OAuth token file instead of `OPENAI_API_KEY`:
 
 | Provider prefix | Required env var |
 |---|---|
@@ -135,10 +135,11 @@ Model assignments live in `config/models.yaml`. Each provider requires a corresp
 | `kimi-` | `KIMI_API_KEY` |
 | `minimax/` or `MiniMax-*` | `MINIMAX_API_KEY` |
 | `gpt-` or `o*` | `OPENAI_API_KEY` |
+| `codex/` | `~/.lingtai-tui/codex-auth.json` (created by LingTai/TUI login) |
 | `gemini-` | `GOOGLE_API_KEY` |
 | `claude-` | `ANTHROPIC_API_KEY` |
 
-**Recommended: MiniMax.** In our testing MiniMax (M2.7) delivers the best research quality — strong multi-step reasoning, generous context window, and competitive cost. Set `MINIMAX_API_KEY` and the defaults in `config/models.yaml` will use it out of the box.
+**Current harness default: native Codex.** `config/models.yaml` sets the harness agent to `codex/gpt-5.5`, which uses the ChatGPT Codex Responses backend at `https://chatgpt.com/backend-api/codex` with OAuth tokens from `~/.lingtai-tui/codex-auth.json`. This is not the OpenAI API-key path and does not shell out to the Codex CLI. Keep the condense model on MiniMax unless explicitly changing it.
 
 MiniMax endpoint defaults to `https://api.minimaxi.com/v1`. Override with `MINIMAX_BASE_URL` if needed.
 
