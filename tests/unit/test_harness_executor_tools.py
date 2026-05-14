@@ -1102,6 +1102,79 @@ def test_context_files_are_copied_for_read(
     assert copied[0].read_text(encoding="utf-8") == "AlphaSeeker context note\n"
 
 
+def test_explicit_external_files_are_readable_and_writable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    source_file = tmp_path / "inputs" / "state_snapshot.md"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_text("Durable context note\n", encoding="utf-8")
+    external_file = tmp_path / "vault" / "companies" / "XOM" / "research" / "memos" / "run-1" / "proposals.jsonl"
+    nearby_file = external_file.with_name("nearby.jsonl")
+    nearby_file.parent.mkdir(parents=True)
+    nearby_file.write_text("not allowed\n", encoding="utf-8")
+
+    request = HarnessRequest(
+        user_prompt="Use approved external files",
+        run_id="executor-external-files",
+        context_files=[str(source_file)],
+        external_writable_files=[str(external_file)],
+    )
+    run_root, root_agent_id = initialize_run_root(request)
+    registry = build_skill_registry()
+    create_agent_workspace(
+        run_root,
+        agent_id=root_agent_id,
+        parent_id="",
+        preset="research",
+        task_name="Root Task",
+        description="Use approved external files.",
+        task_markdown=render_task_markdown(request.user_prompt),
+        tools_markdown=render_tools_markdown(
+            preset="research",
+            available_tools=default_tool_allowlist("research"),
+            available_skills=visible_skills_for_preset(
+                preset="research",
+                available_skills=get_skills_for_packs(registry, ["core"]),
+            ),
+        ),
+    )
+    session = create_or_load_session(
+        request=request,
+        run_root=str(run_root),
+        agent_id=root_agent_id,
+        preset="research",
+        registry_map=registry,
+    )
+
+    source_read = execute_model_tool_view(session, "read", {"path": str(source_file)})
+    source_grep = execute_model_tool_view(session, "grep", {"pattern": "Durable context", "paths": [str(source_file)]})
+    external_write = execute_model_tool_view(session, "write", {"path": str(external_file), "content": "{}\n"})
+    external_read = execute_model_tool_view(session, "read", {"path": str(external_file)})
+    external_grep = execute_model_tool_view(session, "grep", {"pattern": "{}", "paths": [str(external_file)], "fixed_strings": True})
+    denied_read = execute_model_tool(session, "read", {"path": str(nearby_file)})
+
+    assert source_read.conversation["status"] == "ok"
+    assert source_read.conversation["content"] == "Durable context note\n"
+    assert source_read.conversation["path"] == str(source_file)
+    assert source_grep.conversation["match_count"] == 1
+    assert external_file.read_text(encoding="utf-8") == "{}\n"
+    assert external_write.log["root"] == "external"
+    assert external_write.conversation["path"] == str(external_file)
+    assert external_read.conversation["status"] == "ok"
+    assert external_read.conversation["content"] == "{}\n"
+    assert external_grep.conversation["match_count"] == 1
+    assert denied_read["status"] == "failed"
+    assert "agent-visible file surface" in denied_read["summary"]
+
+    events = read_jsonl(registry_paths(run_root)["events_registry"])
+    assert any(event["event_type"] == "external_updated" and event["details"]["path"] == str(external_file) for event in events)
+
+    with pytest.raises(ValueError, match="external writable file"):
+        execute_model_tool_view(session, "write", {"path": str(nearby_file), "content": "oops\n"})
+
+
 def test_grep_returns_match_locations(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

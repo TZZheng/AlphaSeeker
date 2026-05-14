@@ -90,10 +90,21 @@ def is_artifact_file(run_root: str | Path, agent_id: str, candidate: str | Path)
     return is_artifact_path(run_root, agent_id, path) and path.exists() and path.is_file()
 
 
-def _is_visible_read_target(run_root: str | Path, agent_id: str, candidate: Path) -> bool:
+def _is_visible_read_target(
+    run_root: str | Path,
+    agent_id: str,
+    candidate: Path,
+    *,
+    external_read_files: list[str] | None = None,
+    external_writable_files: list[str] | None = None,
+) -> bool:
     paths = agent_workspace_paths(run_root, agent_id)
     if candidate in {paths["task"].resolve(strict=False), paths["tools"].resolve(strict=False)}:
         return True
+    for raw_path in [*(external_read_files or []), *(external_writable_files or [])]:
+        external = Path(raw_path).expanduser().resolve(strict=False)
+        if candidate == external:
+            return True
     return any(_is_within(root, candidate) for root in visible_read_roots(run_root, agent_id))
 
 
@@ -103,13 +114,21 @@ def resolve_visible_read_file(
     raw_path: str,
     *,
     cwd: str | Path | None = None,
+    external_read_files: list[str] | None = None,
+    external_writable_files: list[str] | None = None,
 ) -> Path:
     candidate = _resolve_candidate(run_root, agent_id, raw_path, cwd=cwd)
     if is_private_path(run_root, agent_id, candidate):
         raise VisibilityError("Path is inside the harness-private area.")
     if not candidate.exists() or not candidate.is_file():
         raise VisibilityError(f"File '{raw_path}' is missing or unreadable.")
-    if _is_visible_read_target(run_root, agent_id, candidate) or is_artifact_file(run_root, agent_id, candidate):
+    if _is_visible_read_target(
+        run_root,
+        agent_id,
+        candidate,
+        external_read_files=external_read_files,
+        external_writable_files=external_writable_files,
+    ) or is_artifact_file(run_root, agent_id, candidate):
         return candidate
     raise VisibilityError("Path is outside the agent-visible file surface.")
 
@@ -120,6 +139,8 @@ def resolve_visible_search_target(
     raw_path: str,
     *,
     cwd: str | Path | None = None,
+    external_read_files: list[str] | None = None,
+    external_writable_files: list[str] | None = None,
 ) -> Path:
     candidate = _resolve_candidate(run_root, agent_id, raw_path, cwd=cwd)
     if is_private_path(run_root, agent_id, candidate):
@@ -130,7 +151,13 @@ def resolve_visible_search_target(
         if candidate.is_file():
             return candidate
         raise VisibilityError("Artifact directories are not searchable; use an exact artifact file path.")
-    if _is_visible_read_target(run_root, agent_id, candidate):
+    if _is_visible_read_target(
+        run_root,
+        agent_id,
+        candidate,
+        external_read_files=external_read_files,
+        external_writable_files=external_writable_files,
+    ):
         return candidate
     raise VisibilityError("Path is outside the agent-visible search surface.")
 
@@ -142,6 +169,7 @@ def resolve_visible_write_file(
     *,
     cwd: str | Path | None = None,
     must_exist: bool = False,
+    external_writable_files: list[str] | None = None,
 ) -> tuple[Path, str, str]:
     candidate = _resolve_candidate(run_root, agent_id, raw_path, cwd=cwd)
     paths = agent_workspace_paths(run_root, agent_id)
@@ -159,4 +187,10 @@ def resolve_visible_write_file(
                 raise VisibilityError(f"File '{raw_path}' does not exist.")
             relative = candidate.relative_to(root).as_posix()
             return candidate, root_name, relative
-    raise VisibilityError("Write paths must be relative paths and stay inside publish/ or scratch/.")
+    for raw_external in external_writable_files or []:
+        external = Path(raw_external).expanduser().resolve(strict=False)
+        if candidate == external:
+            if must_exist and not candidate.exists():
+                raise VisibilityError(f"File '{raw_path}' does not exist.")
+            return candidate, "external", candidate.name
+    raise VisibilityError("Write paths must be relative paths and stay inside publish/ or scratch/, or match an external writable file declared by the harness request.")

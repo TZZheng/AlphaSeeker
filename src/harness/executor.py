@@ -765,6 +765,7 @@ def _resolve_workspace_file_path(
             session.agent_id,
             raw_path,
             must_exist=must_exist,
+            external_writable_files=session.request.external_writable_files,
         )
     except VisibilityError as exc:
         raise ValueError(str(exc)) from exc
@@ -775,7 +776,13 @@ def _resolve_bash_cwd(session: AgentSession, raw_cwd: str | None) -> Path:
     if not raw_cwd:
         return workspace
     try:
-        resolved = resolve_visible_search_target(session.run_root, session.agent_id, raw_cwd)
+        resolved = resolve_visible_search_target(
+            session.run_root,
+            session.agent_id,
+            raw_cwd,
+            external_read_files=session.request.context_files,
+            external_writable_files=session.request.external_writable_files,
+        )
     except VisibilityError as exc:
         raise ValueError(str(exc)) from exc
     if not resolved.is_dir():
@@ -919,7 +926,14 @@ def _handle_bash_ls(session: AgentSession, argv: list[str], cwd: Path) -> dict[s
             rows.extend(path.name + ("/" if path.is_dir() else "") for path in entries)
             continue
         try:
-            target = resolve_visible_search_target(session.run_root, session.agent_id, raw_path, cwd=cwd)
+            target = resolve_visible_search_target(
+                session.run_root,
+                session.agent_id,
+                raw_path,
+                cwd=cwd,
+                external_read_files=session.request.context_files,
+                external_writable_files=session.request.external_writable_files,
+            )
         except VisibilityError as exc:
             raise ValueError(str(exc)) from exc
         if target.is_file():
@@ -927,7 +941,14 @@ def _handle_bash_ls(session: AgentSession, argv: list[str], cwd: Path) -> dict[s
             continue
         for child in sorted(target.iterdir()):
             try:
-                resolve_visible_search_target(session.run_root, session.agent_id, str(child), cwd=cwd)
+                resolve_visible_search_target(
+                    session.run_root,
+                    session.agent_id,
+                    str(child),
+                    cwd=cwd,
+                    external_read_files=session.request.context_files,
+                    external_writable_files=session.request.external_writable_files,
+                )
             except VisibilityError:
                 continue
             rows.append(str(child))
@@ -940,13 +961,21 @@ def _handle_bash_cp(session: AgentSession, argv: list[str], cwd: Path) -> dict[s
     if len(path_args) != 2:
         raise ValueError("cp requires exactly one source file and one destination file.")
     try:
-        source = resolve_visible_read_file(session.run_root, session.agent_id, path_args[0], cwd=cwd)
+        source = resolve_visible_read_file(
+            session.run_root,
+            session.agent_id,
+            path_args[0],
+            cwd=cwd,
+            external_read_files=session.request.context_files,
+            external_writable_files=session.request.external_writable_files,
+        )
         destination, _root_name, _relative = resolve_visible_write_file(
             session.run_root,
             session.agent_id,
             path_args[1],
             cwd=cwd,
             must_exist=False,
+            external_writable_files=session.request.external_writable_files,
         )
     except VisibilityError as exc:
         raise ValueError(str(exc)) from exc
@@ -1014,7 +1043,16 @@ def _handle_bash_rg(session: AgentSession, argv: list[str], cwd: Path, arguments
     try:
         if path_indexes:
             for index in path_indexes:
-                safe_argv[index] = str(resolve_visible_search_target(session.run_root, session.agent_id, argv[index], cwd=cwd))
+                safe_argv[index] = str(
+                    resolve_visible_search_target(
+                        session.run_root,
+                        session.agent_id,
+                        argv[index],
+                        cwd=cwd,
+                        external_read_files=session.request.context_files,
+                        external_writable_files=session.request.external_writable_files,
+                    )
+                )
         else:
             safe_argv.extend(str(path) for path in default_search_targets(session.run_root, session.agent_id))
     except VisibilityError as exc:
@@ -1097,7 +1135,7 @@ def _handle_write_file(session: AgentSession, arguments: dict[str, Any]) -> dict
     if root_name == "publish" and not content.strip():
         raise ValueError("write requires non-empty content for publish paths.")
     write_text_atomic(path, content)
-    event_type = "publish_updated" if root_name == "publish" else "scratch_updated"
+    event_type = "publish_updated" if root_name == "publish" else f"{root_name}_updated"
     append_event(
         session.run_root,
         AgentEvent(

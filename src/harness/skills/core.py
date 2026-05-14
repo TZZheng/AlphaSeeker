@@ -39,7 +39,15 @@ DEFAULT_FILE_SEARCH_MAX_RESULTS = 20
 def _resolve_search_paths(state: HarnessState, raw_paths: list[str]) -> list[str]:
     if state.run_root and state.agent_id:
         return [
-            str(resolve_visible_search_target(state.run_root, state.agent_id, raw_path))
+            str(
+                resolve_visible_search_target(
+                    state.run_root,
+                    state.agent_id,
+                    raw_path,
+                    external_read_files=state.request.context_files,
+                    external_writable_files=state.request.external_writable_files,
+                )
+            )
             for raw_path in raw_paths
         ]
     resolved: list[str] = []
@@ -582,7 +590,13 @@ def read_skill(arguments: dict[str, Any], _state: HarnessState) -> SkillResult:
 
     if _state.run_root and _state.agent_id:
         try:
-            file_path = resolve_visible_read_file(_state.run_root, _state.agent_id, path)
+            file_path = resolve_visible_read_file(
+                _state.run_root,
+                _state.agent_id,
+                path,
+                external_read_files=_state.request.context_files,
+                external_writable_files=_state.request.external_writable_files,
+            )
         except VisibilityError as exc:
             return make_result(
                 "read",

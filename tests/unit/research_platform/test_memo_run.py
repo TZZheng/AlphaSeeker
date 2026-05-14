@@ -206,18 +206,18 @@ def test_run_research_memo_with_research_state_applies_proposals(tmp_path):
     assert manifest["research_state"]["rolled_back"] is False
     assert Path(manifest["research_state"]["proposal_protocol_path"]).name == "proposal_protocol.md"
     protocol_text = Path(manifest["research_state"]["proposal_protocol_path"]).read_text(encoding="utf-8")
-    assert "publish/proposals.jsonl" in protocol_text
-    assert str(tmp_path / "vault" / "companies" / "XOM" / "research" / "memos" / "state-run" / "proposals.jsonl") in protocol_text
+    expected_proposals_path = tmp_path / "vault" / "companies" / "XOM" / "research" / "memos" / "state-run" / "proposals.jsonl"
+    assert str(expected_proposals_path) in protocol_text
+    assert request.external_writable_files == [str(expected_proposals_path)]
     assert manifest["research_state"]["apply_counts"]["applied"] == 1
     assert manifest["research_state"]["integrity_errors"] == []
 
 
-def test_run_research_memo_copies_published_proposals_before_state_apply(tmp_path):
+def test_run_research_memo_accepts_direct_external_proposal_path(tmp_path):
     manual = tmp_path / "manual.md"
     manual.write_text("# Manual packet\n\nGuyana production growth notes.", encoding="utf-8")
     final_source = tmp_path / "harness_final.md"
     final_source.write_text("# Final memo\n\nUse S1.", encoding="utf-8")
-    root_agent_path = tmp_path / "run" / "agents" / "root"
 
     def fake_sec(*args, **kwargs):
         return []
@@ -226,18 +226,20 @@ def test_run_research_memo_copies_published_proposals_before_state_apply(tmp_pat
         raise RuntimeError("offline")
 
     def fake_harness(request: HarnessRequest) -> HarnessResponse:
-        published_proposals = root_agent_path / "publish" / "proposals.jsonl"
-        published_proposals.parent.mkdir(parents=True, exist_ok=True)
-        published_proposals.write_text(
+        assert len(request.external_writable_files) == 1
+        proposal_path = Path(request.external_writable_files[0])
+        assert proposal_path.name == "proposals.jsonl"
+        assert proposal_path.parent.name == "direct-proposals"
+        proposal_path.write_text(
             json.dumps(
                 {
-                    "proposal_id": "p-published",
+                    "proposal_id": "p-direct",
                     "type": "propose_section_update",
                     "section_key": "guyana_growth_engine",
                     "action": "create",
-                    "body_markdown": "Published proposal was copied into durable run artifacts [S1].",
+                    "body_markdown": "Direct external proposal path updated durable state [S1].",
                     "evidence_keys": ["S1"],
-                    "rationale": "Real harness agents can write publish/proposals.jsonl.",
+                    "rationale": "Harness agents can write the approved durable proposal file directly.",
                 },
                 ensure_ascii=False,
             )
@@ -248,7 +250,7 @@ def test_run_research_memo_copies_published_proposals_before_state_apply(tmp_pat
             status="completed",
             stop_reason="done",
             run_root=str(tmp_path / "run"),
-            root_agent_path=str(root_agent_path),
+            root_agent_path=str(tmp_path / "run" / "agents" / "root"),
             final_report_path=str(final_source),
         )
 
@@ -258,15 +260,15 @@ def test_run_research_memo_copies_published_proposals_before_state_apply(tmp_pat
         company_name="Exxon Mobil",
         manual_files=[str(manual)],
         vault_root=tmp_path / "vault",
-        run_id="published-proposals",
+        run_id="direct-proposals",
         adapters=SourceAdapters(fake_sec, failing_provider, failing_provider, failing_provider),
         run_harness_fn=fake_harness,
         enable_research_state=True,
     )
 
     assert result.status == "succeeded"
-    assert Path(result.proposals_path).read_text(encoding="utf-8") == (root_agent_path / "publish" / "proposals.jsonl").read_text(encoding="utf-8")
-    assert "Published proposal was copied" in Path(result.research_state_path).read_text(encoding="utf-8")
+    assert Path(result.proposals_path).read_text(encoding="utf-8").strip()
+    assert "Direct external proposal path updated" in Path(result.research_state_path).read_text(encoding="utf-8")
 
 
 def test_run_research_memo_rolls_back_research_state_on_malformed_proposals(tmp_path):
