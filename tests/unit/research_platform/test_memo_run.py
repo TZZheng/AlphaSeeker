@@ -269,3 +269,96 @@ def test_run_research_memo_rolls_back_research_state_on_integrity_failure(tmp_pa
     manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
     assert manifest["research_state"]["rolled_back"] is True
     assert manifest["research_state"]["integrity_errors"] == ["forced integrity failure"]
+
+
+def test_run_research_memo_reuses_state_and_appends_evidence_across_runs(tmp_path):
+    manual_one = tmp_path / "manual-one.md"
+    manual_one.write_text("# Manual packet one\n\nGuyana growth engine.", encoding="utf-8")
+    manual_two = tmp_path / "manual-two.md"
+    manual_two.write_text("# Manual packet two\n\nPermian decline risk.", encoding="utf-8")
+    final_source = tmp_path / "harness_final.md"
+    final_source.write_text("# Final memo\n\nUse durable state.", encoding="utf-8")
+    def fake_sec(*args, **kwargs):
+        return []
+
+    def failing_provider(*args, **kwargs):
+        raise RuntimeError("offline")
+
+    def fake_harness(request: HarnessRequest) -> HarnessResponse:
+        proposal_path = tmp_path / "vault" / "companies" / "XOM" / "research" / "memos" / request.run_id / "proposals.jsonl"
+        if request.run_id == "carryover-one":
+            proposal = {
+                "proposal_id": "p-carryover-1",
+                "type": "propose_section_update",
+                "section_key": "guyana_growth_engine",
+                "action": "create",
+                "body_markdown": "Guyana is tracked as the first durable growth topic [S1].",
+                "evidence_keys": ["S1"],
+                "rationale": "Run one introduced the Guyana growth topic.",
+            }
+        else:
+            assert "Guyana is tracked as the first durable growth topic [S1]." in Path(request.context_files[0]).read_text(encoding="utf-8")
+            proposal = {
+                "proposal_id": "p-carryover-2",
+                "type": "propose_section_update",
+                "section_key": "permian_decline_risk",
+                "action": "create",
+                "body_markdown": "Permian decline risk is tracked as a second durable topic [S2].",
+                "evidence_keys": ["S2"],
+                "rationale": "Run two introduced a distinct durable Permian risk topic.",
+            }
+        proposal_path.write_text(json.dumps(proposal, ensure_ascii=False) + "\n", encoding="utf-8")
+        return HarnessResponse(
+            status="completed",
+            stop_reason="done",
+            run_root=str(tmp_path / "run" / request.run_id),
+            root_agent_path=str(tmp_path / "run" / request.run_id / "agents" / "root"),
+            final_report_path=str(final_source),
+        )
+
+    adapters = SourceAdapters(fake_sec, failing_provider, failing_provider, failing_provider)
+    result_one = run_research_memo(
+        user_prompt="Build an investment memo for XOM.",
+        ticker="xom",
+        company_name="Exxon Mobil",
+        manual_files=[str(manual_one)],
+        vault_root=tmp_path / "vault",
+        run_id="carryover-one",
+        adapters=adapters,
+        run_harness_fn=fake_harness,
+        enable_research_state=True,
+    )
+    result_two = run_research_memo(
+        user_prompt="Build an updated investment memo for XOM.",
+        ticker="xom",
+        company_name="Exxon Mobil",
+        manual_files=[str(manual_two)],
+        vault_root=tmp_path / "vault",
+        run_id="carryover-two",
+        adapters=adapters,
+        run_harness_fn=fake_harness,
+        enable_research_state=True,
+    )
+
+    assert result_one.status == "succeeded"
+    assert result_two.status == "succeeded"
+    paths = state_paths(tmp_path / "vault", "XOM")
+    state_markdown = paths.research_state.read_text(encoding="utf-8")
+    assert "Guyana is tracked as the first durable growth topic [S1]." in state_markdown
+    assert "Permian decline risk is tracked as a second durable topic [S2]." in state_markdown
+
+    evidence_index = json.loads(paths.evidence_index.read_text(encoding="utf-8"))
+    assert sorted(evidence_index["entries"]) == ["S1", "S2"]
+    assert evidence_index["entries"]["S1"]["display_title"] == "manual-one"
+    assert evidence_index["entries"]["S2"]["display_title"] == "manual-two"
+
+    diff_records = [json.loads(line) for line in paths.diff_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    accepted_records = [record for record in diff_records if record["decision"]["decision"] == "accepted"]
+    assert [record["run_id"] for record in accepted_records] == ["carryover-one", "carryover-two"]
+
+    snapshot_one = Path(result_one.state_snapshot_path) / "research_state.md"
+    snapshot_two = Path(result_two.state_snapshot_path) / "research_state.md"
+    assert "Guyana is tracked" not in snapshot_one.read_text(encoding="utf-8")
+    snapshot_two_text = snapshot_two.read_text(encoding="utf-8")
+    assert "Guyana is tracked as the first durable growth topic [S1]." in snapshot_two_text
+    assert "Permian decline risk" not in snapshot_two_text
