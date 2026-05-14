@@ -28,8 +28,12 @@ from src.tools.equity.company_profile import fetch_company_profile
 from src.tools.equity.financials import fetch_financial_metrics
 from src.tools.equity.market_data import fetch_historical_data
 from src.tools.equity.sec_filings import search_and_read_filings
-from src.vault.contracts import DocumentRef, QuestionRecord
+from src.vault.contracts import DocumentRef, EvidenceRef, QuestionRecord
 from src.vault.ingest import ingest_file, ingest_text
+from src.research_platform.state.apply import apply_proposals
+from src.research_platform.state.contracts import EvidenceIndex
+from src.research_platform.state.lint import validate_state_integrity
+from src.research_platform.state.storage import initialize_state_folder, read_json_model, snapshot_state, write_json_model
 from src.vault.paths import default_vault_paths
 from src.vault.store import VaultStore
 
@@ -63,6 +67,10 @@ class ResearchPlatformRunResult(BaseModel):
     question_list_path: str | None = None
     context_package_path: str | None = None
     final_path: str | None = None
+    research_state_path: str | None = None
+    state_snapshot_path: str | None = None
+    proposals_path: str | None = None
+    accepted_changes_path: str | None = None
     harness_response: dict[str, Any] | None = None
     warnings: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
@@ -278,6 +286,9 @@ def _research_paths(vault_root: Path, ticker: str, run_id: str) -> dict[str, Pat
         "source_snapshot": memo_dir / "source_index.md",
         "question_snapshot": memo_dir / "question_list.md",
         "final": memo_dir / "final.md",
+        "state_snapshot": memo_dir / "state_snapshot",
+        "proposals": memo_dir / "proposals.jsonl",
+        "accepted_changes": memo_dir / "accepted_changes.jsonl",
     }
 
 
@@ -351,6 +362,7 @@ def assemble_memo_prompt(
     caveats: list[Caveat],
     warnings: list[str],
     template_path: str | Path = PROMPT_TEMPLATE_PATH,
+    research_state_block: str | None = None,
 ) -> str:
     template = Path(template_path).read_text(encoding="utf-8")
     company_suffix = f" ({company_name})" if company_name else ""
@@ -372,6 +384,8 @@ def assemble_memo_prompt(
         "citation_usage_instructions": "Use citation keys S1, S2, ... from the source index and preserve their mapping to vault paths.",
     }
     rendered = strict_render_template(template, values)
+    if research_state_block:
+        rendered = rendered.rstrip() + "\n\n" + research_state_block.strip() + "\n"
     if len(rendered) > 32_000:
         raise ValueError("Assembled memo prompt exceeds v1 32KB inline prompt cap")
     return rendered
@@ -382,14 +396,24 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
 
 
-def _status_payload(run_id: str, status: OutputStatus, *, warnings: list[str], errors: list[str]) -> dict[str, Any]:
-    return {
+def _status_payload(
+    run_id: str,
+    status: OutputStatus,
+    *,
+    warnings: list[str],
+    errors: list[str],
+    research_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
         "run_id": run_id,
         "status": status,
         "finished_at": _utc_now_iso(),
         "warnings": warnings,
         "errors": errors,
     }
+    if research_state is not None:
+        payload["research_state"] = research_state
+    return payload
 
 
 def _manifest_payload(
@@ -406,8 +430,9 @@ def _manifest_payload(
     final_path: Path | None,
     warnings: list[str],
     errors: list[str],
+    research_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "run_id": run_id,
         "ticker": ticker,
         "user_prompt": user_prompt,
@@ -422,6 +447,9 @@ def _manifest_payload(
         "warnings": warnings,
         "errors": errors,
     }
+    if research_state is not None:
+        payload["research_state"] = research_state
+    return payload
 
 
 def _ingest_vendor_file(
@@ -470,6 +498,82 @@ def _copy_final(response: HarnessResponse, destination: Path) -> str | None:
     return str(destination)
 
 
+def _evidence_index_from_citations(
+    ticker: str,
+    citations: list[Citation],
+    *,
+    existing: EvidenceIndex | None = None,
+) -> EvidenceIndex:
+    entries: dict[str, EvidenceRef] = dict(existing.entries) if existing else {}
+    by_evidence_id = {evidence.evidence_id: key for key, evidence in entries.items()}
+
+    def next_key() -> str:
+        max_index = 0
+        for key in entries:
+            if key.startswith("S") and key[1:].isdigit():
+                max_index = max(max_index, int(key[1:]))
+        return f"S{max_index + 1}"
+
+    for citation in citations:
+        evidence_id = citation.evidence_id or f"evidence-{citation.citation_key.lower()}-{citation.document_id}"
+        if evidence_id in by_evidence_id:
+            continue
+        evidence = EvidenceRef(
+            evidence_id=evidence_id,
+            document_id=citation.document_id,
+            vault_relative_path=citation.vault_relative_path,
+            display_title=citation.display_title,
+            heading_path=list(citation.heading_path),
+            quoted_snippet=citation.snippet,
+            source_grade=citation.source_grade,  # type: ignore[arg-type]
+            metadata=dict(citation.metadata),
+        )
+        key = citation.citation_key if citation.citation_key not in entries else next_key()
+        entries[key] = evidence
+        by_evidence_id[evidence_id] = key
+    return EvidenceIndex(ticker=ticker, entries=entries)
+
+
+def _research_state_prompt_block(*, memo_dir: Path, proposals_path: Path) -> str:
+    return f"""
+## Durable CompanyResearchState update protocol (v3)
+
+Read the attached `research_state.md` and state sidecars before raw source attachments.
+The markdown state is durable company research memory; `final.md` is this run's memo output.
+
+When you notice a durable state update, write one JSON object per line to:
+
+`{proposals_path}`
+
+Use these proposal envelopes, with markdown content in `body_markdown` when updating a section:
+
+```jsonl
+{{"proposal_id":"p1","type":"propose_section_update","section_key":"guyana_growth_engine","action":"append","body_markdown":"Durable insight with [S1] cite.","evidence_keys":["S1"],"rationale":"Why this belongs in durable state."}}
+{{"proposal_id":"p2","type":"propose_close_question","question_id":"q-...","evidence_keys":["S2"],"proposed_answer":"Cited answer.","rationale":"Why this closes the question."}}
+{{"proposal_id":"p3","type":"propose_valuation_snapshot","as_of":"YYYY-MM-DD","fields":{{"share_price":100.0}},"source_keys":["S3"],"assumptions_markdown":"Point-in-time valuation assumptions with [S3]."}}
+```
+
+Rules: use existing [S] citation keys, do not edit durable state files directly, do not propose uncited quantitative claims, and write an empty file if there are no state updates. The proposal file lives under this run directory: `{memo_dir}`.
+""".strip()
+
+
+def _research_state_manifest(
+    *,
+    enabled: bool,
+    state_paths: dict[str, str] | None = None,
+    apply_counts: dict[str, int] | None = None,
+    integrity_errors: list[str] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"enabled": enabled}
+    if state_paths:
+        payload.update(state_paths)
+    if apply_counts:
+        payload["apply_counts"] = apply_counts
+    if integrity_errors is not None:
+        payload["integrity_errors"] = integrity_errors
+    return payload
+
+
 def run_research_memo(
     *,
     user_prompt: str,
@@ -481,8 +585,13 @@ def run_research_memo(
     wall_clock_budget_seconds: int = 1200,
     adapters: SourceAdapters | None = None,
     run_harness_fn: Callable[[HarnessRequest], HarnessResponse] | None = None,
+    enable_research_state: bool = False,
 ) -> ResearchPlatformRunResult:
-    """Run the v1 research-platform memo pipeline."""
+    """Run the research-platform memo pipeline.
+
+    v1 behavior is the default.  When ``enable_research_state`` is true, v3
+    markdown-first state files are attached and post-run proposals are applied.
+    """
 
     ticker_norm = ticker.strip().upper()
     if not ticker_norm:
@@ -682,6 +791,39 @@ def run_research_memo(
         )
         for document in documents
     ]
+
+    research_state_context_files: list[str] = []
+    research_state_meta: dict[str, Any] | None = None
+    research_state_paths = None
+    if enable_research_state:
+        research_state_paths = initialize_state_folder(root, ticker_norm)
+        existing_evidence_index = read_json_model(
+            research_state_paths.evidence_index,
+            EvidenceIndex,
+            EvidenceIndex(ticker=ticker_norm),
+        )
+        write_json_model(
+            research_state_paths.evidence_index,
+            _evidence_index_from_citations(ticker_norm, citations, existing=existing_evidence_index),
+        )
+        snapshot_state(research_state_paths, paths["state_snapshot"])
+        research_state_context_files = [
+            str(research_state_paths.research_state),
+            str(research_state_paths.state_index),
+            str(research_state_paths.evidence_index),
+            str(research_state_paths.open_questions),
+            str(research_state_paths.conflicts),
+            str(research_state_paths.valuation_snapshot),
+        ]
+        research_state_meta = _research_state_manifest(
+            enabled=True,
+            state_paths={
+                "research_state_path": str(research_state_paths.research_state),
+                "state_snapshot_path": str(paths["state_snapshot"]),
+                "proposals_path": str(paths["proposals"]),
+                "accepted_changes_path": str(paths["accepted_changes"]),
+            },
+        )
     package = MemoContextPackage(
         package_id=f"pkg-{run_id}",
         task_id=task.task_id,
@@ -710,6 +852,7 @@ def run_research_memo(
             "retrieval_batch": retrieval_batch.model_dump(mode="json"),
             "missing_sources": missing_sources,
             "freshness_notes": ["SEC: latest 10-K plus latest newer 10-Q when available", "Vendor snapshots are point-in-time API pulls"],
+            "research_state": research_state_meta,
         },
     )
 
@@ -725,7 +868,7 @@ def run_research_memo(
     if not has_required:
         errors.append("No required source was available: provide a manual file or retrieve at least one SEC filing.")
         status: OutputStatus = "failed"
-        _write_json(paths["status"], _status_payload(run_id, status, warnings=warnings, errors=errors))
+        _write_json(paths["status"], _status_payload(run_id, status, warnings=warnings, errors=errors, research_state=research_state_meta))
         _write_json(
             paths["manifest"],
             _manifest_payload(
@@ -741,6 +884,7 @@ def run_research_memo(
                 final_path=None,
                 warnings=warnings,
                 errors=errors,
+                research_state=research_state_meta,
             ),
         )
         return ResearchPlatformRunResult(
@@ -753,9 +897,17 @@ def run_research_memo(
             source_index_path=str(paths["source_index"]),
             question_list_path=str(paths["question_list"]),
             context_package_path=str(paths["context_package"]),
+            research_state_path=str(research_state_paths.research_state) if research_state_paths else None,
+            state_snapshot_path=str(paths["state_snapshot"]) if enable_research_state else None,
+            proposals_path=str(paths["proposals"]) if enable_research_state else None,
+            accepted_changes_path=str(paths["accepted_changes"]) if enable_research_state else None,
             warnings=warnings,
             errors=errors,
         )
+
+    research_state_block = None
+    if enable_research_state:
+        research_state_block = _research_state_prompt_block(memo_dir=paths["memo_dir"], proposals_path=paths["proposals"])
 
     prompt = assemble_memo_prompt(
         user_prompt=user_prompt,
@@ -769,6 +921,7 @@ def run_research_memo(
         missing_sources=missing_sources,
         caveats=caveats,
         warnings=warnings,
+        research_state_block=research_state_block,
     )
     harness_request = HarnessRequest(
         user_prompt=prompt,
@@ -776,6 +929,7 @@ def run_research_memo(
         wall_clock_budget_seconds=wall_clock_budget_seconds,
         available_skill_packs=["core", "equity"],
         context_files=[
+            *research_state_context_files,
             str(paths["context_package"]),
             str(paths["source_index"]),
             str(paths["question_list"]),
@@ -792,7 +946,38 @@ def run_research_memo(
     else:
         status = "failed"
         errors.append(harness_response.error or f"Harness ended with status {harness_response.status} without final.md")
-    _write_json(paths["status"], _status_payload(run_id, status, warnings=warnings, errors=errors))
+
+    if enable_research_state and research_state_paths is not None:
+        if not paths["proposals"].exists():
+            paths["proposals"].write_text("", encoding="utf-8")
+        apply_result = apply_proposals(
+            vault_root=root,
+            ticker=ticker_norm,
+            run_id=run_id,
+            proposals_path=paths["proposals"],
+            accepted_changes_path=paths["accepted_changes"],
+        )
+        integrity_errors = validate_state_integrity(root, ticker_norm)
+        if integrity_errors:
+            errors.extend(f"Research state integrity: {item}" for item in integrity_errors)
+            status = "failed" if status == "succeeded" else status
+        research_state_meta = _research_state_manifest(
+            enabled=True,
+            state_paths={
+                "research_state_path": str(research_state_paths.research_state),
+                "state_snapshot_path": str(paths["state_snapshot"]),
+                "proposals_path": str(paths["proposals"]),
+                "accepted_changes_path": str(paths["accepted_changes"]),
+            },
+            apply_counts={
+                "applied": apply_result.applied_count,
+                "rejected": apply_result.rejected_count,
+                "revised": apply_result.revised_count,
+            },
+            integrity_errors=integrity_errors,
+        )
+
+    _write_json(paths["status"], _status_payload(run_id, status, warnings=warnings, errors=errors, research_state=research_state_meta))
     _write_json(
         paths["manifest"],
         _manifest_payload(
@@ -808,6 +993,7 @@ def run_research_memo(
             final_path=Path(final_path) if final_path else None,
             warnings=warnings,
             errors=errors,
+            research_state=research_state_meta,
         ),
     )
     return ResearchPlatformRunResult(
@@ -821,6 +1007,10 @@ def run_research_memo(
         question_list_path=str(paths["question_list"]),
         context_package_path=str(paths["context_package"]),
         final_path=final_path,
+        research_state_path=str(research_state_paths.research_state) if research_state_paths else None,
+        state_snapshot_path=str(paths["state_snapshot"]) if enable_research_state else None,
+        proposals_path=str(paths["proposals"]) if enable_research_state else None,
+        accepted_changes_path=str(paths["accepted_changes"]) if enable_research_state else None,
         harness_response=harness_response.model_dump(mode="json"),
         warnings=warnings,
         errors=errors,
@@ -836,6 +1026,7 @@ def main() -> None:
     parser.add_argument("--vault-root", default=None)
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--wall-clock-budget-seconds", type=int, default=1200)
+    parser.add_argument("--enable-research-state", action="store_true", help="Enable v3 markdown-first research state artifacts.")
     args = parser.parse_args()
     result = run_research_memo(
         user_prompt=args.prompt,
@@ -845,6 +1036,7 @@ def main() -> None:
         vault_root=args.vault_root,
         run_id=args.run_id,
         wall_clock_budget_seconds=args.wall_clock_budget_seconds,
+        enable_research_state=args.enable_research_state,
     )
     print(json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2, sort_keys=True))
 

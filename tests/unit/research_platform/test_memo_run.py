@@ -127,3 +127,78 @@ def test_run_research_memo_aborts_before_harness_without_required_source(tmp_pat
     assert any("No required source" in error for error in result.errors)
     assert Path(result.manifest_path).exists()
     assert Path(result.status_path).exists()
+
+
+def test_run_research_memo_with_research_state_applies_proposals(tmp_path):
+    manual = tmp_path / "manual.md"
+    manual.write_text("# Manual packet\n\nGuyana production growth notes.", encoding="utf-8")
+    final_source = tmp_path / "harness_final.md"
+    final_source.write_text("# Final memo\n\nUse S1.", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def fake_sec(*args, **kwargs):
+        return []
+
+    def failing_provider(*args, **kwargs):
+        raise RuntimeError("offline")
+
+    def fake_harness(request: HarnessRequest) -> HarnessResponse:
+        captured["request"] = request
+        proposal_path = tmp_path / "vault" / "companies" / "XOM" / "research" / "memos" / "state-run" / "proposals.jsonl"
+        proposal_path.write_text(
+            json.dumps(
+                {
+                    "proposal_id": "p-state-1",
+                    "type": "propose_section_update",
+                    "section_key": "guyana_growth_engine",
+                    "action": "create",
+                    "body_markdown": "Guyana is now tracked as a durable growth section [S1].",
+                    "evidence_keys": ["S1"],
+                    "rationale": "Manual packet introduced a durable Guyana growth topic.",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return HarnessResponse(
+            status="completed",
+            stop_reason="done",
+            run_root=str(tmp_path / "run"),
+            root_agent_path=str(tmp_path / "run" / "agents" / "root"),
+            final_report_path=str(final_source),
+        )
+
+    result = run_research_memo(
+        user_prompt="Build an investment memo for XOM.",
+        ticker="xom",
+        company_name="Exxon Mobil",
+        manual_files=[str(manual)],
+        vault_root=tmp_path / "vault",
+        run_id="state-run",
+        adapters=SourceAdapters(fake_sec, failing_provider, failing_provider, failing_provider),
+        run_harness_fn=fake_harness,
+        enable_research_state=True,
+    )
+
+    request = captured["request"]
+    assert isinstance(request, HarnessRequest)
+    assert Path(request.context_files[0]).name == "research_state.md"
+    assert Path(request.context_files[1]).name == "state_index.json"
+    assert Path(request.context_files[2]).name == "evidence_index.json"
+    assert "proposals.jsonl" in request.user_prompt
+
+    assert result.status == "succeeded"
+    assert result.research_state_path is not None
+    assert result.state_snapshot_path is not None
+    assert result.proposals_path is not None
+    assert result.accepted_changes_path is not None
+    state_markdown = Path(result.research_state_path).read_text(encoding="utf-8")
+    assert "<!-- key: guyana_growth_engine -->" in state_markdown
+    assert "Guyana is now tracked as a durable growth section [S1]." in state_markdown
+    assert Path(result.accepted_changes_path).exists()
+
+    manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
+    assert manifest["research_state"]["enabled"] is True
+    assert manifest["research_state"]["apply_counts"]["applied"] == 1
+    assert manifest["research_state"]["integrity_errors"] == []
