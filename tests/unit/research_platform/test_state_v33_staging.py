@@ -84,6 +84,26 @@ def test_validate_stage_rejects_malformed_sidecar_without_live_mutation(tmp_path
     assert live.research_state.read_text(encoding="utf-8") == original_live
 
 
+
+def test_validate_stage_ignores_uncited_numbers_in_rerendered_derived_questions(tmp_path: Path) -> None:
+    _, _, stage_paths = _prepare(tmp_path)
+    open_questions = OpenQuestionsFile(
+        ticker="XOM",
+        questions=[
+            OpenQuestion(
+                question_id="q-v33-plumbing-cycle-deck",
+                text="What commodity price deck and downstream margin assumptions are required for through-cycle return underwriting?",
+            )
+        ],
+    )
+    write_json_model(stage_paths.stage.open_questions, open_questions)
+
+    report = validate_stage(stage_paths, ticker="XOM", run_id="run-v33")
+
+    assert report.ok, report.errors
+    assert "q-v33-plumbing-cycle-deck" in stage_paths.stage.research_state.read_text(encoding="utf-8")
+
+
 def test_validate_stage_rejects_unresolved_cite_and_uncited_number(tmp_path: Path) -> None:
     _, _, stage_paths = _prepare(tmp_path)
     staged_markdown = stage_paths.stage.research_state.read_text(encoding="utf-8")

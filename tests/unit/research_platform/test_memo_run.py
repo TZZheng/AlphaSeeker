@@ -399,6 +399,8 @@ def test_run_research_memo_v33_commits_staged_direct_edits(tmp_path):
         assert set(writable) == {"research_state.md", "open_questions.json", "conflicts.json", "valuation_snapshot.json"}
         assert all("state_stage" in str(path) for path in writable.values())
         assert "direct-edit protocol (v3.3)" in request.user_prompt
+        assert "question_id" in request.user_prompt
+        assert "Do not invent aliases like `id`, `question`, or `evidence`" in request.user_prompt
         markdown = writable["research_state.md"].read_text(encoding="utf-8")
         markdown += "\n## Guyana growth engine\n<!-- key: guyana_growth_engine -->\n\nGuyana is now tracked directly in staged durable state [S1].\n"
         writable["research_state.md"].write_text(markdown, encoding="utf-8")

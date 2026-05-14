@@ -620,6 +620,65 @@ Only keep information that should carry into future company research runs: durab
 - Every quantitative-looking sentence in markdown must include a same-sentence `[S]` cite.
 - Keep edits compact. A deterministic gate will reject malformed JSON, unresolved citations, missing section anchors, read-only file edits, or excessive destructive diffs.
 
+## Sidecar JSON schemas
+
+When editing sidecars, preserve the top-level `schema_version` and `ticker` fields and use these exact field names. Do not invent aliases like `id`, `question`, or `evidence`.
+
+`open_questions.json`:
+
+```json
+{{
+  "schema_version": 1,
+  "ticker": "XOM",
+  "questions": [
+    {{
+      "question_id": "q-example",
+      "text": "Question to carry forward?",
+      "status": "open",
+      "priority": "normal",
+      "related_section_key": "current_research_summary",
+      "evidence_keys": [],
+      "proposed_answer": null,
+      "rationale": null
+    }}
+  ]
+}}
+```
+
+`conflicts.json`:
+
+```json
+{{
+  "schema_version": 1,
+  "ticker": "XOM",
+  "conflicts": [
+    {{
+      "conflict_id": "conf-example",
+      "summary": "Evidence conflict summary.",
+      "left_evidence_key": "S1",
+      "right_evidence_key": "S2",
+      "severity": "medium",
+      "status": "open",
+      "rationale": "Why this is a real conflict."
+    }}
+  ]
+}}
+```
+
+`valuation_snapshot.json`:
+
+```json
+{{
+  "schema_version": 1,
+  "ticker": "XOM",
+  "as_of": "YYYY-MM-DD",
+  "fields": {{"share_price": 100.0, "ev_ebitda": 7.5}},
+  "source_keys": ["S3"],
+  "assumptions_markdown": "Point-in-time assumptions with [S3].",
+  "warnings": []
+}}
+```
+
 The staged state folder lives under this run directory: `{memo_dir}`.
 """.strip() + "\n"
 

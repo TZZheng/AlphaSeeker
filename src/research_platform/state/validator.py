@@ -181,7 +181,11 @@ def validate_stage(
     for key in unresolved:
         errors.append(f"unresolved cite key: {key}")
 
-    uncited_numbers = number_without_cite_warnings(markdown)
+    sections = parse_markdown_sections(markdown)
+    quantitative_check_markdown = "\n\n".join(
+        section.body for section in sections if section.section_key not in DERIVED_SECTIONS
+    )
+    uncited_numbers = number_without_cite_warnings(quantitative_check_markdown)
     if uncited_numbers:
         messages = [f"quantitative-looking sentence lacks same-sentence cite: {item}" for item in uncited_numbers]
         if hard_fail_uncited_numbers:
