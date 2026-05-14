@@ -545,9 +545,9 @@ Read the attached `research_state.md` and state sidecars before raw source attac
 
 Write the final memo to `publish/final.md` as usual. Separately, write durable state proposals as JSON Lines to:
 
-`{proposals_path}`
+`publish/proposals.jsonl`
 
-The proposal file must be valid JSONL: one JSON object per line, no markdown fences, no trailing comments. If there are no durable state updates, write an empty file.
+The proposal file must be valid JSONL: one JSON object per line, no markdown fences, no trailing comments. If there are no durable state updates, write an empty file at `publish/proposals.jsonl`.
 
 ## When to propose durable state updates
 
@@ -576,7 +576,7 @@ Use only these JSON object shapes:
 - Prefer appending to an existing section when the state already has a matching `section_key`; create a new section only for genuinely new topics.
 - Keep proposals concise. Soft cap: 20 proposals. Hard cap: 50 proposals.
 
-The proposal file lives under this run directory: `{memo_dir}`.
+StateOwner will copy `publish/proposals.jsonl` into this durable run artifact after harness completion: `{proposals_path}`. The memo run directory is `{memo_dir}`.
 """.strip() + "\n"
 
 
@@ -971,6 +971,10 @@ def run_research_memo(
         ],
     )
     harness_response = (run_harness_fn or run_harness)(harness_request)
+    if enable_research_state and harness_response.root_agent_path:
+        published_proposals = Path(harness_response.root_agent_path) / "publish" / "proposals.jsonl"
+        if published_proposals.exists():
+            shutil.copy2(published_proposals, paths["proposals"])
     final_path = _copy_final(harness_response, paths["final"])
     if harness_response.status == "completed" and final_path:
         status = "succeeded"
