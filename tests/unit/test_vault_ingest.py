@@ -25,6 +25,25 @@ def test_ingest_file_copies_extracts_and_links_document(tmp_path):
     assert context["documents"][0]["source_grade"] == "A"
 
 
+def test_ingest_file_stores_source_grade_rationale(tmp_path):
+    source = tmp_path / "manual_packet.md"
+    source.write_text("# Manual packet", encoding="utf-8")
+    root = tmp_path / "research_vault"
+
+    result = ingest_file(
+        source,
+        ticker="xom",
+        source_type="manual_file",
+        source_grade="B",
+        source_grade_rationale="manual file, provenance not machine-verified",
+        root=root,
+    )
+
+    doc = VaultStore(root).company_context("XOM")["documents"][0]
+    assert doc["doc_id"] == result["doc_id"]
+    assert "manual file, provenance not machine-verified" in doc["metadata_json"]
+
+
 def test_ingest_text_registers_a_grade_sec_document(tmp_path):
     root = tmp_path / "research_vault"
 
@@ -46,3 +65,21 @@ def test_ingest_text_registers_a_grade_sec_document(tmp_path):
     assert doc["source_grade"] == "A"
     assert doc["url"] == "https://www.sec.gov/xom"
     assert Path(result["extracted_path"]).read_text(encoding="utf-8").startswith("Item 1")
+
+
+def test_ingest_text_stores_source_grade_rationale(tmp_path):
+    root = tmp_path / "research_vault"
+
+    ingest_text(
+        "Vendor snapshot",
+        ticker="xom",
+        source_type="financial_snapshot",
+        title="XOM financial snapshot",
+        source_grade="B",
+        source_grade_rationale="vendor/API snapshot, useful but not primary-source verified",
+        root=root,
+    )
+
+    doc = VaultStore(root).company_context("XOM")["documents"][0]
+    assert doc["source_grade"] == "B"
+    assert "vendor/API snapshot" in doc["metadata_json"]

@@ -57,6 +57,8 @@ def test_run_vault_backed_memo_plumbs_research_state_as_context_file(monkeypatch
 
     assert response.status == "completed"
     assert captured["ingest_path"] == str(source)
+    assert captured["ingest_kwargs"]["source_grade"] == "B"
+    assert captured["ingest_kwargs"]["source_grade_rationale"] == "manual file, provenance not machine-verified"
     request = captured["request"]
     assert isinstance(request, HarnessRequest)
     assert request.run_id == "memo-test"

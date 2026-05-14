@@ -59,6 +59,7 @@ def ingest_file(
     source_type: str | None = None,
     title: str | None = None,
     source_grade: str = "B",
+    source_grade_rationale: str | None = None,
     url: str | None = None,
     published_at: str | None = None,
     metadata: dict[str, Any] | None = None,
@@ -93,6 +94,8 @@ def ingest_file(
         "extracted_path": str(extracted_path),
         **(metadata or {}),
     }
+    if source_grade_rationale:
+        metadata_payload["source_grade_rationale"] = source_grade_rationale
     metadata_path.write_text(json.dumps(metadata_payload, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
 
     document = active_store.insert_document(
@@ -126,6 +129,7 @@ def ingest_text(
     source_type: str = "text",
     title: str | None = None,
     source_grade: str = "B",
+    source_grade_rationale: str | None = None,
     url: str | None = None,
     published_at: str | None = None,
     metadata: dict[str, Any] | None = None,
@@ -145,6 +149,8 @@ def ingest_text(
     metadata_path = doc_dir / "metadata.json"
     extracted_path.write_text(text, encoding="utf-8")
     metadata_payload = {"extracted_path": str(extracted_path), **(metadata or {})}
+    if source_grade_rationale:
+        metadata_payload["source_grade_rationale"] = source_grade_rationale
     metadata_path.write_text(json.dumps(metadata_payload, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
 
     document = active_store.insert_document(

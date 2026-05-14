@@ -48,7 +48,14 @@ def run_vault_backed_memo(
     if not ticker_norm:
         raise ValueError("ticker is required")
     for path in source_paths or []:
-        ingest_file(path, ticker=ticker_norm, source_type="manual_inbox", source_grade="A", root=root)
+        ingest_file(
+            path,
+            ticker=ticker_norm,
+            source_type="manual_inbox",
+            source_grade="B",
+            source_grade_rationale="manual file, provenance not machine-verified",
+            root=root,
+        )
     synthesis = synthesize_company_research_state(
         ticker_norm,
         company_name=company_name,
