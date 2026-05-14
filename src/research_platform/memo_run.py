@@ -33,7 +33,9 @@ from src.vault.ingest import ingest_file, ingest_text
 from src.research_platform.state.apply import apply_proposals
 from src.research_platform.state.contracts import EvidenceIndex
 from src.research_platform.state.lint import validate_state_integrity
+from src.research_platform.state.staging import StagePaths, commit_stage, prepare_state_stage
 from src.research_platform.state.storage import initialize_state_folder, read_json_model, restore_state_snapshot, snapshot_state, write_json_model
+from src.research_platform.state.validator import validate_stage
 from src.vault.paths import default_vault_paths
 from src.vault.store import VaultStore
 
@@ -290,6 +292,8 @@ def _research_paths(vault_root: Path, ticker: str, run_id: str) -> dict[str, Pat
         "proposal_protocol": memo_dir / "proposal_protocol.md",
         "proposals": memo_dir / "proposals.jsonl",
         "accepted_changes": memo_dir / "accepted_changes.jsonl",
+        "state_stage": memo_dir / "state_stage",
+        "state_validation_report": memo_dir / "state_validation_report.json",
     }
 
 
@@ -580,7 +584,49 @@ The proposal file lives under this run directory: `{memo_dir}`.
 """.strip() + "\n"
 
 
-def _research_state_prompt_block(*, memo_dir: Path, proposals_path: Path) -> str:
+def _research_state_direct_edit_protocol_text(*, memo_dir: Path, stage_paths: StagePaths) -> str:
+    editable = "\n".join(f"- `{path}`" for path in stage_paths.editable_files)
+    readonly = "\n".join(
+        f"- `{path}`" for path in [stage_paths.stage.evidence_index, stage_paths.stage.state_index]
+    )
+    return f"""
+# Durable CompanyResearchState direct-edit protocol (v3.3)
+
+Read the staged state files before raw source attachments. The staged folder is a writable copy of durable company research memory for this run; the live state folder is not writable during the memo.
+
+## Required output
+
+Write the final memo to `publish/final.md` as usual. Separately, apply durable state updates by editing the staged state files directly.
+
+Editable staged files:
+{editable}
+
+Read-only staged files:
+{readonly}
+
+Use `write(path=..., content=...)` with the exact staged paths above. Do not write state updates under `publish/` or `scratch/`, and do not edit the live state folder.
+
+## What belongs in durable state
+
+Only keep information that should carry into future company research runs: durable thesis points, recurring risks, changed/answered open questions, conflicts between evidence, or a point-in-time valuation snapshot. Do not persist memo-only wording, style edits, or uncited quantitative claims.
+
+## Editing rules
+
+- `research_state.md` is the human-readable durable memory. You may edit free-form sections and add new `##` sections, but every `##` section must include a `<!-- key: snake_case_key -->` anchor.
+- The derived markdown sections `open_questions`, `valuation_snapshot`, and `conflicts_uncertainty` are regenerated from sidecars after your run. Prefer editing the sidecars instead of hand-editing those derived bodies; any hand-edited derived body may be overwritten by StateOwner.
+- You may edit `open_questions.json`, `conflicts.json`, and `valuation_snapshot.json` directly, preserving their existing JSON schema and ticker.
+- Do not edit `evidence_index.json`; cite only existing `[S]` keys from it.
+- Do not edit `state_index.json`; StateOwner rebuilds it from markdown after validation.
+- Every quantitative-looking sentence in markdown must include a same-sentence `[S]` cite.
+- Keep edits compact. A deterministic gate will reject malformed JSON, unresolved citations, missing section anchors, read-only file edits, or excessive destructive diffs.
+
+The staged state folder lives under this run directory: `{memo_dir}`.
+""".strip() + "\n"
+
+
+def _research_state_prompt_block(*, memo_dir: Path, proposals_path: Path, stage_paths: StagePaths | None = None) -> str:
+    if stage_paths is not None:
+        return _research_state_direct_edit_protocol_text(memo_dir=memo_dir, stage_paths=stage_paths)
     return _research_state_protocol_text(memo_dir=memo_dir, proposals_path=proposals_path)
 
 
@@ -591,14 +637,23 @@ def _research_state_manifest(
     apply_counts: dict[str, int] | None = None,
     integrity_errors: list[str] | None = None,
     rolled_back: bool = False,
+    mode: str | None = None,
+    validation_report: dict[str, Any] | None = None,
+    commit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"enabled": enabled, "rolled_back": rolled_back}
+    if mode:
+        payload["mode"] = mode
     if state_paths:
         payload.update(state_paths)
     if apply_counts:
         payload["apply_counts"] = apply_counts
     if integrity_errors is not None:
         payload["integrity_errors"] = integrity_errors
+    if validation_report is not None:
+        payload["validation_report"] = validation_report
+    if commit is not None:
+        payload["commit"] = commit
     return payload
 
 
@@ -614,12 +669,16 @@ def run_research_memo(
     adapters: SourceAdapters | None = None,
     run_harness_fn: Callable[[HarnessRequest], HarnessResponse] | None = None,
     enable_research_state: bool = False,
+    enable_research_state_v33: bool = False,
 ) -> ResearchPlatformRunResult:
     """Run the research-platform memo pipeline.
 
     v1 behavior is the default.  When ``enable_research_state`` is true, v3
     markdown-first state files are attached and post-run proposals are applied.
     """
+
+    if enable_research_state_v33:
+        enable_research_state = True
 
     ticker_norm = ticker.strip().upper()
     if not ticker_norm:
@@ -823,6 +882,7 @@ def run_research_memo(
     research_state_context_files: list[str] = []
     research_state_meta: dict[str, Any] | None = None
     research_state_paths = None
+    research_state_stage_paths: StagePaths | None = None
     if enable_research_state:
         research_state_paths = initialize_state_folder(root, ticker_norm)
         existing_evidence_index = read_json_model(
@@ -834,30 +894,57 @@ def run_research_memo(
             research_state_paths.evidence_index,
             _evidence_index_from_citations(ticker_norm, citations, existing=existing_evidence_index),
         )
-        snapshot_state(research_state_paths, paths["state_snapshot"])
-        paths["proposal_protocol"].write_text(
-            _research_state_protocol_text(memo_dir=paths["memo_dir"], proposals_path=paths["proposals"]),
-            encoding="utf-8",
-        )
-        research_state_context_files = [
-            str(research_state_paths.research_state),
-            str(research_state_paths.state_index),
-            str(research_state_paths.evidence_index),
-            str(research_state_paths.open_questions),
-            str(research_state_paths.conflicts),
-            str(research_state_paths.valuation_snapshot),
-            str(paths["proposal_protocol"]),
-        ]
-        research_state_meta = _research_state_manifest(
-            enabled=True,
-            state_paths={
-                "research_state_path": str(research_state_paths.research_state),
-                "state_snapshot_path": str(paths["state_snapshot"]),
-                "proposal_protocol_path": str(paths["proposal_protocol"]),
-                "proposals_path": str(paths["proposals"]),
-                "accepted_changes_path": str(paths["accepted_changes"]),
-            },
-        )
+        if enable_research_state_v33:
+            research_state_stage_paths = prepare_state_stage(
+                live_paths=research_state_paths,
+                baseline_root=paths["state_snapshot"],
+                stage_root=paths["state_stage"],
+            )
+            paths["proposal_protocol"].write_text(
+                _research_state_direct_edit_protocol_text(memo_dir=paths["memo_dir"], stage_paths=research_state_stage_paths),
+                encoding="utf-8",
+            )
+            research_state_context_files = [
+                *[str(path) for path in research_state_stage_paths.context_files],
+                str(paths["proposal_protocol"]),
+            ]
+            research_state_meta = _research_state_manifest(
+                enabled=True,
+                mode="v33_staged_direct_edit",
+                state_paths={
+                    "research_state_path": str(research_state_paths.research_state),
+                    "state_snapshot_path": str(paths["state_snapshot"]),
+                    "state_stage_path": str(paths["state_stage"]),
+                    "proposal_protocol_path": str(paths["proposal_protocol"]),
+                    "state_validation_report_path": str(paths["state_validation_report"]),
+                },
+            )
+        else:
+            snapshot_state(research_state_paths, paths["state_snapshot"])
+            paths["proposal_protocol"].write_text(
+                _research_state_protocol_text(memo_dir=paths["memo_dir"], proposals_path=paths["proposals"]),
+                encoding="utf-8",
+            )
+            research_state_context_files = [
+                str(research_state_paths.research_state),
+                str(research_state_paths.state_index),
+                str(research_state_paths.evidence_index),
+                str(research_state_paths.open_questions),
+                str(research_state_paths.conflicts),
+                str(research_state_paths.valuation_snapshot),
+                str(paths["proposal_protocol"]),
+            ]
+            research_state_meta = _research_state_manifest(
+                enabled=True,
+                mode="v32_proposals",
+                state_paths={
+                    "research_state_path": str(research_state_paths.research_state),
+                    "state_snapshot_path": str(paths["state_snapshot"]),
+                    "proposal_protocol_path": str(paths["proposal_protocol"]),
+                    "proposals_path": str(paths["proposals"]),
+                    "accepted_changes_path": str(paths["accepted_changes"]),
+                },
+            )
     package = MemoContextPackage(
         package_id=f"pkg-{run_id}",
         task_id=task.task_id,
@@ -941,7 +1028,11 @@ def run_research_memo(
 
     research_state_block = None
     if enable_research_state:
-        research_state_block = _research_state_prompt_block(memo_dir=paths["memo_dir"], proposals_path=paths["proposals"])
+        research_state_block = _research_state_prompt_block(
+            memo_dir=paths["memo_dir"],
+            proposals_path=paths["proposals"],
+            stage_paths=research_state_stage_paths if enable_research_state_v33 else None,
+        )
 
     prompt = assemble_memo_prompt(
         user_prompt=user_prompt,
@@ -969,7 +1060,11 @@ def run_research_memo(
             str(paths["question_list"]),
             *[str(path) for path in attachment_paths.values()],
         ],
-        external_writable_files=[str(paths["proposals"])] if enable_research_state else [],
+        external_writable_files=(
+            [str(path) for path in research_state_stage_paths.editable_files]
+            if enable_research_state_v33 and research_state_stage_paths is not None
+            else ([str(paths["proposals"])] if enable_research_state else [])
+        ),
     )
     harness_response = (run_harness_fn or run_harness)(harness_request)
     final_path = _copy_final(harness_response, paths["final"])
@@ -983,51 +1078,99 @@ def run_research_memo(
         errors.append(harness_response.error or f"Harness ended with status {harness_response.status} without final.md")
 
     if enable_research_state and research_state_paths is not None:
-        if not paths["proposals"].exists():
-            paths["proposals"].write_text("", encoding="utf-8")
-        try:
-            apply_result = apply_proposals(
-                vault_root=root,
-                ticker=ticker_norm,
-                run_id=run_id,
-                proposals_path=paths["proposals"],
-                accepted_changes_path=paths["accepted_changes"],
+        if enable_research_state_v33 and research_state_stage_paths is not None:
+            validation_report = validate_stage(research_state_stage_paths, ticker=ticker_norm, run_id=run_id)
+            _write_json(paths["state_validation_report"], validation_report.to_dict())
+            commit_result = None
+            integrity_errors: list[str] = []
+            rolled_back = False
+            if validation_report.ok:
+                try:
+                    commit_result = commit_stage(
+                        stage_paths=research_state_stage_paths,
+                        vault_root=root,
+                        ticker=ticker_norm,
+                        run_id=run_id,
+                        diff=validation_report.diff,
+                    )
+                    integrity_errors = validate_state_integrity(root, ticker_norm)
+                    if integrity_errors:
+                        errors.extend(f"Research state integrity: {item}" for item in integrity_errors)
+                        restore_state_snapshot(research_state_paths, paths["state_snapshot"])
+                        rolled_back = True
+                        errors.append("Research state rolled back to pre-run snapshot after v3.3 integrity failure.")
+                        status = "failed" if status == "succeeded" else status
+                except Exception as exc:
+                    errors.append(f"Research state v3.3 commit failed: {exc}")
+                    restore_state_snapshot(research_state_paths, paths["state_snapshot"])
+                    rolled_back = True
+                    status = "failed" if status == "succeeded" else status
+            else:
+                errors.extend(f"Research state v3.3 validation: {item}" for item in validation_report.errors)
+                rolled_back = True
+                status = "failed" if status == "succeeded" else status
+            research_state_meta = _research_state_manifest(
+                enabled=True,
+                mode="v33_staged_direct_edit",
+                state_paths={
+                    "research_state_path": str(research_state_paths.research_state),
+                    "state_snapshot_path": str(paths["state_snapshot"]),
+                    "state_stage_path": str(paths["state_stage"]),
+                    "proposal_protocol_path": str(paths["proposal_protocol"]),
+                    "state_validation_report_path": str(paths["state_validation_report"]),
+                },
+                integrity_errors=integrity_errors,
+                rolled_back=rolled_back,
+                validation_report=validation_report.to_dict(),
+                commit=commit_result.to_dict() if commit_result else None,
             )
-            proposal_apply_errors: list[str] = []
-        except Exception as exc:
-            apply_result = None
-            proposal_apply_errors = [f"Research state proposal apply failed: {exc}"]
-            errors.extend(proposal_apply_errors)
-            status = "failed" if status == "succeeded" else status
-        integrity_errors = validate_state_integrity(root, ticker_norm)
-        rolled_back = False
-        if proposal_apply_errors:
-            restore_state_snapshot(research_state_paths, paths["state_snapshot"])
-            rolled_back = True
-            errors.append("Research state rolled back to pre-run snapshot after proposal apply failure.")
-        elif integrity_errors:
-            errors.extend(f"Research state integrity: {item}" for item in integrity_errors)
-            restore_state_snapshot(research_state_paths, paths["state_snapshot"])
-            rolled_back = True
-            errors.append("Research state rolled back to pre-run snapshot after integrity failure.")
-            status = "failed" if status == "succeeded" else status
-        research_state_meta = _research_state_manifest(
-            enabled=True,
-            state_paths={
-                "research_state_path": str(research_state_paths.research_state),
-                "state_snapshot_path": str(paths["state_snapshot"]),
-                "proposal_protocol_path": str(paths["proposal_protocol"]),
-                "proposals_path": str(paths["proposals"]),
-                "accepted_changes_path": str(paths["accepted_changes"]),
-            },
-            apply_counts={
-                "applied": apply_result.applied_count if apply_result else 0,
-                "rejected": apply_result.rejected_count if apply_result else 0,
-                "revised": apply_result.revised_count if apply_result else 0,
-            },
-            integrity_errors=integrity_errors,
-            rolled_back=rolled_back,
-        )
+        else:
+            if not paths["proposals"].exists():
+                paths["proposals"].write_text("", encoding="utf-8")
+            try:
+                apply_result = apply_proposals(
+                    vault_root=root,
+                    ticker=ticker_norm,
+                    run_id=run_id,
+                    proposals_path=paths["proposals"],
+                    accepted_changes_path=paths["accepted_changes"],
+                )
+                proposal_apply_errors: list[str] = []
+            except Exception as exc:
+                apply_result = None
+                proposal_apply_errors = [f"Research state proposal apply failed: {exc}"]
+                errors.extend(proposal_apply_errors)
+                status = "failed" if status == "succeeded" else status
+            integrity_errors = validate_state_integrity(root, ticker_norm)
+            rolled_back = False
+            if proposal_apply_errors:
+                restore_state_snapshot(research_state_paths, paths["state_snapshot"])
+                rolled_back = True
+                errors.append("Research state rolled back to pre-run snapshot after proposal apply failure.")
+            elif integrity_errors:
+                errors.extend(f"Research state integrity: {item}" for item in integrity_errors)
+                restore_state_snapshot(research_state_paths, paths["state_snapshot"])
+                rolled_back = True
+                errors.append("Research state rolled back to pre-run snapshot after integrity failure.")
+                status = "failed" if status == "succeeded" else status
+            research_state_meta = _research_state_manifest(
+                enabled=True,
+                mode="v32_proposals",
+                state_paths={
+                    "research_state_path": str(research_state_paths.research_state),
+                    "state_snapshot_path": str(paths["state_snapshot"]),
+                    "proposal_protocol_path": str(paths["proposal_protocol"]),
+                    "proposals_path": str(paths["proposals"]),
+                    "accepted_changes_path": str(paths["accepted_changes"]),
+                },
+                apply_counts={
+                    "applied": apply_result.applied_count if apply_result else 0,
+                    "rejected": apply_result.rejected_count if apply_result else 0,
+                    "revised": apply_result.revised_count if apply_result else 0,
+                },
+                integrity_errors=integrity_errors,
+                rolled_back=rolled_back,
+            )
 
     _write_json(paths["status"], _status_payload(run_id, status, warnings=warnings, errors=errors, research_state=research_state_meta))
     _write_json(
@@ -1078,7 +1221,8 @@ def main() -> None:
     parser.add_argument("--vault-root", default=None)
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--wall-clock-budget-seconds", type=int, default=1200)
-    parser.add_argument("--enable-research-state", action="store_true", help="Enable v3 markdown-first research state artifacts.")
+    parser.add_argument("--enable-research-state", action="store_true", help="Enable v3.2 proposal-based markdown-first research state artifacts.")
+    parser.add_argument("--enable-research-state-v33", action="store_true", help="Enable v3.3 staged direct-edit research state artifacts.")
     args = parser.parse_args()
     result = run_research_memo(
         user_prompt=args.prompt,
@@ -1089,6 +1233,7 @@ def main() -> None:
         run_id=args.run_id,
         wall_clock_budget_seconds=args.wall_clock_budget_seconds,
         enable_research_state=args.enable_research_state,
+        enable_research_state_v33=args.enable_research_state_v33,
     )
     print(json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2, sort_keys=True))
 

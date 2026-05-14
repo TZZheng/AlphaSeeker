@@ -379,6 +379,66 @@ def test_run_research_memo_rolls_back_research_state_on_integrity_failure(tmp_pa
     assert manifest["research_state"]["integrity_errors"] == ["forced integrity failure"]
 
 
+
+def test_run_research_memo_v33_commits_staged_direct_edits(tmp_path):
+    manual = tmp_path / "manual.md"
+    manual.write_text("# Manual packet\n\nGuyana production growth notes.", encoding="utf-8")
+    final_source = tmp_path / "harness_final.md"
+    final_source.write_text("# Final memo\n\nUse S1.", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def fake_sec(*args, **kwargs):
+        return []
+
+    def failing_provider(*args, **kwargs):
+        raise RuntimeError("offline")
+
+    def fake_harness(request: HarnessRequest) -> HarnessResponse:
+        captured["request"] = request
+        writable = {Path(path).name: Path(path) for path in request.external_writable_files}
+        assert set(writable) == {"research_state.md", "open_questions.json", "conflicts.json", "valuation_snapshot.json"}
+        assert all("state_stage" in str(path) for path in writable.values())
+        assert "direct-edit protocol (v3.3)" in request.user_prompt
+        markdown = writable["research_state.md"].read_text(encoding="utf-8")
+        markdown += "\n## Guyana growth engine\n<!-- key: guyana_growth_engine -->\n\nGuyana is now tracked directly in staged durable state [S1].\n"
+        writable["research_state.md"].write_text(markdown, encoding="utf-8")
+        return HarnessResponse(
+            status="completed",
+            stop_reason="done",
+            run_root=str(tmp_path / "run"),
+            root_agent_path=str(tmp_path / "run" / "agents" / "root"),
+            final_report_path=str(final_source),
+        )
+
+    result = run_research_memo(
+        user_prompt="Build an investment memo for XOM.",
+        ticker="xom",
+        company_name="Exxon Mobil",
+        manual_files=[str(manual)],
+        vault_root=tmp_path / "vault",
+        run_id="v33-direct",
+        adapters=SourceAdapters(fake_sec, failing_provider, failing_provider, failing_provider),
+        run_harness_fn=fake_harness,
+        enable_research_state_v33=True,
+    )
+
+    assert result.status == "succeeded"
+    request = captured["request"]
+    assert isinstance(request, HarnessRequest)
+    assert Path(request.context_files[0]).name == "research_state.md"
+    assert "state_stage" in request.context_files[0]
+    assert result.research_state_path is not None
+    state_markdown = Path(result.research_state_path).read_text(encoding="utf-8")
+    assert "Guyana is now tracked directly in staged durable state [S1]." in state_markdown
+    manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
+    research_state = manifest["research_state"]
+    assert research_state["mode"] == "v33_staged_direct_edit"
+    assert research_state["rolled_back"] is False
+    assert research_state["validation_report"]["ok"] is True
+    assert research_state["commit"]["committed"] is True
+    assert Path(research_state["state_validation_report_path"]).exists()
+
+
 def test_run_research_memo_reuses_state_and_appends_evidence_across_runs(tmp_path):
     manual_one = tmp_path / "manual-one.md"
     manual_one.write_text("# Manual packet one\n\nGuyana growth engine.", encoding="utf-8")
