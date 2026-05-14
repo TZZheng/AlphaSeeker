@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.research_platform.state.contracts import ConflictsFile, OpenQuestionsFile
+from src.research_platform.state.contracts import ConflictsFile, OpenQuestionsFile, ValuationSnapshot
 
 
 def render_open_questions(open_questions: OpenQuestionsFile) -> str:
@@ -34,4 +34,31 @@ def render_conflicts(conflicts: ConflictsFile) -> str:
         )
         if conflict.rationale:
             lines.append(f"  - Rationale: {conflict.rationale}")
+    return "\n".join(lines)
+
+
+def render_valuation_snapshot(valuation: ValuationSnapshot) -> str:
+    if not valuation.as_of and not valuation.fields and not valuation.assumptions_markdown:
+        return "No valuation snapshot recorded."
+
+    lines: list[str] = [f"As of: {valuation.as_of or 'unknown'}"]
+    if valuation.source_keys:
+        lines.append("Evidence: " + ", ".join(f"[{key}]" for key in valuation.source_keys))
+    if valuation.fields:
+        lines.append("")
+        lines.append("| Field | Value |")
+        lines.append("|---|---:|")
+        for key in sorted(valuation.fields):
+            value = valuation.fields[key]
+            display = "n/a" if value is None else str(value)
+            lines.append(f"| {key} | {display} |")
+    if valuation.assumptions_markdown:
+        lines.append("")
+        lines.append("Assumptions / notes:")
+        lines.append(valuation.assumptions_markdown.strip())
+    if valuation.warnings:
+        lines.append("")
+        lines.append("Warnings:")
+        for warning in valuation.warnings:
+            lines.append(f"- {warning}")
     return "\n".join(lines)

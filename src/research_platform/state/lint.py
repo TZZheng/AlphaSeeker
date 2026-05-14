@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from src.research_platform.state.render import render_conflicts, render_open_questions
+from src.research_platform.state.render import render_conflicts, render_open_questions, render_valuation_snapshot
 from src.research_platform.state.storage import CITE_TAG_RE, parse_markdown_sections, read_state_sidecars, state_paths
 
 
@@ -37,7 +37,7 @@ def validate_state_integrity(vault_root: str | Path, ticker: str) -> list[str]:
     markdown = paths.research_state.read_text(encoding="utf-8")
     sections = parse_markdown_sections(markdown)
     section_keys = {section.section_key for section in sections}
-    state_index, evidence_index, open_questions, conflicts, _ = read_state_sidecars(paths, ticker)
+    state_index, evidence_index, open_questions, conflicts, valuation = read_state_sidecars(paths, ticker)
 
     for cite_key in sorted(set(CITE_TAG_RE.findall(markdown))):
         if cite_key not in evidence_index.entries:
@@ -54,6 +54,10 @@ def validate_state_integrity(vault_root: str | Path, ticker: str) -> list[str]:
         rendered = render_open_questions(open_questions).strip()
         if _body_without_managed_comments(by_key["open_questions"].body) != rendered:
             errors.append("open_questions section does not match rendered sidecar")
+    if "valuation_snapshot" in by_key:
+        rendered = render_valuation_snapshot(valuation).strip()
+        if _body_without_managed_comments(by_key["valuation_snapshot"].body) != rendered:
+            errors.append("valuation_snapshot section does not match rendered sidecar")
     if "conflicts_uncertainty" in by_key:
         rendered = render_conflicts(conflicts).strip()
         if _body_without_managed_comments(by_key["conflicts_uncertainty"].body) != rendered:

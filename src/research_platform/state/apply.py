@@ -15,7 +15,7 @@ from src.research_platform.state.contracts import (
     utc_now_iso,
 )
 from src.research_platform.state.policy import decide_proposal
-from src.research_platform.state.render import render_conflicts, render_open_questions
+from src.research_platform.state.render import render_conflicts, render_open_questions, render_valuation_snapshot
 from src.research_platform.state.storage import (
     MarkdownSection,
     append_jsonl,
@@ -182,14 +182,15 @@ def _apply_sidecar_update(paths, proposal: ProposalRecord, *, ticker: str) -> st
             assumptions_markdown=proposal.assumptions_markdown,
         )
         write_json_model(paths.valuation_snapshot, valuation)
-        return None
+        return "valuation_snapshot"
 
     return None
 
 
 def _refresh_derived_sections(markdown: str, paths, ticker: str) -> str:
-    _, _, open_questions, conflicts, _ = read_state_sidecars(paths, ticker)
+    _, _, open_questions, conflicts, valuation = read_state_sidecars(paths, ticker)
     markdown = _replace_derived_section(markdown, "open_questions", render_open_questions(open_questions))
+    markdown = _replace_derived_section(markdown, "valuation_snapshot", render_valuation_snapshot(valuation))
     markdown = _replace_derived_section(markdown, "conflicts_uncertainty", render_conflicts(conflicts))
     return markdown
 
