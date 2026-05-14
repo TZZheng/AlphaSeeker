@@ -187,7 +187,9 @@ def test_run_research_memo_with_research_state_applies_proposals(tmp_path):
     assert Path(request.context_files[0]).name == "research_state.md"
     assert Path(request.context_files[1]).name == "state_index.json"
     assert Path(request.context_files[2]).name == "evidence_index.json"
+    assert Path(request.context_files[6]).name == "proposal_protocol.md"
     assert "proposals.jsonl" in request.user_prompt
+    assert "proposal file must be valid JSONL" in request.user_prompt
 
     assert result.status == "succeeded"
     assert result.research_state_path is not None
@@ -202,8 +204,52 @@ def test_run_research_memo_with_research_state_applies_proposals(tmp_path):
     manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
     assert manifest["research_state"]["enabled"] is True
     assert manifest["research_state"]["rolled_back"] is False
+    assert Path(manifest["research_state"]["proposal_protocol_path"]).name == "proposal_protocol.md"
     assert manifest["research_state"]["apply_counts"]["applied"] == 1
     assert manifest["research_state"]["integrity_errors"] == []
+
+
+def test_run_research_memo_rolls_back_research_state_on_malformed_proposals(tmp_path):
+    manual = tmp_path / "manual.md"
+    manual.write_text("# Manual packet\n\nGuyana production growth notes.", encoding="utf-8")
+    final_source = tmp_path / "harness_final.md"
+    final_source.write_text("# Final memo\n\nUse S1.", encoding="utf-8")
+
+    def fake_sec(*args, **kwargs):
+        return []
+
+    def failing_provider(*args, **kwargs):
+        raise RuntimeError("offline")
+
+    def fake_harness(request: HarnessRequest) -> HarnessResponse:
+        proposal_path = tmp_path / "vault" / "companies" / "XOM" / "research" / "memos" / "bad-proposals" / "proposals.jsonl"
+        proposal_path.write_text("not json\n", encoding="utf-8")
+        return HarnessResponse(
+            status="completed",
+            stop_reason="done",
+            run_root=str(tmp_path / "run"),
+            root_agent_path=str(tmp_path / "run" / "agents" / "root"),
+            final_report_path=str(final_source),
+        )
+
+    result = run_research_memo(
+        user_prompt="Build an investment memo for XOM.",
+        ticker="xom",
+        company_name="Exxon Mobil",
+        manual_files=[str(manual)],
+        vault_root=tmp_path / "vault",
+        run_id="bad-proposals",
+        adapters=SourceAdapters(fake_sec, failing_provider, failing_provider, failing_provider),
+        run_harness_fn=fake_harness,
+        enable_research_state=True,
+    )
+
+    assert result.status == "failed"
+    assert any("proposal apply failed" in error for error in result.errors)
+    assert any("rolled back" in error for error in result.errors)
+    manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
+    assert manifest["research_state"]["rolled_back"] is True
+    assert manifest["research_state"]["apply_counts"] == {"applied": 0, "rejected": 0, "revised": 0}
 
 
 def test_run_research_memo_rolls_back_research_state_on_integrity_failure(tmp_path, monkeypatch):

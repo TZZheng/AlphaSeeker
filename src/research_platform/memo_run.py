@@ -287,6 +287,7 @@ def _research_paths(vault_root: Path, ticker: str, run_id: str) -> dict[str, Pat
         "question_snapshot": memo_dir / "question_list.md",
         "final": memo_dir / "final.md",
         "state_snapshot": memo_dir / "state_snapshot",
+        "proposal_protocol": memo_dir / "proposal_protocol.md",
         "proposals": memo_dir / "proposals.jsonl",
         "accepted_changes": memo_dir / "accepted_changes.jsonl",
     }
@@ -534,27 +535,53 @@ def _evidence_index_from_citations(
     return EvidenceIndex(ticker=ticker, entries=entries)
 
 
-def _research_state_prompt_block(*, memo_dir: Path, proposals_path: Path) -> str:
+def _research_state_protocol_text(*, memo_dir: Path, proposals_path: Path) -> str:
     return f"""
-## Durable CompanyResearchState update protocol (v3)
+# Durable CompanyResearchState update protocol (v3)
 
-Read the attached `research_state.md` and state sidecars before raw source attachments.
-The markdown state is durable company research memory; `final.md` is this run's memo output.
+Read the attached `research_state.md` and state sidecars before raw source attachments. The markdown state is durable company research memory; `final.md` is this run's memo output.
 
-When you notice a durable state update, write one JSON object per line to:
+## Required output
+
+Write the final memo to `publish/final.md` as usual. Separately, write durable state proposals as JSON Lines to:
 
 `{proposals_path}`
 
-Use these proposal envelopes, with markdown content in `body_markdown` when updating a section:
+The proposal file must be valid JSONL: one JSON object per line, no markdown fences, no trailing comments. If there are no durable state updates, write an empty file.
+
+## When to propose durable state updates
+
+Propose an update only for information that should carry into future company research runs: durable thesis points, recurring risks, changed/answered open questions, conflicts between evidence, or a point-in-time valuation snapshot. Do not propose memo-only wording, style edits, or uncited quantitative claims.
+
+## Allowed proposal envelopes
+
+Use only these JSON object shapes:
 
 ```jsonl
 {{"proposal_id":"p1","type":"propose_section_update","section_key":"guyana_growth_engine","action":"append","body_markdown":"Durable insight with [S1] cite.","evidence_keys":["S1"],"rationale":"Why this belongs in durable state."}}
-{{"proposal_id":"p2","type":"propose_close_question","question_id":"q-...","evidence_keys":["S2"],"proposed_answer":"Cited answer.","rationale":"Why this closes the question."}}
-{{"proposal_id":"p3","type":"propose_valuation_snapshot","as_of":"YYYY-MM-DD","fields":{{"share_price":100.0}},"source_keys":["S3"],"assumptions_markdown":"Point-in-time valuation assumptions with [S3]."}}
+{{"proposal_id":"p2","type":"propose_question","question_id":"q-new-topic","text":"Question to carry forward?","priority":"normal","related_section_key":"guyana_growth_engine"}}
+{{"proposal_id":"p3","type":"propose_close_question","question_id":"q-...","evidence_keys":["S2"],"proposed_answer":"Cited answer.","rationale":"Why this closes the question."}}
+{{"proposal_id":"p4","type":"propose_conflict","summary":"Evidence conflict summary.","left_evidence_key":"S1","right_evidence_key":"S2","severity":"medium","rationale":"Why this is a real conflict."}}
+{{"proposal_id":"p5","type":"propose_valuation_snapshot","as_of":"YYYY-MM-DD","fields":{{"share_price":100.0,"ev_ebitda":7.5}},"source_keys":["S3"],"assumptions_markdown":"Point-in-time valuation assumptions with [S3]."}}
+{{"proposal_id":"p6","type":"propose_no_op","rationale":"No durable state updates found."}}
 ```
 
-Rules: use existing [S] citation keys, do not edit durable state files directly, do not propose uncited quantitative claims, and write an empty file if there are no state updates. The proposal file lives under this run directory: `{memo_dir}`.
-""".strip()
+## StateOwner acceptance rules
+
+- Use existing `[S]` citation keys from `evidence_index.json`; do not invent evidence keys.
+- `body_markdown` must be section body content only: do not include `##` H2 headings or `<!-- key: ... -->` anchors.
+- Direct edits to derived sections are forbidden. Use `propose_question`, `propose_close_question`, `propose_conflict`, or `propose_valuation_snapshot` for those sidecars.
+- Every section update, close-question, conflict, or valuation snapshot must include resolved evidence keys and a concrete rationale.
+- Quantitative-looking sentences need a same-sentence `[S]` cite.
+- Prefer appending to an existing section when the state already has a matching `section_key`; create a new section only for genuinely new topics.
+- Keep proposals concise. Soft cap: 20 proposals. Hard cap: 50 proposals.
+
+The proposal file lives under this run directory: `{memo_dir}`.
+""".strip() + "\n"
+
+
+def _research_state_prompt_block(*, memo_dir: Path, proposals_path: Path) -> str:
+    return _research_state_protocol_text(memo_dir=memo_dir, proposals_path=proposals_path)
 
 
 def _research_state_manifest(
@@ -808,6 +835,10 @@ def run_research_memo(
             _evidence_index_from_citations(ticker_norm, citations, existing=existing_evidence_index),
         )
         snapshot_state(research_state_paths, paths["state_snapshot"])
+        paths["proposal_protocol"].write_text(
+            _research_state_protocol_text(memo_dir=paths["memo_dir"], proposals_path=paths["proposals"]),
+            encoding="utf-8",
+        )
         research_state_context_files = [
             str(research_state_paths.research_state),
             str(research_state_paths.state_index),
@@ -815,12 +846,14 @@ def run_research_memo(
             str(research_state_paths.open_questions),
             str(research_state_paths.conflicts),
             str(research_state_paths.valuation_snapshot),
+            str(paths["proposal_protocol"]),
         ]
         research_state_meta = _research_state_manifest(
             enabled=True,
             state_paths={
                 "research_state_path": str(research_state_paths.research_state),
                 "state_snapshot_path": str(paths["state_snapshot"]),
+                "proposal_protocol_path": str(paths["proposal_protocol"]),
                 "proposals_path": str(paths["proposals"]),
                 "accepted_changes_path": str(paths["accepted_changes"]),
             },
@@ -951,16 +984,27 @@ def run_research_memo(
     if enable_research_state and research_state_paths is not None:
         if not paths["proposals"].exists():
             paths["proposals"].write_text("", encoding="utf-8")
-        apply_result = apply_proposals(
-            vault_root=root,
-            ticker=ticker_norm,
-            run_id=run_id,
-            proposals_path=paths["proposals"],
-            accepted_changes_path=paths["accepted_changes"],
-        )
+        try:
+            apply_result = apply_proposals(
+                vault_root=root,
+                ticker=ticker_norm,
+                run_id=run_id,
+                proposals_path=paths["proposals"],
+                accepted_changes_path=paths["accepted_changes"],
+            )
+            proposal_apply_errors: list[str] = []
+        except Exception as exc:
+            apply_result = None
+            proposal_apply_errors = [f"Research state proposal apply failed: {exc}"]
+            errors.extend(proposal_apply_errors)
+            status = "failed" if status == "succeeded" else status
         integrity_errors = validate_state_integrity(root, ticker_norm)
         rolled_back = False
-        if integrity_errors:
+        if proposal_apply_errors:
+            restore_state_snapshot(research_state_paths, paths["state_snapshot"])
+            rolled_back = True
+            errors.append("Research state rolled back to pre-run snapshot after proposal apply failure.")
+        elif integrity_errors:
             errors.extend(f"Research state integrity: {item}" for item in integrity_errors)
             restore_state_snapshot(research_state_paths, paths["state_snapshot"])
             rolled_back = True
@@ -971,13 +1015,14 @@ def run_research_memo(
             state_paths={
                 "research_state_path": str(research_state_paths.research_state),
                 "state_snapshot_path": str(paths["state_snapshot"]),
+                "proposal_protocol_path": str(paths["proposal_protocol"]),
                 "proposals_path": str(paths["proposals"]),
                 "accepted_changes_path": str(paths["accepted_changes"]),
             },
             apply_counts={
-                "applied": apply_result.applied_count,
-                "rejected": apply_result.rejected_count,
-                "revised": apply_result.revised_count,
+                "applied": apply_result.applied_count if apply_result else 0,
+                "rejected": apply_result.rejected_count if apply_result else 0,
+                "revised": apply_result.revised_count if apply_result else 0,
             },
             integrity_errors=integrity_errors,
             rolled_back=rolled_back,
