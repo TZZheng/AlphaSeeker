@@ -7,6 +7,7 @@ import pytest
 
 from src.harness.types import HarnessRequest, HarnessResponse
 from src.research_platform.memo_run import SourceAdapters, run_research_memo, strict_render_template
+from src.research_platform.state.storage import state_paths
 
 
 def test_strict_render_template_raises_on_unresolved_placeholder():
@@ -200,5 +201,71 @@ def test_run_research_memo_with_research_state_applies_proposals(tmp_path):
 
     manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
     assert manifest["research_state"]["enabled"] is True
+    assert manifest["research_state"]["rolled_back"] is False
     assert manifest["research_state"]["apply_counts"]["applied"] == 1
     assert manifest["research_state"]["integrity_errors"] == []
+
+
+def test_run_research_memo_rolls_back_research_state_on_integrity_failure(tmp_path, monkeypatch):
+    manual = tmp_path / "manual.md"
+    manual.write_text("# Manual packet\n\nGuyana production growth notes.", encoding="utf-8")
+    final_source = tmp_path / "harness_final.md"
+    final_source.write_text("# Final memo\n\nUse S1.", encoding="utf-8")
+
+    def fake_sec(*args, **kwargs):
+        return []
+
+    def failing_provider(*args, **kwargs):
+        raise RuntimeError("offline")
+
+    def fake_harness(request: HarnessRequest) -> HarnessResponse:
+        proposal_path = tmp_path / "vault" / "companies" / "XOM" / "research" / "memos" / "rollback-run" / "proposals.jsonl"
+        proposal_path.write_text(
+            json.dumps(
+                {
+                    "proposal_id": "p-state-rollback",
+                    "type": "propose_section_update",
+                    "section_key": "guyana_growth_engine",
+                    "action": "create",
+                    "body_markdown": "This update should be rolled back after integrity failure [S1].",
+                    "evidence_keys": ["S1"],
+                    "rationale": "Manual packet introduced a durable Guyana growth topic.",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return HarnessResponse(
+            status="completed",
+            stop_reason="done",
+            run_root=str(tmp_path / "run"),
+            root_agent_path=str(tmp_path / "run" / "agents" / "root"),
+            final_report_path=str(final_source),
+        )
+
+    monkeypatch.setattr("src.research_platform.memo_run.validate_state_integrity", lambda *args, **kwargs: ["forced integrity failure"])
+
+    result = run_research_memo(
+        user_prompt="Build an investment memo for XOM.",
+        ticker="xom",
+        company_name="Exxon Mobil",
+        manual_files=[str(manual)],
+        vault_root=tmp_path / "vault",
+        run_id="rollback-run",
+        adapters=SourceAdapters(fake_sec, failing_provider, failing_provider, failing_provider),
+        run_harness_fn=fake_harness,
+        enable_research_state=True,
+    )
+
+    assert result.status == "failed"
+    assert any("rolled back" in error for error in result.errors)
+    paths = state_paths(tmp_path / "vault", "XOM")
+    state_markdown = paths.research_state.read_text(encoding="utf-8")
+    snapshot_markdown = (Path(result.state_snapshot_path) / "research_state.md").read_text(encoding="utf-8")
+    assert state_markdown == snapshot_markdown
+    assert "This update should be rolled back" not in state_markdown
+
+    manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
+    assert manifest["research_state"]["rolled_back"] is True
+    assert manifest["research_state"]["integrity_errors"] == ["forced integrity failure"]

@@ -23,7 +23,7 @@ from src.research_platform.state.storage import (
     parse_markdown_sections,
     read_proposals,
     read_state_sidecars,
-    state_paths,
+    state_file_lock,
     write_json_model,
     write_jsonl,
     write_research_state,
@@ -204,37 +204,44 @@ def apply_proposals(
 ) -> ApplyResult:
     """Apply a run's proposals to durable state and append audit artifacts."""
 
-    paths = initialize_state_folder(vault_root, ticker)
     proposals = read_proposals(proposals_path)
-    _, evidence_index, _, _, _ = read_state_sidecars(paths, ticker)
     result = ApplyResult()
     accepted_records: list[dict[str, object]] = []
-    markdown = paths.research_state.read_text(encoding="utf-8")
 
-    for index, proposal in enumerate(proposals, start=1):
-        decision = decide_proposal(proposal, evidence_index=evidence_index, proposal_number=index)
-        result.decisions.append(decision)
-        if decision.decision == "rejected":
-            result.rejected_count += 1
-            append_jsonl(paths.diff_log, {"run_id": run_id, "proposal": proposal.model_dump(mode="json"), "decision": decision.model_dump(mode="json")})
-            continue
-        if decision.decision == "revised":
-            result.revised_count += 1
-            result.applied_count += 1
-        else:
-            result.applied_count += 1
+    with state_file_lock(vault_root, ticker) as locked_paths:
+        paths = initialize_state_folder(vault_root, ticker)
+        if paths != locked_paths:
+            raise RuntimeError("state lock path mismatch")
+        _, evidence_index, _, _, _ = read_state_sidecars(paths, ticker)
+        markdown = paths.research_state.read_text(encoding="utf-8")
 
-        if proposal.type == "propose_section_update":
-            markdown = _apply_section_update(markdown, proposal)
-        elif proposal.type != "propose_no_op":
-            _apply_sidecar_update(paths, proposal, ticker=ticker)
-            markdown = _refresh_derived_sections(markdown, paths, ticker)
+        for index, proposal in enumerate(proposals, start=1):
+            decision = decide_proposal(proposal, evidence_index=evidence_index, proposal_number=index)
+            result.decisions.append(decision)
+            if decision.decision == "rejected":
+                result.rejected_count += 1
+                append_jsonl(
+                    paths.diff_log,
+                    {"run_id": run_id, "proposal": proposal.model_dump(mode="json"), "decision": decision.model_dump(mode="json")},
+                )
+                continue
+            if decision.decision == "revised":
+                result.revised_count += 1
+                result.applied_count += 1
+            else:
+                result.applied_count += 1
 
-        record = {"run_id": run_id, "proposal": proposal.model_dump(mode="json"), "decision": decision.model_dump(mode="json")}
-        accepted_records.append(record)
-        append_jsonl(paths.diff_log, record)
+            if proposal.type == "propose_section_update":
+                markdown = _apply_section_update(markdown, proposal)
+            elif proposal.type != "propose_no_op":
+                _apply_sidecar_update(paths, proposal, ticker=ticker)
+                markdown = _refresh_derived_sections(markdown, paths, ticker)
 
-    write_research_state(paths, markdown, ticker=ticker, run_id=run_id)
-    if accepted_changes_path is not None:
-        write_jsonl(accepted_changes_path, accepted_records)
+            record = {"run_id": run_id, "proposal": proposal.model_dump(mode="json"), "decision": decision.model_dump(mode="json")}
+            accepted_records.append(record)
+            append_jsonl(paths.diff_log, record)
+
+        write_research_state(paths, markdown, ticker=ticker, run_id=run_id)
+        if accepted_changes_path is not None:
+            write_jsonl(accepted_changes_path, accepted_records)
     return result

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
 import shutil
-from typing import Iterable, TypeVar
+from typing import Iterable, Iterator, TypeVar
 
+from filelock import FileLock
 from pydantic import BaseModel
 
 from src.research_platform.state.contracts import (
@@ -71,6 +73,10 @@ class StatePaths:
     def diff_log(self) -> Path:
         return self.root / "diff_log.jsonl"
 
+    @property
+    def lock_file(self) -> Path:
+        return self.root / ".state.lock"
+
 
 def state_root(vault_root: str | Path, ticker: str) -> Path:
     return Path(vault_root) / "companies" / ticker.upper() / "research" / "state"
@@ -78,6 +84,17 @@ def state_root(vault_root: str | Path, ticker: str) -> Path:
 
 def state_paths(vault_root: str | Path, ticker: str) -> StatePaths:
     return StatePaths(state_root(vault_root, ticker))
+
+
+@contextmanager
+def state_file_lock(vault_root: str | Path, ticker: str, *, timeout: float = 30.0) -> Iterator[StatePaths]:
+    """Serialize writes to one ticker's durable research state files."""
+
+    paths = state_paths(vault_root, ticker)
+    paths.root.mkdir(parents=True, exist_ok=True)
+    lock = FileLock(paths.lock_file, timeout=timeout)
+    with lock:
+        yield paths
 
 
 def default_research_state_markdown(ticker: str) -> str:

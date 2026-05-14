@@ -33,7 +33,7 @@ from src.vault.ingest import ingest_file, ingest_text
 from src.research_platform.state.apply import apply_proposals
 from src.research_platform.state.contracts import EvidenceIndex
 from src.research_platform.state.lint import validate_state_integrity
-from src.research_platform.state.storage import initialize_state_folder, read_json_model, snapshot_state, write_json_model
+from src.research_platform.state.storage import initialize_state_folder, read_json_model, restore_state_snapshot, snapshot_state, write_json_model
 from src.vault.paths import default_vault_paths
 from src.vault.store import VaultStore
 
@@ -563,8 +563,9 @@ def _research_state_manifest(
     state_paths: dict[str, str] | None = None,
     apply_counts: dict[str, int] | None = None,
     integrity_errors: list[str] | None = None,
+    rolled_back: bool = False,
 ) -> dict[str, Any]:
-    payload: dict[str, Any] = {"enabled": enabled}
+    payload: dict[str, Any] = {"enabled": enabled, "rolled_back": rolled_back}
     if state_paths:
         payload.update(state_paths)
     if apply_counts:
@@ -958,8 +959,12 @@ def run_research_memo(
             accepted_changes_path=paths["accepted_changes"],
         )
         integrity_errors = validate_state_integrity(root, ticker_norm)
+        rolled_back = False
         if integrity_errors:
             errors.extend(f"Research state integrity: {item}" for item in integrity_errors)
+            restore_state_snapshot(research_state_paths, paths["state_snapshot"])
+            rolled_back = True
+            errors.append("Research state rolled back to pre-run snapshot after integrity failure.")
             status = "failed" if status == "succeeded" else status
         research_state_meta = _research_state_manifest(
             enabled=True,
@@ -975,6 +980,7 @@ def run_research_memo(
                 "revised": apply_result.revised_count,
             },
             integrity_errors=integrity_errors,
+            rolled_back=rolled_back,
         )
 
     _write_json(paths["status"], _status_payload(run_id, status, warnings=warnings, errors=errors, research_state=research_state_meta))
