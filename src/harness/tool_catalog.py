@@ -84,7 +84,7 @@ def harness_tool_definitions() -> dict[str, dict[str, Any]]:
             },
         },
         "write": {
-            "description": "Write one file under this agent's publish/ or scratch/ tree.",
+            "description": "Write one file under this agent's publish/ or scratch/ tree, or to an exact external file path explicitly approved in the task instructions.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -95,7 +95,7 @@ def harness_tool_definitions() -> dict[str, dict[str, Any]]:
             },
         },
         "edit": {
-            "description": "Apply one anchored text edit to a file under this agent's publish/ or scratch/ tree.",
+            "description": "Apply one anchored text edit to a file under this agent's publish/ or scratch/ tree, or to an exact external file path explicitly approved in the task instructions.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -112,7 +112,7 @@ def harness_tool_definitions() -> dict[str, dict[str, Any]]:
             },
         },
         "patch": {
-            "description": "Apply one single-file patch to an existing publish/ or scratch/ file. Example:\n*** Begin Patch\n*** Update File: publish/final.md\n@@\n-old line\n+new line\n*** End Patch",
+            "description": "Apply one single-file patch to an existing publish/ or scratch/ file, or to an exact external file path explicitly approved in the task instructions. Example:\n*** Begin Patch\n*** Update File: publish/final.md\n@@\n-old line\n+new line\n*** End Patch",
             "input_schema": {
                 "type": "object",
                 "properties": {

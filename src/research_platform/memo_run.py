@@ -547,7 +547,7 @@ Write the final memo to `publish/final.md` as usual. Separately, write durable s
 
 `{proposals_path}`
 
-The proposal file must be valid JSONL: one JSON object per line, no markdown fences, no trailing comments. If there are no durable state updates, write an empty file at that exact path.
+The proposal file must be valid JSONL: one JSON object per line, no markdown fences, no trailing comments. Use `write(path="{proposals_path}", content=...)` with that exact path. Do not write this file under `publish/` or `scratch/`, and do not substitute a shorter relative path. If there are no durable state updates, write an empty file at that exact path.
 
 ## When to propose durable state updates
 

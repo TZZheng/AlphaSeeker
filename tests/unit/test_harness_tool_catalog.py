@@ -15,7 +15,7 @@ def test_harness_base_tool_schema_is_available_by_name() -> None:
     assert specs == [
         {
             "name": "write",
-            "description": "Write one file under this agent's publish/ or scratch/ tree.",
+            "description": "Write one file under this agent's publish/ or scratch/ tree, or to an exact external file path explicitly approved in the task instructions.",
             "input_schema": harness_tool_definitions()["write"]["input_schema"],
         }
     ]
