@@ -168,26 +168,6 @@ def test_research_tools_markdown_exposes_enabled_domain_skills() -> None:
     assert "fetch_futures_curve" in text
 
 
-def test_evaluator_preset_gets_full_enabled_skill_set() -> None:
-    registry = build_skill_registry()
-    skills = visible_skills_for_preset(
-        preset="evaluator",
-        available_skills=get_skills_for_packs(registry, ["core", "equity"]),
-    )
-
-    names = {spec.name for spec in skills}
-
-    assert "read" in names
-    assert "grep" in names
-    assert "get_current_datetime" in names
-    assert "search_web" in names
-    assert "search_news" in names
-    assert "read_web_pages" in names
-    assert "condense_context" in names
-    assert "fetch_company_profile" in names
-    assert "fetch_financials" in names
-
-
 def test_invalid_skill_pack_is_rejected() -> None:
     with pytest.raises(ValueError):
         HarnessRequest(user_prompt="Analyze AAPL", available_skill_packs=["core", "illegal"])
@@ -614,13 +594,12 @@ def test_child_completion_does_not_require_publish_final(
     assert _publish_outputs_satisfy_completion(str(run_root), "agent_child") is True
 
 
-def test_budget_snapshot_default_does_not_include_time(
+def test_budget_snapshot_time_lines_require_explicit_flag(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Default build_agent_prompt_bundle must NOT include time lines."""
     run_root, agent_id, request = _create_workspace(monkeypatch, tmp_path, preset="research")
-    bundle = build_agent_prompt_bundle(
+    default_bundle = build_agent_prompt_bundle(
         request=request,
         run_root=str(run_root),
         agent_id=agent_id,
@@ -629,18 +608,7 @@ def test_budget_snapshot_default_does_not_include_time(
         available_tools=default_tool_allowlist("research"),
         available_skills=[],
     )
-    user_text = " ".join(s.content for s in bundle.user_sections)
-    assert "remaining run time" not in user_text
-    assert "remaining agent time" not in user_text
-
-
-def test_budget_snapshot_with_show_budget_time_includes_time(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Explicit show_budget_time=True must include both time lines."""
-    run_root, agent_id, request = _create_workspace(monkeypatch, tmp_path, preset="research")
-    bundle = build_agent_prompt_bundle(
+    explicit_bundle = build_agent_prompt_bundle(
         request=request,
         run_root=str(run_root),
         agent_id=agent_id,
@@ -650,6 +618,10 @@ def test_budget_snapshot_with_show_budget_time_includes_time(
         available_skills=[],
         show_budget_time=True,
     )
-    user_text = " ".join(s.content for s in bundle.user_sections)
-    assert "remaining run time:" in user_text
-    assert "remaining agent time:" in user_text
+    default_text = " ".join(section.content for section in default_bundle.user_sections)
+    explicit_text = " ".join(section.content for section in explicit_bundle.user_sections)
+
+    assert "remaining run time" not in default_text
+    assert "remaining agent time" not in default_text
+    assert "remaining run time:" in explicit_text
+    assert "remaining agent time:" in explicit_text

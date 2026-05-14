@@ -303,8 +303,14 @@ def test_evaluator_preset_sees_full_enabled_skill_set() -> None:
     visible_names = {spec.name for spec in visible_skills_for_preset(preset="evaluator", available_skills=skills)}
 
     assert "read" in visible_names
+    assert "grep" in visible_names
+    assert "get_current_datetime" in visible_names
     assert "search_web" in visible_names
     assert "search_news" in visible_names
+    assert "read_web_pages" in visible_names
+    assert "condense_context" in visible_names
+    assert "fetch_company_profile" in visible_names
+    assert "fetch_financials" in visible_names
     assert "fetch_market_data" in visible_names
     assert "fetch_macro_indicators" in visible_names
     assert "fetch_eia_inventory" in visible_names
