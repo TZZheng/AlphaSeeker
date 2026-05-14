@@ -62,7 +62,7 @@ def test_run_vault_backed_memo_plumbs_research_state_as_context_file(monkeypatch
     assert request.run_id == "memo-test"
     assert request.wall_clock_budget_seconds == 123
     assert request.context_files == [str(tmp_path / "llm_research_state.md")]
-    assert request.available_skill_packs == ["core", "equity", "macro", "commodity", "vault"]
+    assert request.available_skill_packs == ["core", "equity", "macro", "commodity"]
     assert "Build an investment memo for XOM." in request.user_prompt
     assert "llm_research_state.md" in request.user_prompt
     assert "# XOM research state" not in request.user_prompt
@@ -87,6 +87,8 @@ def test_harness_request_root_context_files_are_copied_and_listed(monkeypatch, t
     paths = agent_workspace_paths(run_root, root_agent_id)
     copied = paths["context_root"] / "llm_research_state.md"
     assert copied.exists()
+    assert copied.read_text(encoding="utf-8") == "# XOM research state"
+    context_file.write_text("# mutated after workspace creation", encoding="utf-8")
     assert copied.read_text(encoding="utf-8") == "# XOM research state"
     snapshot = _render_runtime_snapshot(request=request, run_root=str(run_root), agent_id=root_agent_id)
     assert "llm_research_state.md" in snapshot

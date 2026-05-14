@@ -288,7 +288,7 @@ def create_agent_workspace(
             if not source.exists() or not source.is_file():
                 continue
             dest = _unique_destination(paths["context_root"], source.name)
-            _copy_or_link(source, dest)
+            _copy_context_file(source, dest)
 
     append_agent_record(
         run_root,
@@ -326,12 +326,11 @@ def _unique_destination(directory: Path, name: str) -> Path:
     return candidate
 
 
-def _copy_or_link(source: Path, dest: Path) -> None:
+def _copy_context_file(source: Path, dest: Path) -> None:
+    """Copy context attachments as immutable run snapshots."""
+
     dest.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.link(source, dest)
-    except OSError:
-        shutil.copy2(source, dest)
+    shutil.copy2(source, dest)
 
 
 def append_agent_record(run_root: str | Path, record: AgentRecord) -> None:

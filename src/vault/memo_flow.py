@@ -11,7 +11,7 @@ from src.harness import HarnessRequest, HarnessResponse, run_harness
 from src.vault.ingest import ingest_file
 from src.vault.synthesis import synthesize_company_research_state
 
-DEFAULT_SKILL_PACKS = ["core", "equity", "macro", "commodity", "vault"]
+DEFAULT_SKILL_PACKS = ["core", "equity", "macro", "commodity"]
 
 
 def build_vault_backed_prompt(user_prompt: str, *, ticker: str, research_state_path: str) -> str:
