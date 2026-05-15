@@ -43,7 +43,7 @@ The goal is not to beat v8.1 memo quality on the first try. The goal is to learn
 The human sends the orchestrator a message like:
 
 ```text
-Please coordinate a first TSLA research memo. The raw landing zone is vault/companies/TSLA/team/raw/ and it may be empty at the start. Ask the source maintainer to gather or identify necessary raw material, ask the writer for a draft, ask the reviewer to challenge it, and publish the accepted result to vault/companies/TSLA/team/published/latest.md.
+Please coordinate a first TSLA research memo. The raw landing zone is vault/companies/TSLA/team/raw/ and it may be empty at the start. Ask the source maintainer to gather or identify necessary raw material, ask the writer for a draft, ask the reviewer to challenge it, then as orchestrator cold-read the finished artifact against this original objective before publishing to vault/companies/TSLA/team/published/latest.md.
 ```
 
 ## Expected team flow
@@ -55,8 +55,8 @@ Please coordinate a first TSLA research memo. The raw landing zone is vault/comp
 5. Writer mails reviewer with the draft or draft path.
 6. Reviewer checks the draft, asks source maintainer for support if needed, and mails issues to writer.
 7. Writer revises or dissents.
-8. Reviewer accepts, accepts with caveats, or escalates to orchestrator.
-9. Accepted output is written to `published/latest.md` and optionally copied to `published/versions/<date>.md`.
+8. Reviewer sends discovery feedback: material issues, strengths, and whether another cycle could materially improve the conclusion. Reviewer does not authorize publication and does not use `accept with caveats` as a verdict.
+9. Orchestrator cold-reads the finished artifact against the original objective in natural language. If another cycle could materially improve a decisive gap, orchestrator routes it; otherwise final output is written to `published/latest.md` and optionally copied to `published/versions/<date>.md` with limitations/confidence stated plainly.
 10. Orchestrator reports back to the human.
 
 ## What to observe
@@ -68,6 +68,8 @@ Record observations after the run:
 - Did writer/reviewer communication work naturally through mail?
 - Did anyone need a prescribed workspace, or did each avatar self-organize?
 - Was `published/latest.md` enough as the human-facing contract?
+- Did the orchestrator cold-read the final artifact against the original objective rather than relying on reviewer approval?
+- Did anyone use `accept with caveats` / `yes with caveats` to launder an unmet objective into publication?
 - Which failures would be fixed by prompts, and which require tools?
 
 ## Escalation rule

@@ -49,7 +49,7 @@ These are not already expressed by LingTai system level and are legitimate in Al
 - Reviewer discovery stance:
   - demanding plausible reader, fresh artifact expectations, proposition-to-artifact map, hedge/softener artifact-gap scan, one-more-cycle artifact question.
 - Two-axis verdict:
-  - `criteria-satisfied` vs `criteria-sufficient` is domain/task-control logic, not generic LingTai behavior.
+  - The old reviewer-owned `criteria-satisfied` / `criteria-sufficient` split has been retired in favor of orchestrator-owned natural-language cold-read judgment; this remains domain/task-control logic, not generic LingTai behavior.
 
 ## Assessment of commit `26574b9 Add reviewer discovery stance`
 

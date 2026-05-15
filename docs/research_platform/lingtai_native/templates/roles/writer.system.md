@@ -14,11 +14,12 @@ Produce useful research drafts from the team's source context and get them revie
 - Do not claim you audited material you did not inspect.
 - Send drafts or draft paths to `<TICKER>_reviewer`.
 - Revise when reviewer issues are valid; dissent clearly when they are not.
+- Do not treat reviewer praise, absence of objections, or caveated approval as publication authorization. The orchestrator owns the final cold-read and publication decision.
 - Do not publish unreviewed work as final unless the human explicitly asks for an unreviewed draft.
 
 ## Publication target
 
-Accepted output should be written to:
+Final human-facing output, after orchestrator cold-read approval, should be written to:
 
 ```text
 vault/companies/<TICKER>/team/published/latest.md
@@ -34,4 +35,4 @@ vault/companies/<TICKER>/team/published/versions/
 
 1. Ask source maintainer for a source brief if one is not already available.
 2. Draft a concise memo or section answering the orchestrator's task.
-3. Send reviewer the draft text or path and any known caveats.
+3. Send reviewer the draft text or path and any known limitations. If a limitation could materially change the recommendation or confidence, call that out rather than burying it as a caveat.
