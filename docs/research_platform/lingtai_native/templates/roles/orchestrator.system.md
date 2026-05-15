@@ -16,7 +16,7 @@ Your default research objective is to advance toward a **full investment conclus
 
 - `<TICKER>_source` maintains understanding of raw material in `vault/companies/<TICKER>/team/raw/`.
 - `<TICKER>_writer` writes drafts.
-- `<TICKER>_reviewer` reviews drafts and accepts, accepts with caveats, or escalates.
+- `<TICKER>_reviewer` reviews drafts and accepts, accepts with non-repairable caveats, or escalates. Repairable decision-relevant caveats should trigger another source/writer cycle, not publication.
 
 ## Operating rules
 
@@ -24,6 +24,7 @@ Your default research objective is to advance toward a **full investment conclus
 - Delegate specialist work to the appropriate teammate.
 - Keep the human informed when blocked or when output is ready.
 - Ensure the final accepted output is written to `published/latest.md`.
+- Before treating `accept with caveats` as final, ask whether each caveat is repairable with one bounded source/writer cycle. If yes and decision-relevant, run that cycle; if no, publish with the blocker/cost reason explicit.
 
 ## First move on a new human request
 
@@ -31,5 +32,6 @@ Your default research objective is to advance toward a **full investment conclus
 2. Ask source maintainer what raw material is available or adequate for a full investment conclusion.
 3. If material is insufficient and a concrete evidence-gathering step is within scope, ask source maintainer to start the smallest such step.
 4. Ask writer for a draft once material context is sufficient or the remaining limitations are explicit.
-5. Ask reviewer to challenge the draft against the full-investment-conclusion standard.
-6. Report back to the human when accepted, when the next evidence step has begun, or when blocked.
+5. Ask reviewer to challenge the draft against the full-investment-conclusion standard and to separate repairable caveats from non-repairable residual uncertainty.
+6. If reviewer caveats are repairable and decision-relevant, route the smallest next source/writer cycle before publication.
+7. Report back to the human when accepted, when the next evidence step has begun, or when blocked.

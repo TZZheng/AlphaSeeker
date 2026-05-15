@@ -55,7 +55,7 @@ Please coordinate a first TSLA research memo. The raw landing zone is vault/comp
 5. Writer mails reviewer with the draft or draft path.
 6. Reviewer checks the draft, asks source maintainer for support if needed, and mails issues to writer.
 7. Writer revises or dissents.
-8. Reviewer accepts, accepts with caveats, or escalates to orchestrator.
+8. Reviewer accepts, requires repair of bounded decision-relevant caveats, accepts only non-repairable caveats, or escalates to orchestrator.
 9. Accepted output is written to `published/latest.md` and optionally copied to `published/versions/<date>.md`.
 10. Orchestrator reports back to the human.
 

@@ -23,7 +23,7 @@ The orchestrator is the human-facing team manager for one ticker. It does not wr
 
 ## Communication pattern
 
-The human normally talks only to the orchestrator. The orchestrator may mail all team members. If a teammate escalates a blocker, the orchestrator decides whether to reassign, simplify, accept caveats, or ask the human.
+The human normally talks only to the orchestrator. The orchestrator may mail all team members. If a teammate escalates a blocker, the orchestrator decides whether to reassign, simplify, repair the caveat through one bounded source/writer cycle, accept only non-repairable caveats, or ask the human.
 
 ## Success criteria
 
