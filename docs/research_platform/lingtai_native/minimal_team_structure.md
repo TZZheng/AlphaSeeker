@@ -14,7 +14,7 @@ This is the whole v0 filesystem contract.
 
 ## `raw/`
 
-`raw/` is the material pool. It is intentionally unstructured.
+`raw/` is the material landing zone and shared shelf. It is intentionally unstructured and may start empty.
 
 Examples:
 
@@ -28,9 +28,9 @@ raw/
   notes_from_manual_source.md
 ```
 
-There is no required material ID scheme, no `meta.json`, no evidence-map schema, and no required directory layout. The source maintainer may create folders or notes inside `raw/` if that helps, but AlphaSeeker v0 does not require it.
+There is no required material ID scheme, no `meta.json`, no evidence-map schema, and no required directory layout. The source maintainer may gather files into `raw/`, create folders, or add notes if that helps, but AlphaSeeker v0 does not require it.
 
-This avoids premature boundary decisions such as "what counts as R0001 vs. R0002?" Raw material is simply raw material.
+This avoids premature boundary decisions such as "what counts as R0001 vs. R0002?" Raw material is simply raw material, and the first run may begin with none of it preloaded.
 
 ## `published/`
 

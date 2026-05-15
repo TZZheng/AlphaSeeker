@@ -18,7 +18,7 @@ vault/companies/<TICKER>/team/raw/
 vault/companies/<TICKER>/team/published/
 ```
 
-`raw/` contains unstructured source material. `published/` contains human-facing accepted output.
+`raw/` is the unstructured landing zone for source material gathered by the source maintainer; it may start empty. `published/` contains human-facing accepted output.
 
 All intermediate reasoning, requests, logs, notes, and coordination should use LingTai mail, pad, memory, and each avatar's own working practices.
 

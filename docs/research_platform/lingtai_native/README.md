@@ -4,7 +4,7 @@ This folder defines the first minimal design for running AlphaSeeker research as
 
 The v0 contract is intentionally small:
 
-> AlphaSeeker provides raw material and a human-facing published folder. LingTai avatars do all intermediate reasoning, communication, logging, memory, and organization themselves.
+> AlphaSeeker provides a raw-material landing zone and a human-facing published folder. LingTai avatars do all intermediate reasoning, communication, logging, memory, and organization themselves.
 
 In v0 there are **no new tools**, **no panel**, **no setup CLI**, and **no in-process AlphaSeeker team runtime**. The goal is to manually run one ticker team using LingTai's existing primitives and learn what actually needs to be formalized later.
 

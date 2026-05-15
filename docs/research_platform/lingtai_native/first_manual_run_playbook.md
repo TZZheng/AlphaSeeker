@@ -26,7 +26,7 @@ The goal is not to beat v8.1 memo quality on the first try. The goal is to learn
 
    Or copy `examples/minimal_team_skeleton/`.
 
-3. Put any available source material into `raw/`. Do not over-organize it. A few filings, snapshots, transcripts, or manual notes are enough.
+3. `raw/` may start empty. It is the landing zone where the source maintainer will place raw material it gathers during the run. If you already have local filings, snapshots, transcripts, or manual notes, you may put them there, but preloading raw material is not required.
 4. Create four LingTai avatars using the existing LingTai workflow:
 
    ```text
@@ -43,13 +43,13 @@ The goal is not to beat v8.1 memo quality on the first try. The goal is to learn
 The human sends the orchestrator a message like:
 
 ```text
-Please coordinate a first TSLA research memo using the raw material in vault/companies/TSLA/team/raw/. Keep the process simple. Ask the source maintainer for source help, ask the writer for a draft, ask the reviewer to challenge it, and publish the accepted result to vault/companies/TSLA/team/published/latest.md.
+Please coordinate a first TSLA research memo. The raw landing zone is vault/companies/TSLA/team/raw/ and it may be empty at the start. Ask the source maintainer to gather or identify necessary raw material, ask the writer for a draft, ask the reviewer to challenge it, and publish the accepted result to vault/companies/TSLA/team/published/latest.md.
 ```
 
 ## Expected team flow
 
-1. Orchestrator reads the policy and asks source maintainer to inspect `raw/`.
-2. Source maintainer explores `raw/`, forms a view of what material exists, and mails writer/orchestrator with a source brief.
+1. Orchestrator reads the policy and asks source maintainer to inspect `raw/` and gather missing material if needed.
+2. Source maintainer explores `raw/`, gathers/records useful raw material if the directory is empty or incomplete, and mails writer/orchestrator with a source brief.
 3. Orchestrator asks writer to draft.
 4. Writer drafts using the source brief and raw files as needed.
 5. Writer mails reviewer with the draft or draft path.

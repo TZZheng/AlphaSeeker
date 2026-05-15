@@ -68,7 +68,7 @@ vault/companies/<TICKER>/team/
   published/
 ```
 
-`raw/` is unstructured source material. `published/` is the human-facing output surface.
+`raw/` is the unstructured landing zone for source material gathered by the source maintainer; it may start empty. `published/` is the human-facing output surface.
 
 Everything else belongs to LingTai unless experience proves otherwise.
 
