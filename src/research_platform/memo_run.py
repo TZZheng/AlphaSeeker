@@ -23,6 +23,21 @@ from pydantic import BaseModel, ConfigDict, Field
 from src.harness.context_types import Caveat, Citation, MemoContextPackage, OutputStatus
 from src.harness.runtime import run_harness
 from src.harness.types import HarnessRequest, HarnessResponse
+from src.research_platform.memo_artifacts import MemoArtifactPaths, MemoArtifactSet, collect_memo_artifacts, copy_product_artifacts
+from src.research_platform.memo_evaluator import (
+    EvaluatorEvaluationRef,
+    JudgeFn as MemoEvaluatorJudgeFn,
+    build_evaluator_inputs,
+    run_and_write_memo_evaluation,
+    write_evaluator_evaluation,
+)
+from src.research_platform.memo_status import (
+    DeliverableStatus,
+    RunStatus,
+    SplitMemoStatus,
+    StateStatus,
+    derive_split_status,
+)
 from src.retrieval.types import RetrievalBatch, RetrievalRequest, ResearchTask, SourceRecord
 from src.tools.equity.company_profile import fetch_company_profile
 from src.tools.equity.financials import fetch_financial_metrics
@@ -73,6 +88,13 @@ class ResearchPlatformRunResult(BaseModel):
     state_snapshot_path: str | None = None
     proposals_path: str | None = None
     accepted_changes_path: str | None = None
+    raw_harness_status: str | None = None
+    run_status: RunStatus | None = None
+    state_status: StateStatus | None = None
+    deliverable_status: DeliverableStatus | None = None
+    status_reasons: list[dict[str, Any]] = Field(default_factory=list)
+    artifact_paths: dict[str, Any] | None = None
+    evaluator_evaluation: dict[str, Any] | None = None
     harness_response: dict[str, Any] | None = None
     warnings: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
@@ -391,8 +413,8 @@ def assemble_memo_prompt(
     rendered = strict_render_template(template, values)
     if research_state_block:
         rendered = rendered.rstrip() + "\n\n" + research_state_block.strip() + "\n"
-    if len(rendered) > 32_000:
-        raise ValueError("Assembled memo prompt exceeds v1 32KB inline prompt cap")
+    if len(rendered) > 65_536:
+        raise ValueError("Assembled memo prompt exceeds v8.1 64KB inline prompt cap")
     return rendered
 
 
@@ -408,6 +430,9 @@ def _status_payload(
     warnings: list[str],
     errors: list[str],
     research_state: dict[str, Any] | None = None,
+    split_status: SplitMemoStatus | None = None,
+    artifact_paths: MemoArtifactPaths | None = None,
+    evaluator_evaluation: EvaluatorEvaluationRef | None = None,
 ) -> dict[str, Any]:
     payload = {
         "run_id": run_id,
@@ -416,6 +441,20 @@ def _status_payload(
         "warnings": warnings,
         "errors": errors,
     }
+    if split_status is not None:
+        payload.update(
+            {
+                "raw_harness_status": split_status.raw_harness_status,
+                "run_status": split_status.run_status,
+                "state_status": split_status.state_status,
+                "deliverable_status": split_status.deliverable_status,
+                "status_reasons": [reason.model_dump(mode="json") for reason in split_status.status_reasons],
+            }
+        )
+    if artifact_paths is not None:
+        payload["artifact_paths"] = artifact_paths.model_dump(mode="json")
+    if evaluator_evaluation is not None:
+        payload["evaluator_evaluation"] = evaluator_evaluation.model_dump(mode="json")
     if research_state is not None:
         payload["research_state"] = research_state
     return payload
@@ -436,6 +475,9 @@ def _manifest_payload(
     warnings: list[str],
     errors: list[str],
     research_state: dict[str, Any] | None = None,
+    split_status: SplitMemoStatus | None = None,
+    artifact_paths: MemoArtifactPaths | None = None,
+    evaluator_evaluation: EvaluatorEvaluationRef | None = None,
 ) -> dict[str, Any]:
     payload = {
         "run_id": run_id,
@@ -452,6 +494,20 @@ def _manifest_payload(
         "warnings": warnings,
         "errors": errors,
     }
+    if split_status is not None:
+        payload.update(
+            {
+                "raw_harness_status": split_status.raw_harness_status,
+                "run_status": split_status.run_status,
+                "state_status": split_status.state_status,
+                "deliverable_status": split_status.deliverable_status,
+                "status_reasons": [reason.model_dump(mode="json") for reason in split_status.status_reasons],
+            }
+        )
+    if artifact_paths is not None:
+        payload["artifact_paths"] = artifact_paths.model_dump(mode="json")
+    if evaluator_evaluation is not None:
+        payload["evaluator_evaluation"] = evaluator_evaluation.model_dump(mode="json")
     if research_state is not None:
         payload["research_state"] = research_state
     return payload
@@ -490,17 +546,6 @@ def _ingest_vendor_file(
         metadata=metadata or {},
     )
     return doc, record
-
-
-def _copy_final(response: HarnessResponse, destination: Path) -> str | None:
-    if not response.final_report_path:
-        return None
-    source = Path(response.final_report_path)
-    if not source.exists():
-        return None
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, destination)
-    return str(destination)
 
 
 def _evidence_index_from_citations(
@@ -729,6 +774,8 @@ def run_research_memo(
     run_harness_fn: Callable[[HarnessRequest], HarnessResponse] | None = None,
     enable_research_state: bool = False,
     enable_research_state_v33: bool = False,
+    memo_evaluator_judge_fn: MemoEvaluatorJudgeFn | None = None,
+    memo_evaluator_model_name: str | None = None,
 ) -> ResearchPlatformRunResult:
     """Run the research-platform memo pipeline.
 
@@ -1047,8 +1094,31 @@ def run_research_memo(
 
     if not has_required:
         errors.append("No required source was available: provide a manual file or retrieve at least one SEC filing.")
-        status: OutputStatus = "failed"
-        _write_json(paths["status"], _status_payload(run_id, status, warnings=warnings, errors=errors, research_state=research_state_meta))
+        empty_artifacts = MemoArtifactSet(paths=MemoArtifactPaths(), has_usable_final=False, has_required_artifacts=False, missing_required=["final.md", "source_use_table.md"], optional_present=[], reasons=[])
+        evaluator_ref = write_evaluator_evaluation(
+            memo_dir=paths["memo_dir"],
+            ref=EvaluatorEvaluationRef(status="missing", reason=["harness was not run because no required source was available"], verdict=None),
+        )
+        split_status = derive_split_status(
+            harness_status=None,
+            artifacts=empty_artifacts,
+            research_state_meta=research_state_meta,
+            evaluator_ref=evaluator_ref,
+        )
+        status: OutputStatus = split_status.legacy_status
+        _write_json(
+            paths["status"],
+            _status_payload(
+                run_id,
+                status,
+                warnings=warnings,
+                errors=errors,
+                research_state=research_state_meta,
+                split_status=split_status,
+                artifact_paths=empty_artifacts.paths,
+                evaluator_evaluation=evaluator_ref,
+            ),
+        )
         _write_json(
             paths["manifest"],
             _manifest_payload(
@@ -1065,6 +1135,9 @@ def run_research_memo(
                 warnings=warnings,
                 errors=errors,
                 research_state=research_state_meta,
+                split_status=split_status,
+                artifact_paths=empty_artifacts.paths,
+                evaluator_evaluation=evaluator_ref,
             ),
         )
         return ResearchPlatformRunResult(
@@ -1081,6 +1154,13 @@ def run_research_memo(
             state_snapshot_path=str(paths["state_snapshot"]) if enable_research_state else None,
             proposals_path=str(paths["proposals"]) if enable_research_state else None,
             accepted_changes_path=str(paths["accepted_changes"]) if enable_research_state else None,
+            raw_harness_status=None,
+            run_status=split_status.run_status,
+            state_status=split_status.state_status,
+            deliverable_status=split_status.deliverable_status,
+            status_reasons=[reason.model_dump(mode="json") for reason in split_status.status_reasons],
+            artifact_paths=empty_artifacts.paths.model_dump(mode="json"),
+            evaluator_evaluation=evaluator_ref.model_dump(mode="json"),
             warnings=warnings,
             errors=errors,
         )
@@ -1126,15 +1206,20 @@ def run_research_memo(
         ),
     )
     harness_response = (run_harness_fn or run_harness)(harness_request)
-    final_path = _copy_final(harness_response, paths["final"])
-    if harness_response.status == "completed" and final_path:
-        status = "succeeded"
-    elif final_path:
-        status = "partial"
-        warnings.append(f"Harness ended with status {harness_response.status}; final was preserved.")
-    else:
-        status = "failed"
-        errors.append(harness_response.error or f"Harness ended with status {harness_response.status} without final.md")
+    artifacts = collect_memo_artifacts(
+        run_root=harness_response.run_root or "",
+        root_agent_path=harness_response.root_agent_path,
+    )
+    artifacts = copy_product_artifacts(artifacts=artifacts, memo_dir=paths["memo_dir"])
+    final_path = artifacts.paths.product_final_path
+    if not artifacts.has_usable_final:
+        errors.append(harness_response.error or f"Harness ended with status {harness_response.status} without usable root publish/final.md")
+    elif not artifacts.has_required_artifacts:
+        warnings.append("Root published usable final.md but one or more required product artifacts are missing.")
+    if harness_response.status not in ("completed", "time_out_with_deliverable"):
+        warnings.append(f"Harness ended with status {harness_response.status}.")
+
+    status: OutputStatus = "failed"
 
     if enable_research_state and research_state_paths is not None:
         if enable_research_state_v33 and research_state_stage_paths is not None:
@@ -1158,16 +1243,13 @@ def run_research_memo(
                         restore_state_snapshot(research_state_paths, paths["state_snapshot"])
                         rolled_back = True
                         errors.append("Research state rolled back to pre-run snapshot after v3.3 integrity failure.")
-                        status = "failed" if status == "succeeded" else status
                 except Exception as exc:
                     errors.append(f"Research state v3.3 commit failed: {exc}")
                     restore_state_snapshot(research_state_paths, paths["state_snapshot"])
                     rolled_back = True
-                    status = "failed" if status == "succeeded" else status
             else:
                 errors.extend(f"Research state v3.3 validation: {item}" for item in validation_report.errors)
                 rolled_back = True
-                status = "failed" if status == "succeeded" else status
             research_state_meta = _research_state_manifest(
                 enabled=True,
                 mode="v33_staged_direct_edit",
@@ -1199,7 +1281,6 @@ def run_research_memo(
                 apply_result = None
                 proposal_apply_errors = [f"Research state proposal apply failed: {exc}"]
                 errors.extend(proposal_apply_errors)
-                status = "failed" if status == "succeeded" else status
             integrity_errors = validate_state_integrity(root, ticker_norm)
             rolled_back = False
             if proposal_apply_errors:
@@ -1211,7 +1292,6 @@ def run_research_memo(
                 restore_state_snapshot(research_state_paths, paths["state_snapshot"])
                 rolled_back = True
                 errors.append("Research state rolled back to pre-run snapshot after integrity failure.")
-                status = "failed" if status == "succeeded" else status
             research_state_meta = _research_state_manifest(
                 enabled=True,
                 mode="v32_proposals",
@@ -1231,7 +1311,61 @@ def run_research_memo(
                 rolled_back=rolled_back,
             )
 
-    _write_json(paths["status"], _status_payload(run_id, status, warnings=warnings, errors=errors, research_state=research_state_meta))
+    source_body_paths = {
+        citation.citation_key: attachment_paths[citation.document_id]
+        for citation in citations
+        if citation.document_id in attachment_paths
+    }
+    if artifacts.has_usable_final:
+        evaluator_inputs = build_evaluator_inputs(
+            run_id=run_id,
+            ticker=ticker_norm,
+            memo_dir=paths["memo_dir"],
+            source_index_path=paths["source_index"],
+            source_body_paths=source_body_paths,
+            artifacts=artifacts,
+            research_state_summary=(Path(research_state_paths.research_state).read_text(encoding="utf-8", errors="replace") if research_state_paths and research_state_paths.research_state.exists() else None),
+        )
+        evaluator_ref = run_and_write_memo_evaluation(
+            evaluator_inputs,
+            memo_dir=paths["memo_dir"],
+            judge_fn=memo_evaluator_judge_fn,
+            model_name=memo_evaluator_model_name,
+        )
+    else:
+        evaluator_ref = write_evaluator_evaluation(
+            memo_dir=paths["memo_dir"],
+            ref=EvaluatorEvaluationRef(
+                status="missing",
+                reason=["usable root publish/final.md was not available; evaluator not run"],
+                verdict=None,
+            ),
+        )
+    split_status = derive_split_status(
+        harness_status=harness_response.status,
+        artifacts=artifacts,
+        research_state_meta=research_state_meta,
+        evaluator_ref=evaluator_ref,
+    )
+    status = split_status.legacy_status
+    if split_status.run_status == "partial" and status == "partial":
+        warnings.extend(reason.message for reason in split_status.status_reasons if reason.severity == "warn" and reason.message not in warnings)
+    elif split_status.run_status in ("failed", "timed_out"):
+        errors.extend(reason.message for reason in split_status.status_reasons if reason.severity == "error" and reason.message not in errors)
+
+    _write_json(
+        paths["status"],
+        _status_payload(
+            run_id,
+            status,
+            warnings=warnings,
+            errors=errors,
+            research_state=research_state_meta,
+            split_status=split_status,
+            artifact_paths=artifacts.paths,
+            evaluator_evaluation=evaluator_ref,
+        ),
+    )
     _write_json(
         paths["manifest"],
         _manifest_payload(
@@ -1248,6 +1382,9 @@ def run_research_memo(
             warnings=warnings,
             errors=errors,
             research_state=research_state_meta,
+            split_status=split_status,
+            artifact_paths=artifacts.paths,
+            evaluator_evaluation=evaluator_ref,
         ),
     )
     return ResearchPlatformRunResult(
@@ -1265,6 +1402,13 @@ def run_research_memo(
         state_snapshot_path=str(paths["state_snapshot"]) if enable_research_state else None,
         proposals_path=str(paths["proposals"]) if enable_research_state else None,
         accepted_changes_path=str(paths["accepted_changes"]) if enable_research_state else None,
+        raw_harness_status=harness_response.status,
+        run_status=split_status.run_status,
+        state_status=split_status.state_status,
+        deliverable_status=split_status.deliverable_status,
+        status_reasons=[reason.model_dump(mode="json") for reason in split_status.status_reasons],
+        artifact_paths=artifacts.paths.model_dump(mode="json"),
+        evaluator_evaluation=evaluator_ref.model_dump(mode="json"),
         harness_response=harness_response.model_dump(mode="json"),
         warnings=warnings,
         errors=errors,
