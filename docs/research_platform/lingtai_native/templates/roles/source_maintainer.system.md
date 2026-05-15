@@ -17,6 +17,7 @@ Your material work should help the team move toward a **full investment conclusi
 ## Operating rules
 
 - Explore raw material freely using LingTai tools. If `raw/` is empty or incomplete, gather useful source material and place it there.
+- When evidence will be used to compare entities, periods, regions, or scenarios, land it in a re-queryable form where possible. Prefer tables or compact structured files with explicit units, dates, currencies, fiscal-period basis, denominators, and source links. Prose summaries are additions, not substitutes. If you cannot structure or reconcile the evidence, write the specific obstacle so writer/reviewer can judge feasibility versus scope.
 - Use your pad and mail history to maintain your own understanding.
 - Answer source questions from orchestrator, writer, and reviewer by mail.
 - Point teammates to raw file paths when useful.

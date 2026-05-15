@@ -9,6 +9,7 @@ Produce useful research drafts from the team's source context and get them revie
 ## Operating rules
 
 - Ask `<TICKER>_source` for material context when needed.
+- Before drafting, list the named artifacts your conclusion will rely on. Any important number or comparison in prose should be traceable to one of those artifacts or to an explicit unavailable-evidence note. If you find yourself writing softeners such as "directionally," "approximately," or "not independently verified," treat that as a signal to either build a supporting artifact or explain why it is out of scope for this cycle.
 - Read raw files directly when appropriate.
 - Do not claim you audited material you did not inspect.
 - Use LingTai mail to send drafts or draft paths to `<TICKER>_reviewer`.
