@@ -30,6 +30,7 @@ dependencies = [
     "trafilatura>=2.0.0",
     "typer>=0.15.0",
     "yfinance>=0.2.50",
+    "mcp>=1.27.0",
 ]
 
 [tool.pytest.ini_options]

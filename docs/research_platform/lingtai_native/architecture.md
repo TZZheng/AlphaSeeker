@@ -4,7 +4,7 @@
 
 AlphaSeeker should not reimplement LingTai. LingTai is the runtime. AlphaSeeker is the domain recipe.
 
-For v0, the design is intentionally sparse:
+The base design is intentionally sparse:
 
 ```text
 AlphaSeeker = ticker-team recipe + raw material location + published output location + role prompts
@@ -80,5 +80,5 @@ A larger schema can be added later only when the manual run reveals a repeated f
 
 - If avatars cannot find raw material, add a lightweight index.
 - If humans cannot see final output, improve `published/`.
-- If source extraction is painful, register source extraction tools into LingTai.
+- Source extraction was painful enough in the first TSLA run to justify minimal yfinance/SEC source tools registered into LingTai.
 - If team status is hard to inspect, build a panel that reads LingTai state instead of replacing it.
