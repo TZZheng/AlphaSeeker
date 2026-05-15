@@ -10,6 +10,7 @@ This folder collects materials for expanding AlphaSeeker from a one-shot multi-a
 - `xiaohongshu_librarian_2026-05-12/metadata.json` — source URL/title/image URL metadata from extraction.
 - `xiaohongshu_librarian_2026-05-12/page.html` — fetched SSR HTML snapshot if available.
 - `xiaohongshu-post-extraction-skill/` — reusable extraction workflow/script for future Xiaohongshu image-heavy posts.
+- `lingtai_native/` — v0 design for running AlphaSeeker as LingTai-native per-ticker teams: minimal `raw/` + `published/` contract, role prompt templates, and a manual real-ticker run playbook.
 
 ## Product direction
 

@@ -1,0 +1,80 @@
+# First Manual Run Playbook
+
+This playbook tests the LingTai-native design without adding any AlphaSeeker tools or runtime code.
+
+## Goal
+
+Run one ticker team manually and observe whether four LingTai avatars can coordinate using only:
+
+- LingTai mail;
+- LingTai pad/memory;
+- LingTai file and bash capabilities;
+- a minimal AlphaSeeker `raw/` + `published/` directory;
+- English role prompts.
+
+The goal is not to beat v8.1 memo quality on the first try. The goal is to learn what structure or tools are actually necessary.
+
+## Setup
+
+1. Pick a ticker, e.g. `TSLA`.
+2. Create the minimal team directory:
+
+   ```bash
+   mkdir -p vault/companies/TSLA/team/raw
+   mkdir -p vault/companies/TSLA/team/published/versions
+   ```
+
+   Or copy `examples/minimal_team_skeleton/`.
+
+3. Put any available source material into `raw/`. Do not over-organize it. A few filings, snapshots, transcripts, or manual notes are enough.
+4. Create four LingTai avatars using the existing LingTai workflow:
+
+   ```text
+   TSLA_orchestrator
+   TSLA_source
+   TSLA_writer
+   TSLA_reviewer
+   ```
+
+5. Seed each avatar with the matching English system template from `templates/roles/` and the shared `policy.template.md`, replacing `<TICKER>` placeholders.
+
+## Suggested first task
+
+The human sends the orchestrator a message like:
+
+```text
+Please coordinate a first TSLA research memo using the raw material in vault/companies/TSLA/team/raw/. Keep the process simple. Ask the source maintainer for source help, ask the writer for a draft, ask the reviewer to challenge it, and publish the accepted result to vault/companies/TSLA/team/published/latest.md.
+```
+
+## Expected team flow
+
+1. Orchestrator reads the policy and asks source maintainer to inspect `raw/`.
+2. Source maintainer explores `raw/`, forms a view of what material exists, and mails writer/orchestrator with a source brief.
+3. Orchestrator asks writer to draft.
+4. Writer drafts using the source brief and raw files as needed.
+5. Writer mails reviewer with the draft or draft path.
+6. Reviewer checks the draft, asks source maintainer for support if needed, and mails issues to writer.
+7. Writer revises or dissents.
+8. Reviewer accepts, accepts with caveats, or escalates to orchestrator.
+9. Accepted output is written to `published/latest.md` and optionally copied to `published/versions/<date>.md`.
+10. Orchestrator reports back to the human.
+
+## What to observe
+
+Record observations after the run:
+
+- Did the avatars understand their roles?
+- Did the source maintainer need a formal material index, or was raw exploration enough?
+- Did writer/reviewer communication work naturally through mail?
+- Did anyone need a prescribed workspace, or did each avatar self-organize?
+- Was `published/latest.md` enough as the human-facing contract?
+- Which failures would be fixed by prompts, and which require tools?
+
+## Escalation rule
+
+If any avatar is blocked, it should mail the orchestrator with:
+
+- what it tried;
+- what is missing;
+- whether it needs a teammate or the human;
+- its recommended next action.
