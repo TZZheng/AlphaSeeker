@@ -395,7 +395,8 @@ def test_run_research_memo_rolls_back_research_state_on_integrity_failure(tmp_pa
     assert manifest["research_state"]["integrity_errors"] == ["forced integrity failure"]
 
 
-def test_run_research_memo_v33_commits_staged_direct_edits(tmp_path):
+def test_run_research_memo_v33_commits_staged_direct_edits(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
     manual = tmp_path / "manual.md"
     manual.write_text("# Manual packet\n\nGuyana production growth notes.", encoding="utf-8")
     captured: dict[str, object] = {}
@@ -410,10 +411,12 @@ def test_run_research_memo_v33_commits_staged_direct_edits(tmp_path):
         captured["request"] = request
         writable = {Path(path).name: Path(path) for path in request.external_writable_files}
         assert set(writable) == {"research_state.md", "open_questions.json", "conflicts.json", "valuation_snapshot.json"}
+        assert all(path.is_absolute() for path in writable.values())
         assert all("state_stage" in str(path) for path in writable.values())
         assert "direct-edit protocol (v3.3)" in request.user_prompt
         assert "question_id" in request.user_prompt
         assert "Do not invent aliases like `id`, `question`, or `evidence`" in request.user_prompt
+        assert str(writable["research_state.md"]) in request.user_prompt
         markdown = writable["research_state.md"].read_text(encoding="utf-8")
         markdown += "\n## Guyana growth engine\n<!-- key: guyana_growth_engine -->\n\nGuyana is now tracked directly in staged durable state [S1].\n"
         writable["research_state.md"].write_text(markdown, encoding="utf-8")
@@ -424,7 +427,7 @@ def test_run_research_memo_v33_commits_staged_direct_edits(tmp_path):
         ticker="xom",
         company_name="Exxon Mobil",
         manual_files=[str(manual)],
-        vault_root=tmp_path / "vault",
+        vault_root="vault",
         run_id="v33-direct",
         adapters=_adapters(fake_sec, failing_provider),
         run_harness_fn=fake_harness,

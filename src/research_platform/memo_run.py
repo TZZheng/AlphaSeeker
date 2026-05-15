@@ -630,9 +630,9 @@ The proposal file lives under this run directory: `{memo_dir}`.
 
 
 def _research_state_direct_edit_protocol_text(*, memo_dir: Path, stage_paths: StagePaths) -> str:
-    editable = "\n".join(f"- `{path}`" for path in stage_paths.editable_files)
+    editable = "\n".join(f"- `{path.resolve(strict=False)}`" for path in stage_paths.editable_files)
     readonly = "\n".join(
-        f"- `{path}`" for path in [stage_paths.stage.evidence_index, stage_paths.stage.state_index]
+        f"- `{path.resolve(strict=False)}`" for path in [stage_paths.stage.evidence_index, stage_paths.stage.state_index]
     )
     return f"""
 # Durable CompanyResearchState direct-edit protocol (v3.3)
@@ -1200,9 +1200,9 @@ def run_research_memo(
             *[str(path) for path in attachment_paths.values()],
         ],
         external_writable_files=(
-            [str(path) for path in research_state_stage_paths.editable_files]
+            [str(path.resolve(strict=False)) for path in research_state_stage_paths.editable_files]
             if enable_research_state_v33 and research_state_stage_paths is not None
-            else ([str(paths["proposals"])] if enable_research_state else [])
+            else ([str(paths["proposals"].resolve(strict=False))] if enable_research_state else [])
         ),
     )
     harness_response = (run_harness_fn or run_harness)(harness_request)
