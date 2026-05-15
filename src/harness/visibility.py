@@ -17,6 +17,29 @@ def _is_within(root: Path, candidate: Path) -> bool:
     return resolved_candidate == resolved_root or resolved_root in resolved_candidate.parents
 
 
+def _normalize_path_reference(raw_path: str | Path) -> Path:
+    return Path(raw_path).expanduser().resolve(strict=False)
+
+
+def _resolve_external_reference(raw_path: str, external_paths: list[str] | None) -> Path | None:
+    """Return the declared external target when raw_path names it exactly.
+
+    Agent workspace paths resolve relative to the agent workspace, but harness
+    request paths are authored by the caller relative to the process/repo cwd (or
+    as absolutes). This lets tools accept either absolute or caller-relative
+    spellings for explicitly declared external files without widening access.
+    """
+    raw = str(raw_path or "").strip()
+    if not raw:
+        return None
+    raw_reference = _normalize_path_reference(raw)
+    for raw_external in external_paths or []:
+        external = _normalize_path_reference(raw_external)
+        if raw_reference == external:
+            return external
+    return None
+
+
 def _resolve_candidate(run_root: str | Path, agent_id: str, raw_path: str, *, cwd: str | Path | None = None) -> Path:
     paths = agent_workspace_paths(run_root, agent_id)
     raw = str(raw_path or "").strip()
@@ -102,7 +125,7 @@ def _is_visible_read_target(
     if candidate in {paths["task"].resolve(strict=False), paths["tools"].resolve(strict=False)}:
         return True
     for raw_path in [*(external_read_files or []), *(external_writable_files or [])]:
-        external = Path(raw_path).expanduser().resolve(strict=False)
+        external = _normalize_path_reference(raw_path)
         if candidate == external:
             return True
     return any(_is_within(root, candidate) for root in visible_read_roots(run_root, agent_id))
@@ -117,7 +140,10 @@ def resolve_visible_read_file(
     external_read_files: list[str] | None = None,
     external_writable_files: list[str] | None = None,
 ) -> Path:
-    candidate = _resolve_candidate(run_root, agent_id, raw_path, cwd=cwd)
+    candidate = _resolve_external_reference(
+        raw_path,
+        [*(external_read_files or []), *(external_writable_files or [])],
+    ) or _resolve_candidate(run_root, agent_id, raw_path, cwd=cwd)
     if is_private_path(run_root, agent_id, candidate):
         raise VisibilityError("Path is inside the harness-private area.")
     if not candidate.exists() or not candidate.is_file():
@@ -142,7 +168,10 @@ def resolve_visible_search_target(
     external_read_files: list[str] | None = None,
     external_writable_files: list[str] | None = None,
 ) -> Path:
-    candidate = _resolve_candidate(run_root, agent_id, raw_path, cwd=cwd)
+    candidate = _resolve_external_reference(
+        raw_path,
+        [*(external_read_files or []), *(external_writable_files or [])],
+    ) or _resolve_candidate(run_root, agent_id, raw_path, cwd=cwd)
     if is_private_path(run_root, agent_id, candidate):
         raise VisibilityError("Path is inside the harness-private area.")
     if not candidate.exists():
@@ -171,7 +200,12 @@ def resolve_visible_write_file(
     must_exist: bool = False,
     external_writable_files: list[str] | None = None,
 ) -> tuple[Path, str, str]:
-    candidate = _resolve_candidate(run_root, agent_id, raw_path, cwd=cwd)
+    candidate = _resolve_external_reference(raw_path, external_writable_files) or _resolve_candidate(
+        run_root,
+        agent_id,
+        raw_path,
+        cwd=cwd,
+    )
     paths = agent_workspace_paths(run_root, agent_id)
     allowed_roots = {
         "publish": paths["publish_root"].resolve(strict=False),
@@ -188,9 +222,9 @@ def resolve_visible_write_file(
             relative = candidate.relative_to(root).as_posix()
             return candidate, root_name, relative
     for raw_external in external_writable_files or []:
-        external = Path(raw_external).expanduser().resolve(strict=False)
+        external = _normalize_path_reference(raw_external)
         if candidate == external:
             if must_exist and not candidate.exists():
                 raise VisibilityError(f"File '{raw_path}' does not exist.")
             return candidate, "external", candidate.name
-    raise VisibilityError("Write paths must be relative paths and stay inside publish/ or scratch/, or match an external writable file declared by the harness request.")
+    raise VisibilityError("Write path is outside the allowed file surface. Use publish/ or scratch/ (relative or absolute), or an exact external writable file declared by the harness request.")

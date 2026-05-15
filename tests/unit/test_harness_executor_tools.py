@@ -223,6 +223,44 @@ def test_tool_view_file_edit_patch_read_and_grep_use_minimal_fields(
     assert "secret context" not in json.dumps(grep_view.conversation)
 
 
+def test_write_accepts_absolute_publish_and_scratch_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root, root_agent_id, session = _create_basic_session(
+        monkeypatch,
+        tmp_path,
+        run_id="executor-write-absolute-visible",
+        user_prompt="Write absolute visible paths",
+        preset="research",
+    )
+    paths = agent_workspace_paths(run_root, root_agent_id)
+    publish_file = paths["publish_root"] / "absolute.md"
+    scratch_file = paths["scratch_root"] / "absolute.md"
+    outside_file = tmp_path / "outside.md"
+
+    publish_result = execute_model_tool_view(
+        session,
+        "write",
+        {"path": str(publish_file), "content": "published\n"},
+    )
+    scratch_result = execute_model_tool_view(
+        session,
+        "write",
+        {"path": str(scratch_file), "content": "scratch\n"},
+    )
+    read_result = execute_model_tool_view(session, "read", {"path": str(scratch_file)})
+
+    assert publish_file.read_text(encoding="utf-8") == "published\n"
+    assert scratch_file.read_text(encoding="utf-8") == "scratch\n"
+    assert publish_result.conversation["path"] == "publish/absolute.md"
+    assert scratch_result.conversation["path"] == "scratch/absolute.md"
+    assert read_result.conversation["content"] == "scratch\n"
+
+    with pytest.raises(ValueError, match="allowed file surface"):
+        execute_model_tool_view(session, "write", {"path": str(outside_file), "content": "nope\n"})
+
+
 def test_tool_view_bash_delegate_agents_and_status_use_minimal_fields(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -822,7 +860,7 @@ def test_write_rejects_empty_publish_content(
         )
 
 
-def test_write_rejects_absolute_paths_with_clear_error(
+def test_write_rejects_non_workspace_absolute_paths_with_clear_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -832,11 +870,11 @@ def test_write_rejects_absolute_paths_with_clear_error(
         run_id="executor-write-file-absolute-path",
         user_prompt="Publish a final memo",
     )
-    absolute_path = Path(run_root) / root_agent_id / "publish" / "final.md"
+    absolute_path = tmp_path / "outside" / "final.md"
 
     with pytest.raises(
         ValueError,
-        match="relative paths and stay inside publish/ or scratch/",
+        match="allowed file surface",
     ):
         execute_model_tool(
             session,
@@ -1115,11 +1153,15 @@ def test_explicit_external_files_are_readable_and_writable(
     nearby_file.parent.mkdir(parents=True)
     nearby_file.write_text("not allowed\n", encoding="utf-8")
 
+    source_ref = source_file.relative_to(tmp_path).as_posix()
+    external_ref = external_file.relative_to(tmp_path).as_posix()
+    nearby_ref = nearby_file.relative_to(tmp_path).as_posix()
+
     request = HarnessRequest(
         user_prompt="Use approved external files",
         run_id="executor-external-files",
-        context_files=[str(source_file)],
-        external_writable_files=[str(external_file)],
+        context_files=[source_ref],
+        external_writable_files=[external_ref],
     )
     run_root, root_agent_id = initialize_run_root(request)
     registry = build_skill_registry()
@@ -1148,22 +1190,25 @@ def test_explicit_external_files_are_readable_and_writable(
         registry_map=registry,
     )
 
-    source_read = execute_model_tool_view(session, "read", {"path": str(source_file)})
-    source_grep = execute_model_tool_view(session, "grep", {"pattern": "Durable context", "paths": [str(source_file)]})
-    external_write = execute_model_tool_view(session, "write", {"path": str(external_file), "content": "{}\n"})
-    external_read = execute_model_tool_view(session, "read", {"path": str(external_file)})
-    external_grep = execute_model_tool_view(session, "grep", {"pattern": "{}", "paths": [str(external_file)], "fixed_strings": True})
+    source_read_relative = execute_model_tool_view(session, "read", {"path": source_ref})
+    source_read_absolute = execute_model_tool_view(session, "read", {"path": str(source_file)})
+    source_grep = execute_model_tool_view(session, "grep", {"pattern": "Durable context", "paths": [source_ref]})
+    external_write_relative = execute_model_tool_view(session, "write", {"path": external_ref, "content": "{}\n"})
+    external_read_absolute = execute_model_tool_view(session, "read", {"path": str(external_file)})
+    external_grep = execute_model_tool_view(session, "grep", {"pattern": "{}", "paths": [external_ref], "fixed_strings": True})
     denied_read = execute_model_tool(session, "read", {"path": str(nearby_file)})
 
-    assert source_read.conversation["status"] == "ok"
-    assert source_read.conversation["content"] == "Durable context note\n"
-    assert source_read.conversation["path"] == str(source_file)
+    assert source_read_relative.conversation["status"] == "ok"
+    assert source_read_relative.conversation["content"] == "Durable context note\n"
+    assert source_read_relative.conversation["path"] == source_ref
+    assert source_read_absolute.conversation["status"] == "ok"
+    assert source_read_absolute.conversation["content"] == "Durable context note\n"
     assert source_grep.conversation["match_count"] == 1
     assert external_file.read_text(encoding="utf-8") == "{}\n"
-    assert external_write.log["root"] == "external"
-    assert external_write.conversation["path"] == str(external_file)
-    assert external_read.conversation["status"] == "ok"
-    assert external_read.conversation["content"] == "{}\n"
+    assert external_write_relative.log["root"] == "external"
+    assert external_write_relative.conversation["path"] == str(external_file)
+    assert external_read_absolute.conversation["status"] == "ok"
+    assert external_read_absolute.conversation["content"] == "{}\n"
     assert external_grep.conversation["match_count"] == 1
     assert denied_read["status"] == "failed"
     assert "agent-visible file surface" in denied_read["summary"]
@@ -1172,7 +1217,7 @@ def test_explicit_external_files_are_readable_and_writable(
     assert any(event["event_type"] == "external_updated" and event["details"]["path"] == str(external_file) for event in events)
 
     with pytest.raises(ValueError, match="external writable file"):
-        execute_model_tool_view(session, "write", {"path": str(nearby_file), "content": "oops\n"})
+        execute_model_tool_view(session, "write", {"path": nearby_ref, "content": "oops\n"})
 
 
 def test_grep_returns_match_locations(
