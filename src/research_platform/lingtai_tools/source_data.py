@@ -482,3 +482,107 @@ def sec_save_source_pack(
         "companyfacts": facts_payload,
         "fetched_at": _utc_now_iso(),
     }
+
+
+def market_context(
+    ticker: str,
+    *,
+    output_dir: str | None = None,
+    history_period: str = "1y",
+    history_interval: str = "1d",
+    include_profile: bool = True,
+    include_history: bool = True,
+) -> dict[str, Any]:
+    """Gather the market/valuation context a ticker team usually needs first.
+
+    This is the agent-facing market helper: it composes the lower-level
+    yfinance snapshot and history helpers so a source maintainer can ask for
+    market context rather than choosing between quote/history primitives.
+    """
+
+    symbol = _normalize_ticker(ticker)
+    dest_dir = Path(output_dir).expanduser() if output_dir else None
+    if dest_dir:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+    snapshot = yfinance_snapshot(symbol, include_profile=include_profile)
+    payload: dict[str, Any] = {
+        "status": "ok",
+        "source": "market_context",
+        "ticker": symbol,
+        "fetched_at": _utc_now_iso(),
+        "snapshot": snapshot,
+    }
+
+    if dest_dir:
+        snapshot_path = dest_dir / f"yfinance_{_safe_filename(symbol)}_snapshot.json"
+        snapshot_path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+        payload["snapshot_path"] = str(snapshot_path)
+
+    if include_history:
+        payload["history"] = yfinance_history(
+            symbol,
+            period=history_period,
+            interval=history_interval,
+            output_dir=str(dest_dir) if dest_dir else None,
+        )
+
+    if dest_dir:
+        summary_path = dest_dir / "market_context_summary.json"
+        payload["summary_path"] = str(summary_path)
+        summary_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+    return payload
+
+
+def investment_source_pack(
+    ticker: str,
+    *,
+    output_dir: str,
+    focus: str | None = None,
+    include_market: bool = True,
+    include_sec: bool = True,
+    sec_form_types: list[str] | None = None,
+    sec_limit: int = 6,
+) -> dict[str, Any]:
+    """Gather the smallest default source pack for moving toward an investment conclusion.
+
+    The pack is still factual raw material, not an investment recommendation.
+    It exists so a LingTai source maintainer can start with one purposeful
+    action instead of juggling several low-level SEC/yfinance primitives.
+    """
+
+    symbol = _normalize_ticker(ticker)
+    dest = Path(output_dir).expanduser()
+    dest.mkdir(parents=True, exist_ok=True)
+
+    payload: dict[str, Any] = {
+        "status": "ok",
+        "source": "investment_source_pack",
+        "ticker": symbol,
+        "output_dir": str(dest),
+        "focus": focus or "full investment conclusion",
+        "fetched_at": _utc_now_iso(),
+        "packs": {},
+        "note": (
+            "This pack provides baseline market and SEC material only. "
+            "The LingTai team must still decide whether additional evidence "
+            "such as consensus estimates, peer comps, industry data, legal/regulatory "
+            "checks, or primary transcripts is required."
+        ),
+    }
+
+    if include_market:
+        payload["packs"]["market"] = market_context(symbol, output_dir=str(dest / "market"))
+    if include_sec:
+        payload["packs"]["sec"] = sec_save_source_pack(
+            symbol,
+            output_dir=str(dest / "sec"),
+            form_types=sec_form_types,
+            limit=sec_limit,
+        )
+
+    summary_path = dest / "investment_source_pack_summary.json"
+    payload["summary_path"] = str(summary_path)
+    summary_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    return payload

@@ -9,6 +9,12 @@ This policy is a natural-language team constitution. It is not a runtime schema 
 - `<TICKER>_writer` — memo writer.
 - `<TICKER>_reviewer` — adversarial reviewer and quality gate.
 
+## Research objective
+
+The team's default direction is to move toward a **full investment conclusion** on `<TICKER>`, not merely to produce a source-pack-limited preliminary update. A preliminary memo with caveats is acceptable as an intermediate artifact, but caveats are an honesty requirement, not a reason to stop.
+
+If the current evidence is insufficient for a full investment conclusion, the team should identify the smallest concrete evidence-gathering action that would move the memo forward. If that action is within the team's current tools and scope, the orchestrator should start it. Stop only when the conclusion is sufficiently supported or the remaining blocker is outside current tools/scope and has been explicitly reported.
+
 ## Minimal AlphaSeeker contract
 
 AlphaSeeker provides only:

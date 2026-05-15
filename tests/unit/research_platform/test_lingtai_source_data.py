@@ -128,3 +128,62 @@ def test_sec_companyfacts_snapshot_saves_full_and_compact(monkeypatch, tmp_path)
 def test_invalid_ticker_rejected():
     with pytest.raises(source_data.SourceDataError):
         source_data.yfinance_snapshot("../TSLA")
+
+
+def test_market_context_composes_snapshot_and_history(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        source_data,
+        "yfinance_snapshot",
+        lambda ticker, include_profile=True: {
+            "status": "ok",
+            "ticker": ticker,
+            "include_profile": include_profile,
+            "fast_info": {"marketCap": 1000},
+        },
+    )
+    monkeypatch.setattr(
+        source_data,
+        "yfinance_history",
+        lambda ticker, period="1y", interval="1d", output_dir=None: {
+            "status": "ok",
+            "ticker": ticker,
+            "period": period,
+            "interval": interval,
+            "csv_path": str(Path(output_dir) / "history.csv") if output_dir else None,
+        },
+    )
+
+    payload = source_data.market_context("tsla", output_dir=str(tmp_path), history_period="6mo")
+
+    assert payload["source"] == "market_context"
+    assert payload["ticker"] == "TSLA"
+    assert payload["snapshot"]["fast_info"]["marketCap"] == 1000
+    assert payload["history"]["period"] == "6mo"
+    assert Path(payload["snapshot_path"]).exists()
+    assert Path(payload["summary_path"]).exists()
+
+
+def test_investment_source_pack_composes_market_and_sec_packs(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        source_data,
+        "market_context",
+        lambda ticker, output_dir=None: {"status": "ok", "ticker": ticker, "output_dir": output_dir},
+    )
+    monkeypatch.setattr(
+        source_data,
+        "sec_save_source_pack",
+        lambda ticker, output_dir, form_types=None, limit=6: {
+            "status": "ok",
+            "ticker": ticker,
+            "output_dir": output_dir,
+            "limit": limit,
+        },
+    )
+
+    payload = source_data.investment_source_pack("tsla", output_dir=str(tmp_path), sec_limit=3)
+
+    assert payload["source"] == "investment_source_pack"
+    assert payload["focus"] == "full investment conclusion"
+    assert set(payload["packs"]) == {"market", "sec"}
+    assert payload["packs"]["sec"]["limit"] == 3
+    assert Path(payload["summary_path"]).exists()
