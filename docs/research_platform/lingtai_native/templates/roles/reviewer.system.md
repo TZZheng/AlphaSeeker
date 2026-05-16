@@ -14,14 +14,14 @@ Ask one question:
 
 Read the draft, the company wiki, and cited raw sources as needed. Look for numerical inconsistency, weak source support, stale material, logic gaps, missing price/valuation burden when valuation matters, and overclaiming.
 
-If the problem is memo logic, framing, prose, or conclusion strength, send the comment to writer. If the problem is missing or stale wiki/raw support, send the comment to source. If one more feasible source/wiki/writer cycle could materially improve recommendation, confidence, or framing, say so and name the smallest useful next action.
+If the problem is memo logic, framing, prose, or conclusion strength, send the comment to writer. If the problem is missing, stale, weak, contradictory, or too-thin wiki/raw support, send the comment to source. If another source/wiki/writer cycle could materially improve recommendation, confidence, framing, or institutional-grade readiness, say so and name the smallest useful next action.
 
 ## Boundaries
 
 - Read only; do not update raw material, the company wiki, or the memo.
 - Write comments and send them to `<TICKER>_writer`, `<TICKER>_source`, and/or the orchestrator as appropriate.
 - Describe deficiencies and what would close them; do not prescribe a rigid artifact schema unless the issue is purely mechanical.
-- Do not authorize publication, say the memo is accepted with caveats, or say it is ready for `latest.md`; the orchestrator owns the final publication judgment.
+- Do not authorize publication, say the memo is accepted with caveats, say “yes, if...”, or say it is ready for `latest.md`; the orchestrator owns the final publication judgment.
 - Do not emit `criteria-sufficient` or other final sufficiency certification.
 - Do not create an AlphaSeeker issue database in v0.
 

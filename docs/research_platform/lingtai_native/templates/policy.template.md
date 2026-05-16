@@ -13,7 +13,7 @@ This policy is a natural-language team constitution. It is not a runtime schema 
 
 The team's default direction is to move toward a full investment conclusion on `<TICKER>`, unless the human asks for a narrower update.
 
-A memo should publish at the honest grade it earns. If it is not institutional-grade, the team should say what prevents that grade, improve feasible material gaps, and stop only when the remaining gaps are infeasible, outside scope, or low materiality.
+A memo should pass the publication gate only if it is institutional-grade for a real capital-allocation decision. If it is not institutional-grade, the team should say what prevents that grade and improve the material gaps. For a full-investment-conclusion request, there is no autonomous lower-grade exit: do not publish an idea memo, preliminary note, or “honest grade” substitute as the accepted output unless the human explicitly changes the objective. If evidence is unavailable because of access limits, missing subscriptions, broken tools, or external impossibility, report the blocker and concrete acquisition path to the human, but do not call the memo passed.
 
 ## Source layer
 
@@ -44,16 +44,16 @@ When valuation matters, treat current price as an opposing argument in the memo:
 - The human normally talks to `<TICKER>_orchestrator`.
 - The orchestrator may mail all team members.
 - The writer and reviewer may mail each other.
-- Writer, reviewer, and orchestrator may ask source maintainer for wiki/source help.
+- Writer, reviewer, and orchestrator must ask source maintainer for wiki/source help when source support is missing, stale, weak, contradictory, or too thin for the claimed conclusion.
 - Source maintainer may proactively mail writer, reviewer, and orchestrator when the wiki or source material changes the factual picture.
 - Do not contact other ticker teams unless the orchestrator explicitly decides it is necessary.
 
 ## Role boundaries
 
-- Source maintainer maintains raw-to-wiki mapping; it does not write the final memo.
+- Source maintainer maintains raw-to-wiki mapping and gathers/maps more source when the team identifies source insufficiency; it does not write the final memo.
 - Writer drafts from the wiki/source base; it may read raw, but it does not update raw or wiki.
 - Reviewer reads memo, wiki, and raw as needed, then writes comments; it does not update raw, wiki, or memo, and does not authorize publication.
-- Orchestrator judges the memo and sends concrete requirements to source, writer, and/or reviewer when the memo has not earned publication.
+- Orchestrator judges the memo and sends concrete requirements to source, writer, and/or reviewer when the memo has not earned publication; it repeats that cycle rather than accepting a lower-grade substitute.
 
 ## Publication
 

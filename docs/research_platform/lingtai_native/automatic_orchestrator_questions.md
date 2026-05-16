@@ -12,17 +12,18 @@ The harness asks the orchestrator only:
 
 1. **What was the original objective? Quote it before judging the memo.**
 2. **Does the current memo achieve that objective, or did the team drift into a narrower/preliminary answer?**
-3. **Is this memo institutional-grade for a real capital-allocation decision? Answer directly.**
+3. **Is this memo institutional-grade for a real capital-allocation decision? Answer directly: yes or no.**
 
-If yes, publish.
-If not, identify what prevents it from being an institutional-grade investment memo, and improve it with the team.
-If the remaining gaps are infeasible, outside scope, or low materiality, publish at the honest grade earned, with explanation.
+If yes, publish as accepted research.
+If not, do not publish as accepted research. Identify what prevents it from being institutional-grade and improve it with the team. If more source is needed, source must gather or map more source. If more analysis is needed, writer/reviewer must improve the analysis. Repeat until the gate passes or the human explicitly changes the objective/stops the run.
+
+For a full-investment-conclusion request, do **not** create an autonomous lower-grade exit such as “publish as idea memo,” “publish at honest grade,” or “accepted with caveats.” A lower-grade note may be delivered only if the human explicitly asks for that downgraded deliverable.
 
 ## Expected orchestrator response
 
-The orchestrator should answer in plain language, not by satisfying a separate checklist. A good response says whether the memo is institutional-grade, what prevents that grade if it is not, what the team will improve now, or why the remaining gaps do not justify another cycle.
+The orchestrator should answer in plain language, not by satisfying a separate checklist. A good response says whether the memo is institutional-grade, what prevents that grade if it is not, and what the team will improve now. It should not decide on its own that remaining gaps do not justify another cycle for a full-investment-conclusion request.
 
-A source-pack-limited memo can be a valid intermediate artifact, but it is not the terminal state when the mission is to reach a full investment conclusion. Do not use `accept with caveats` or `yes with caveats` as a final answer; answer whether the original objective is met, then discuss limitations separately.
+A source-pack-limited memo can be a valid intermediate artifact, but it is not the terminal state when the mission is to reach a full investment conclusion. Do not use `accept with caveats`, `yes with caveats`, `yes, if...`, or similar as a final answer. Caveats can explain a no; they cannot turn a no into a yes.
 
 ## Non-goals
 
