@@ -2,19 +2,24 @@
 
 ## Contract
 
-For each ticker team, AlphaSeeker v0 prescribes only two directories:
+For each ticker team, AlphaSeeker v0 prescribes only a few stable file surfaces:
 
 ```text
-vault/companies/<TICKER>/team/
-  raw/
-  published/
+vault/companies/<TICKER>/
+  wiki/                  # maintained factual company wiki
+  team/
+    raw/                 # source-material landing zone
+    drafts/              # working drafts and notes
+    published/
+      latest.md          # accepted human-facing output
+      versions/          # optional accepted-output history
 ```
 
-This is the whole v0 filesystem contract.
+This is the whole v0 filesystem contract. LingTai owns mail, logs, memory, pads, lifecycle, and per-avatar working state.
 
 ## `raw/`
 
-`raw/` is the material landing zone and shared shelf. It is intentionally unstructured and may start empty.
+`raw/` is the material landing zone and shared shelf. It is intentionally lightly structured and may start empty.
 
 Examples:
 
@@ -30,11 +35,21 @@ raw/
 
 There is no required material ID scheme, no `meta.json`, no evidence-map schema, and no required directory layout. The source maintainer may gather files into `raw/`, create folders, or add notes if that helps, but AlphaSeeker v0 does not require it.
 
-This avoids premature boundary decisions such as "what counts as R0001 vs. R0002?" Raw material is simply raw material, and the first run may begin with none of it preloaded.
+## `wiki/`
+
+`wiki/` is the maintained factual company layer. It is where the source maintainer maps raw material into durable facts the writer and reviewer can start from.
+
+The wiki should stay factual and source-linked. It may include peer or market context when that helps understand `<TICKER>`, but valuation debate, memo logic, final recommendations, and reviewer comments belong in drafts/reviews, not in the wiki.
+
+## `drafts/`
+
+`drafts/` is a working surface for memo drafts, blocker notes, and intermediate research notes that should not be mistaken for accepted output.
+
+The writer owns normal draft work here. Writing to `published/latest.md` is reserved for orchestrator-approved publication after the institutional-grade gate passes.
 
 ## `published/`
 
-`published/` is the human-facing output surface. This is the one place AlphaSeeker should keep organized because the human needs a stable place to read results.
+`published/` is the human-facing output surface. This is the one place AlphaSeeker should keep organized because the human needs a stable place to read accepted results.
 
 Recommended layout:
 
@@ -74,16 +89,12 @@ Reasons:
 - Requests should be LingTai mail.
 - Per-avatar working state should live in each avatar's own LingTai space and pad.
 - Source state should emerge from the source maintainer's practice, not from a premature external schema.
-- The first manual run should reveal what structure is truly needed.
+- Real runs should reveal what extra structure is truly needed.
 
 ## Optional copyable skeleton
 
-`examples/minimal_team_skeleton/` contains only:
+`examples/minimal_team_skeleton/` contains only the oldest raw/published skeleton. New setup should prefer:
 
-```text
-raw/.gitkeep
-published/.gitkeep
-published/versions/.gitkeep
+```bash
+python3 scripts/lingtai_ticker_harness.py <TICKER> --ensure-dirs
 ```
-
-Copy it to `vault/companies/<TICKER>/team/` for the first manual run.

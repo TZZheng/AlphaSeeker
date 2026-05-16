@@ -1,33 +1,29 @@
 # First Manual Run Playbook
 
-This playbook tests the LingTai-native design without adding any AlphaSeeker tools or runtime code.
+This playbook tests the LingTai-native design without adding a separate AlphaSeeker agent runtime.
 
 ## Goal
 
-Run one ticker team manually and observe whether four LingTai avatars can coordinate using only:
+Run one ticker team and observe whether four long-lived LingTai avatars can coordinate using only:
 
 - LingTai mail;
 - LingTai pad/memory;
 - LingTai file and bash capabilities;
-- a minimal AlphaSeeker `raw/` + `published/` directory;
-- English role prompts.
+- thin per-agent `init.json.comment` role text;
+- a minimal AlphaSeeker vault surface.
 
 The goal is not to beat v8.1 memo quality on the first try. The goal is to learn what structure or tools are actually necessary.
 
-## Setup
+## Setup / initialization
 
 1. Pick a ticker, e.g. `TSLA`.
-2. Create the minimal team directory:
+2. Create or verify the minimal vault directories:
 
    ```bash
-   mkdir -p vault/companies/TSLA/team/raw
-   mkdir -p vault/companies/TSLA/team/published/versions
+   python3 scripts/lingtai_ticker_harness.py TSLA --ensure-dirs
    ```
 
-   Or copy `examples/minimal_team_skeleton/`.
-
-3. `raw/` may start empty. It is the landing zone where the source maintainer will place raw material it gathers during the run. If you already have local filings, snapshots, transcripts, or manual notes, you may put them there, but preloading raw material is not required.
-4. Create four LingTai avatars using the existing LingTai workflow:
+3. Create four LingTai avatars using the existing LingTai workflow if they do not already exist:
 
    ```text
    TSLA_orchestrator
@@ -36,48 +32,57 @@ The goal is not to beat v8.1 memo quality on the first try. The goal is to learn
    TSLA_reviewer
    ```
 
-5. Seed each avatar with the matching English system template from `templates/roles/` and the shared `policy.template.md`, replacing `<TICKER>` placeholders.
+4. For first-time setup or explicit reset, render the thin templates into each avatar's own `init.json.comment`:
 
-## Suggested first task
+   ```bash
+   # inspect first
+   python3 scripts/lingtai_ticker_harness.py TSLA --render-comments
 
-The human sends the orchestrator a message like:
+   # apply only when creating/resetting the team
+   python3 scripts/lingtai_ticker_harness.py TSLA --apply-comments
+   ```
 
-```text
-Please coordinate a first TSLA research memo. The raw landing zone is vault/companies/TSLA/team/raw/ and it may be empty at the start. Ask the source maintainer to gather or identify necessary raw material, ask the writer for a draft, ask the reviewer to challenge it, then as orchestrator cold-read the finished artifact against this original objective before publishing to vault/companies/TSLA/team/published/latest.md. Do not require a fixed DCF/consensus/peer checklist, but do ensure the memo's conclusion strength is proportional to its evidence depth and that any feasible decision-relevant next evidence step is pursued or explicitly rejected as infeasible/low-materiality.
+   Do **not** do this before every request. Existing long-lived agents keep their own memory and self-organization.
+
+## Runtime request simulation
+
+For an existing team, the frontend/harness simulator should only send a natural-language request to the orchestrator:
+
+```bash
+python3 scripts/lingtai_ticker_harness.py TSLA \
+  "帮我看看最近的新闻，有没有值得投资的地方" \
+  --send
 ```
 
-## Expected team flow
+The script queues a human-style internal mail message via `.lingtai/human/mailbox/outbox`; the LingTai kernel delivers it to `TSLA_orchestrator`.
 
-1. Orchestrator reads the policy and asks source maintainer to inspect `raw/` and gather missing material if needed.
-2. Source maintainer explores `raw/`, gathers/records useful raw material if the directory is empty or incomplete, and mails writer/orchestrator with a source brief.
-3. Orchestrator asks writer to draft.
-4. Writer drafts using the source brief and raw files as needed.
-5. Writer mails reviewer with the draft or draft path.
-6. Reviewer checks the draft, asks source maintainer for support if needed, and mails issues to writer.
-7. Writer revises or dissents.
-8. Reviewer sends discovery feedback: material issues, strengths, whether conclusion strength is proportional to evidence depth, and whether another cycle could materially improve the conclusion. Reviewer does not authorize publication and does not use `accept with caveats` as a verdict.
-9. Orchestrator cold-reads the finished artifact against the original objective in natural language. If another cycle could materially improve a decisive gap, change recommendation/confidence/framing, or justify a stronger conclusion, orchestrator routes it. Orchestrator writes final output to `published/latest.md` only after the next identified evidence step is infeasible, outside scope, low materiality, or unlikely to change the decision; limitations/confidence are stated plainly.
-10. Orchestrator reports back to the human.
+For a full report request:
+
+```bash
+python3 scripts/lingtai_ticker_harness.py RKLB \
+  "写一份对 RKLB 的研究报告" \
+  --send
+```
+
+## Expected team behavior
+
+1. Orchestrator interprets the request in natural language.
+2. If source/wiki context is missing or stale, orchestrator asks source to update it.
+3. Writer drafts or revises from the wiki/source base.
+4. Reviewer challenges whether the draft supports its conclusion.
+5. Orchestrator answers: is this institutional-grade for a real capital-allocation decision?
+6. If yes, orchestrator publishes to `vault/companies/<TICKER>/team/published/latest.md`.
+7. If no, orchestrator states the needed improvement, assigns it to the right teammate, and keeps the run open unless the human redirects or stops it.
 
 ## What to observe
 
 Record observations after the run:
 
-- Did the avatars understand their roles?
-- Did the source maintainer need a formal material index, or was raw exploration enough?
+- Did the avatars understand their roles from only a few comment lines?
+- Did the source maintainer need more structure than raw/wiki?
 - Did writer/reviewer communication work naturally through mail?
 - Did anyone need a prescribed workspace, or did each avatar self-organize?
 - Was `published/latest.md` enough as the human-facing contract?
-- Did the orchestrator cold-read the final artifact against the original objective rather than relying on reviewer approval?
-- Did the team calibrate conclusion strength to evidence depth instead of forcing a fixed artifact checklist? Did it pursue feasible decision-relevant evidence rather than stopping at the first defensible weaker conclusion?
-- Did anyone use `accept with caveats` / `yes with caveats` to launder an unmet objective into publication?
+- Did the orchestrator make the publication judgment rather than relying on reviewer approval?
+- Did the team avoid both lower-grade publication and blocker-note-as-final-output?
 - Which failures would be fixed by prompts, and which require tools?
-
-## Escalation rule
-
-If any avatar is blocked, it should mail the orchestrator with:
-
-- what it tried;
-- what is missing;
-- whether it needs a teammate or the human;
-- its recommended next action.
