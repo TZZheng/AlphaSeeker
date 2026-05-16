@@ -22,6 +22,7 @@ is passed, and no mailbox write unless ``--send`` is passed.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import secrets
 from datetime import datetime, timezone
@@ -164,6 +165,74 @@ def human_inbox(root: Path, *, ticker: str) -> Path:
     return network_root(root, ticker=ticker) / "human" / "mailbox" / "inbox"
 
 
+def latest_md_path(root: Path, *, ticker: str) -> Path:
+    return company_root(root, ticker=ticker) / "team" / "published" / "latest.md"
+
+
+def latest_state_path(root: Path, *, ticker: str) -> Path:
+    return company_root(root, ticker=ticker) / "team" / "published" / ".latest_probe_state.json"
+
+
+def file_sha256(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def latest_probe_question(root: Path, *, ticker: str) -> str:
+    latest = latest_md_path(root, ticker=ticker)
+    return f"""The harness observed that `{latest}` has changed since the last probe.
+
+Do not treat this as a request for a checklist. Treat the current `latest.md` as the artifact under live adversarial review.
+
+Free-form probe:
+
+> If you walked into an investment committee with the current `latest.md`, what is the single question from a skeptical IC chair that would most embarrass the team because the answer could plausibly have been prepared within the current public-source/tool boundary — and why has that not already changed `latest.md`?
+
+Answer that question first. If the answer reveals a material feasible upgrade, route the work and update `latest.md`. If it does not, explain why the answer belongs to true frontier rather than feasible work.
+""".strip()
+
+
+def enqueue_latest_probe_if_changed(root: Path, *, ticker: str) -> Path | None:
+    latest = latest_md_path(root, ticker=ticker)
+    current_hash = file_sha256(latest)
+    if current_hash is None:
+        raise SystemExit(f"missing latest.md for {ticker.upper()}: {latest}")
+
+    state_path = latest_state_path(root, ticker=ticker)
+    previous_hash = None
+    if state_path.exists():
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        previous_hash = state.get("latest_sha256")
+
+    if previous_hash == current_hash:
+        return None
+
+    probe = enqueue_request(
+        root,
+        ticker=ticker,
+        request=latest_probe_question(root, ticker=ticker),
+        subject="Harness probe after latest.md update",
+    )
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    state_path.write_text(
+        json.dumps(
+            {
+                "ticker": ticker.upper(),
+                "latest_path": str(latest),
+                "latest_sha256": current_hash,
+                "last_probe_queued_at": now,
+                "last_probe_message": str(probe),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return probe
+
+
 def list_human_inbox(root: Path, *, ticker: str) -> list[Path]:
     inbox = human_inbox(root, ticker=ticker)
     if not inbox.exists():
@@ -204,6 +273,11 @@ def main() -> int:
     parser.add_argument("--apply-comments", action="store_true", help="Setup/reset mode: patch rendered comments into existing init.json files.")
     parser.add_argument("--ensure-dirs", action="store_true", help="Setup mode: create wiki/raw/drafts/published directories for the ticker.")
     parser.add_argument("--send", action="store_true", help="Runtime mode: queue the request to <TICKER>_orchestrator via ticker-local human outbox.")
+    parser.add_argument(
+        "--probe-latest-if-changed",
+        action="store_true",
+        help="Runtime mode: if team/published/latest.md changed since the last probe, queue one free-form IC-chair probe to <TICKER>_orchestrator.",
+    )
     parser.add_argument("--read-human", action="store_true", help="Gateway mode: list messages sent to the ticker-local human inbox.")
     parser.add_argument("--subject", default="", help="Optional internal-mail subject for --send.")
     args = parser.parse_args()
@@ -231,11 +305,18 @@ def main() -> int:
         path = enqueue_request(root, ticker=ticker, request=args.request, subject=args.subject)
         print(f"queued request to {agent_name(ticker, 'orchestrator')}: {path}")
 
+    if args.probe_latest_if_changed:
+        path = enqueue_latest_probe_if_changed(root, ticker=ticker)
+        if path is None:
+            print(f"latest.md unchanged since last probe for {ticker}; no probe queued")
+        else:
+            print(f"queued latest.md update probe to {agent_name(ticker, 'orchestrator')}: {path}")
+
     if args.read_human:
         print_human_inbox(root, ticker=ticker)
 
-    if not (args.send or args.read_human or args.apply_comments or args.render_comments or args.ensure_dirs):
-        raise SystemExit("nothing to do; use --send for an existing team, --read-human for replies, or --render-comments/--apply-comments for setup")
+    if not (args.send or args.probe_latest_if_changed or args.read_human or args.apply_comments or args.render_comments or args.ensure_dirs):
+        raise SystemExit("nothing to do; use --send for an existing team, --probe-latest-if-changed after a latest.md update, --read-human for replies, or --render-comments/--apply-comments for setup")
 
     return 0
 
