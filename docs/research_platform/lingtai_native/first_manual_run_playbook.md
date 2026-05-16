@@ -4,33 +4,36 @@ This playbook tests the LingTai-native design without adding a separate AlphaSee
 
 ## Goal
 
-Run one ticker team and observe whether four long-lived LingTai avatars can coordinate using only:
+Run one ticker-local team and observe whether four long-lived LingTai avatars can coordinate using only:
 
-- LingTai mail;
+- ticker-local LingTai mail;
 - LingTai pad/memory;
 - LingTai file and bash capabilities;
 - thin per-agent `init.json.comment` role text;
-- a minimal AlphaSeeker vault surface.
+- a minimal AlphaSeeker vault surface;
+- an outer harness that sends requests and reads ticker-local `human` replies.
 
 The goal is not to beat v8.1 memo quality on the first try. The goal is to learn what structure or tools are actually necessary.
 
 ## Setup / initialization
 
 1. Pick a ticker, e.g. `TSLA`.
-2. Create or verify the minimal vault directories:
+2. Create or verify the minimal vault and ticker-local mailbox directories:
 
    ```bash
    python3 scripts/lingtai_ticker_harness.py TSLA --ensure-dirs
    ```
 
-3. Create four LingTai avatars using the existing LingTai workflow if they do not already exist:
+3. Create four LingTai avatars inside the ticker-local network if they do not already exist:
 
    ```text
-   TSLA_orchestrator
-   TSLA_source
-   TSLA_writer
-   TSLA_reviewer
+   vault/companies/TSLA/.lingtai/TSLA_orchestrator
+   vault/companies/TSLA/.lingtai/TSLA_source
+   vault/companies/TSLA/.lingtai/TSLA_writer
+   vault/companies/TSLA/.lingtai/TSLA_reviewer
    ```
+
+   The ticker-local `vault/companies/TSLA/.lingtai/human/` is the frontend/harness endpoint for TSLA. It is not the project-level Terry/TUI.
 
 4. For first-time setup or explicit reset, render the thin templates into each avatar's own `init.json.comment`:
 
@@ -46,7 +49,7 @@ The goal is not to beat v8.1 memo quality on the first try. The goal is to learn
 
 ## Runtime request simulation
 
-For an existing team, the frontend/harness simulator should only send a natural-language request to the orchestrator:
+For an existing team, the frontend/harness simulator should only send a natural-language request to the ticker-local orchestrator:
 
 ```bash
 python3 scripts/lingtai_ticker_harness.py TSLA \
@@ -54,7 +57,21 @@ python3 scripts/lingtai_ticker_harness.py TSLA \
   --send
 ```
 
-The script queues a human-style internal mail message via `.lingtai/human/mailbox/outbox`; the LingTai kernel delivers it to `TSLA_orchestrator`.
+The script queues a human-style internal mail message via:
+
+```text
+vault/companies/TSLA/.lingtai/human/mailbox/outbox/<id>/message.json
+```
+
+The ticker-local LingTai kernel delivers it to `TSLA_orchestrator`.
+
+To inspect what the ticker team sent back to the ticker-local human endpoint:
+
+```bash
+python3 scripts/lingtai_ticker_harness.py TSLA --read-human
+```
+
+The outer harness/codex layer decides what, if anything, to relay from that ticker-local human inbox to the real project-level human/TUI.
 
 For a full report request:
 
@@ -71,7 +88,7 @@ python3 scripts/lingtai_ticker_harness.py RKLB \
 3. Writer drafts or revises from the wiki/source base.
 4. Reviewer challenges whether the draft supports its conclusion.
 5. Orchestrator answers: is this institutional-grade for a real capital-allocation decision?
-6. If yes, orchestrator publishes to `vault/companies/<TICKER>/team/published/latest.md`.
+6. If yes, orchestrator publishes to `vault/companies/<TICKER>/team/published/latest.md` and reports to ticker-local `human`.
 7. If no, orchestrator states the needed improvement, assigns it to the right teammate, and keeps the run open unless the human redirects or stops it.
 
 ## What to observe
@@ -79,6 +96,7 @@ python3 scripts/lingtai_ticker_harness.py RKLB \
 Record observations after the run:
 
 - Did the avatars understand their roles from only a few comment lines?
+- Did ticker-local mail prevent internal team chatter from directly surfacing in the project-level TUI?
 - Did the source maintainer need more structure than raw/wiki?
 - Did writer/reviewer communication work naturally through mail?
 - Did anyone need a prescribed workspace, or did each avatar self-organize?

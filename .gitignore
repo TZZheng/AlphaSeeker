@@ -227,6 +227,7 @@ charts/
 .recipe
 # Generated research workspace artifacts
 .trash/
+vault/companies/*/.lingtai/
 vault/companies/*/team/raw/
 vault/companies/*/team/drafts/
 vault/companies/*/team/prompts/

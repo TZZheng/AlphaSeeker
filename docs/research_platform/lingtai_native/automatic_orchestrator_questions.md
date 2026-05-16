@@ -12,7 +12,7 @@ For each memo or update, the harness/orchestrator loop centers on one question:
 
 > Is this institutional-grade for a real capital-allocation decision? Answer directly: yes or no.
 
-If yes, publish as accepted research at `vault/companies/<TICKER>/team/published/latest.md`.
+If yes, publish as accepted research at `vault/companies/<TICKER>/team/published/latest.md` and report through the ticker-local human inbox.
 
 If no, do not publish. State the improvement needed, assign it to the right teammate, and keep the run open unless the human redirects or stops it.
 
@@ -27,6 +27,7 @@ The automatic harness should not:
 - rebuild or overwrite prompts for existing long-lived agents on every request;
 - bypass the orchestrator and direct individual team members;
 - edit `published/` itself;
+- expose every internal ticker-team mail directly to the project-level TUI;
 - create a parallel AlphaSeeker runtime.
 
 ## Why this matches LingTai

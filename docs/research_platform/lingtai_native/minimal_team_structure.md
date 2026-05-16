@@ -2,10 +2,16 @@
 
 ## Contract
 
-For each ticker team, AlphaSeeker v0 prescribes only a few stable file surfaces:
+For each ticker team, AlphaSeeker v0 prescribes only a ticker-local LingTai network plus a few stable file surfaces:
 
 ```text
 vault/companies/<TICKER>/
+  .lingtai/              # ticker-local LingTai network, gitignored runtime state
+    human/               # frontend/harness endpoint for this ticker
+    <TICKER>_orchestrator/
+    <TICKER>_source/
+    <TICKER>_writer/
+    <TICKER>_reviewer/
   wiki/                  # maintained factual company wiki
   team/
     raw/                 # source-material landing zone
@@ -15,7 +21,25 @@ vault/companies/<TICKER>/
       versions/          # optional accepted-output history
 ```
 
-This is the whole v0 filesystem contract. LingTai owns mail, logs, memory, pads, lifecycle, and per-avatar working state.
+This is the whole v0 filesystem contract. LingTai owns mail, logs, memory, pads, lifecycle, and per-avatar working state inside the ticker-local `.lingtai/` network.
+
+## `.lingtai/`
+
+The ticker-local `.lingtai/` contains the team's avatars and its local `human` pseudo-agent. It is runtime state and should not be committed.
+
+The outer harness writes requests to:
+
+```text
+vault/companies/<TICKER>/.lingtai/human/mailbox/outbox/
+```
+
+The ticker team replies to:
+
+```text
+vault/companies/<TICKER>/.lingtai/human/mailbox/inbox/
+```
+
+The outer harness decides what to relay from this ticker-local inbox to the real project-level human/TUI.
 
 ## `raw/`
 
@@ -85,8 +109,8 @@ source_notes.md
 
 Reasons:
 
-- LingTai already has logs and histories.
-- Requests should be LingTai mail.
+- LingTai already has logs and histories inside the ticker-local network.
+- Requests should be ticker-local LingTai mail.
 - Per-avatar working state should live in each avatar's own LingTai space and pad.
 - Source state should emerge from the source maintainer's practice, not from a premature external schema.
 - Real runs should reveal what extra structure is truly needed.
