@@ -23,13 +23,7 @@ These questions are deliberately general. They ask the orchestrator for a self-a
 
 ## Expected orchestrator response
 
-The orchestrator must answer the institutional-grade question directly, using one of the four labels below as supporting policy:
-
-- `Yes — institutional-grade`, with a short explanation of the decision the memo supports, horizon, risk/reward, thesis-breakers, evidence depth, and why remaining limitations do not justify another cycle.
-- `No — IC-ready but not institutional-grade`, with the missing institutional-grade gaps, why the current lower grade is honest, and whether any feasible material gap should be routed now.
-- `No — PM briefing/discovery-grade only`, with the gap list and a focused source/writer/reviewer task if a feasible material gap remains.
-- `No — do not publish yet`, followed by the next concrete evidence or revision cycle.
-- `No, the next necessary evidence is outside current tools/scope`, with a clear blocker report to the human and a lower honest grade if an intermediate memo is still published.
+The orchestrator should answer in plain language, not by satisfying a separate checklist. A good response says whether the memo is institutional-grade, what prevents that grade if it is not, what the team will improve now, or why the remaining gaps do not justify another cycle.
 
 A source-pack-limited memo can be a valid intermediate artifact, but it is not the terminal state when the mission is to reach a full investment conclusion. Do not use `accept with caveats` or `yes with caveats` as a final answer; answer whether the original objective is met, then discuss limitations separately.
 

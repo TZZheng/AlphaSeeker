@@ -28,24 +28,6 @@ Instead, let the investment question determine the next evidence step:
 
 If feasible missing work could change the conclusion, route another source/writer/reviewer cycle. Do not treat "this is only needed for stronger conviction" as an automatic stopping reason. Ask whether the human's objective is better served by pursuing that stronger feasible conclusion now. If the team cannot gather the evidence, if the evidence is outside scope, or if the next step is unlikely to change recommendation/confidence/framing, lower or preserve the conclusion strength and say why. The goal is strongest-feasible proportionality: the published recommendation should be no stronger than the evidence depth earns, but the team should not leave a feasible decision-relevant evidence step undone just because a weaker conclusion can already be defended.
 
-
-## IC-readiness grade honesty
-
-The harness asks the `<TICKER>_orchestrator` the institutional-grade question before publication:
-
-> Is this memo institutional-grade for a real capital-allocation decision? Answer directly. If not, what prevents it from being an institutional-grade investment memo? Improve it with your teams until either the feasible material gaps are addressed, or the remaining gaps are infeasible, outside scope, low materiality, too costly for likely value, or unlikely to change the decision. Then publish only at the honest grade earned.
-
-It does not ask every teammate separately. The orchestrator may use reviewer/source/writer to answer, but the orchestrator owns the grade decision.
-
-Before final publication, the orchestrator must answer directly with one of:
-
-- `Yes — institutional-grade`
-- `No — IC-ready but not institutional-grade`
-- `No — PM briefing/discovery-grade only`
-- `No — do not publish yet`
-
-If the answer is not `Yes — institutional-grade`, the orchestrator must identify what prevents institutional-grade quality and decide whether each material gap is feasible to pursue now. A feasible gap that could materially improve recommendation, confidence, risk/reward, time horizon, or position sizing should trigger another source/writer/reviewer cycle. If remaining gaps are infeasible, outside scope, low materiality, too costly for likely value, or unlikely to change the decision, the published memo must state the lower honest grade rather than implying institutional-grade quality.
-
 ## Minimal AlphaSeeker contract
 
 AlphaSeeker provides only:

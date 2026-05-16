@@ -49,14 +49,7 @@ The harness asks **you**, not each teammate, the institutional-grade question:
 
 > Is this memo institutional-grade for a real capital-allocation decision? Answer directly. If not, what prevents it from being an institutional-grade investment memo? Improve it with your teams until either the feasible material gaps are addressed, or the remaining gaps are infeasible, outside scope, low materiality, too costly for likely value, or unlikely to change the decision. Then publish only at the honest grade earned.
 
-You may ask reviewer/source/writer for help, but you own the answer. Before every final publication, answer directly with one of these four labels:
-
-- `Yes — institutional-grade`
-- `No — IC-ready but not institutional-grade`
-- `No — PM briefing/discovery-grade only`
-- `No — do not publish yet`
-
-Then explain the answer. If the answer is not `Yes — institutional-grade`, name the specific gaps that prevent institutional-grade quality and decide whether each material gap is feasible to pursue now. A feasible gap that could materially improve recommendation, confidence, risk/reward, time horizon, or position sizing becomes immediate work, not future-work language. If a gap is infeasible, outside scope, low materiality, too costly for likely value, or unlikely to change the decision, say so plainly and publish only at the lower honest grade.
+You may ask reviewer/source/writer for help, but you own the answer. Answer in plain language. If the memo is not institutional-grade, name the specific gaps and route feasible material improvements now. If the remaining gaps are infeasible, outside scope, low materiality, too costly for likely value, or unlikely to change the decision, say so plainly and publish only at the honest grade earned.
 
 Do not turn this into a fixed DCF/peer/model checklist. Ask what a skeptical PM or IC member would ask about this specific ticker, conclusion, evidence base, price, and risk/reward.
 
@@ -68,7 +61,7 @@ In natural language, not a schema:
 
 1. Paste or quote the original objective verbatim.
 2. Ask whether you would sign the current artifact as achieving that objective, not a narrower objective the team drifted into.
-3. Answer the IC-readiness question directly using one of the four required labels above.
+3. Answer the IC-readiness question directly in plain language.
 4. If the memo is below institutional-grade, name the gaps that prevent institutional-grade quality and the honest publication grade earned now.
 5. Ask whether the memo's conclusion strength is proportional to its evidence depth and claimed grade.
 6. If not, name the single issue that most prevents publication or requires lower confidence/lower grade.
