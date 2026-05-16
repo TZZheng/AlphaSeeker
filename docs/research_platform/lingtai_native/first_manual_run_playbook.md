@@ -43,7 +43,7 @@ The goal is not to beat v8.1 memo quality on the first try. The goal is to learn
 The human sends the orchestrator a message like:
 
 ```text
-Please coordinate a first TSLA research memo. The raw landing zone is vault/companies/TSLA/team/raw/ and it may be empty at the start. Ask the source maintainer to gather or identify necessary raw material, ask the writer for a draft, ask the reviewer to challenge it, then as orchestrator cold-read the finished artifact against this original objective before publishing to vault/companies/TSLA/team/published/latest.md. Do not require a fixed DCF/consensus/peer checklist, but do ensure the memo's conclusion strength is proportional to its evidence depth.
+Please coordinate a first TSLA research memo. The raw landing zone is vault/companies/TSLA/team/raw/ and it may be empty at the start. Ask the source maintainer to gather or identify necessary raw material, ask the writer for a draft, ask the reviewer to challenge it, then as orchestrator cold-read the finished artifact against this original objective before publishing to vault/companies/TSLA/team/published/latest.md. Do not require a fixed DCF/consensus/peer checklist, but do ensure the memo's conclusion strength is proportional to its evidence depth and that any feasible decision-relevant next evidence step is pursued or explicitly rejected as infeasible/low-materiality.
 ```
 
 ## Expected team flow
@@ -56,7 +56,7 @@ Please coordinate a first TSLA research memo. The raw landing zone is vault/comp
 6. Reviewer checks the draft, asks source maintainer for support if needed, and mails issues to writer.
 7. Writer revises or dissents.
 8. Reviewer sends discovery feedback: material issues, strengths, whether conclusion strength is proportional to evidence depth, and whether another cycle could materially improve the conclusion. Reviewer does not authorize publication and does not use `accept with caveats` as a verdict.
-9. Orchestrator cold-reads the finished artifact against the original objective in natural language. If another cycle could materially improve a decisive gap or justify a stronger conclusion, orchestrator routes it; otherwise final output is written to `published/latest.md` and optionally copied to `published/versions/<date>.md` with limitations/confidence stated plainly.
+9. Orchestrator cold-reads the finished artifact against the original objective in natural language. If another cycle could materially improve a decisive gap, change recommendation/confidence/framing, or justify a stronger conclusion, orchestrator routes it. Orchestrator writes final output to `published/latest.md` only after the next identified evidence step is infeasible, outside scope, low materiality, or unlikely to change the decision; limitations/confidence are stated plainly.
 10. Orchestrator reports back to the human.
 
 ## What to observe
@@ -69,7 +69,7 @@ Record observations after the run:
 - Did anyone need a prescribed workspace, or did each avatar self-organize?
 - Was `published/latest.md` enough as the human-facing contract?
 - Did the orchestrator cold-read the final artifact against the original objective rather than relying on reviewer approval?
-- Did the team calibrate conclusion strength to evidence depth instead of forcing a fixed artifact checklist?
+- Did the team calibrate conclusion strength to evidence depth instead of forcing a fixed artifact checklist? Did it pursue feasible decision-relevant evidence rather than stopping at the first defensible weaker conclusion?
 - Did anyone use `accept with caveats` / `yes with caveats` to launder an unmet objective into publication?
 - Which failures would be fixed by prompts, and which require tools?
 

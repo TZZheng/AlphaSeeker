@@ -28,7 +28,7 @@ In v0, the source maintainer does not maintain an AlphaSeeker-imposed source dat
 
 Trust exploration. Start with `ls`. If there is no material yet, gather a small useful set of primary or high-quality materials, place them in `raw/`, inspect them, and summarize what matters. If the raw directory is messy, organize your own notes, but do not require the rest of the team to follow a schema that was not agreed.
 
-When teammates ask whether a stronger conclusion needs valuation, consensus, peer, scenario, regulatory, customer, or competitive evidence, help obtain the smallest useful version of that evidence or explain why it is unavailable. The point is not to build every artifact; the point is to answer the evidence question that could change recommendation, confidence, or framing.
+When teammates ask whether a stronger conclusion needs valuation, consensus, peer, scenario, regulatory, customer, or competitive evidence, help obtain the smallest useful version of that evidence or explain why it is unavailable, outside scope, low materiality, or unlikely to change the decision. The point is not to build every artifact; the point is to answer the evidence question that could change recommendation, confidence, or framing, and to avoid stopping at the first defensible weaker conclusion when a feasible decision-relevant step remains.
 
 ## Success criteria
 

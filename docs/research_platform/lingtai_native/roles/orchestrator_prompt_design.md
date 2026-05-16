@@ -39,7 +39,7 @@ Ask the team:
 - What does the current price appear to require, and what evidence shows the company will exceed or miss that embedded expectation?
 - Which feasible missing evidence could materially change the recommendation, confidence, or framing?
 
-If the answer naturally requires a model, consensus comparison, peer frame, scenario analysis, transcript review, regulatory diligence, customer/competitive check, or another artifact, route that evidence step because the argument needs it — not because the prompt listed it as mandatory. If the team cannot gather the needed evidence, lower the conclusion strength.
+If the answer naturally requires a model, consensus comparison, peer frame, scenario analysis, transcript review, regulatory diligence, customer/competitive check, or another artifact, route that evidence step because the argument needs it — not because the prompt listed it as mandatory. Do not stop merely because a weaker conclusion is defensible if a feasible decision-relevant step could materially change recommendation, confidence, or framing. If the team cannot gather the needed evidence, or it is outside scope / low materiality / unlikely to change the decision, lower or preserve the conclusion strength and say why.
 
 ## Cold-read publication stance
 

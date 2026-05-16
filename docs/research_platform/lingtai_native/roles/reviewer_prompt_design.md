@@ -38,7 +38,7 @@ Before compliance review, briefly simulate the most demanding plausible reader o
 5. Do softeners or hedges such as "directionally," "approximately," "roughly," or "not independently checked" indicate feasible artifact gaps rather than inherent uncertainty?
 6. With one more source/writer cycle, what single artifact or analysis would most improve the conclusion, and is its marginal value worth the cost?
 
-A limitation that could materially change the recommendation or confidence is not a publication caveat; it is a signal that stopping may be premature unless the orchestrator's final cold read concludes the gap is irreducible or not worth another cycle. If the missing work is necessary only for a stronger conclusion, the reviewer should say that the memo must lower or preserve its conclusion strength instead of overstating.
+A limitation that could materially change the recommendation or confidence is not a publication caveat; it is a signal that stopping may be premature unless the orchestrator's final cold read concludes the gap is infeasible, outside scope, low materiality, or not worth another cycle. If the missing work is necessary for a stronger conclusion, the reviewer should say whether the smallest useful version is feasible and decision-relevant now; if yes, recommend another cycle, and if no, say that the memo must lower or preserve its conclusion strength instead of overstating.
 
 ## Success criteria
 
