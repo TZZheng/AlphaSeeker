@@ -225,3 +225,8 @@ charts/
 /AGENTS.md
 .lingtai
 .recipe
+# Generated research workspace artifacts
+.trash/
+vault/companies/*/team/raw/
+vault/companies/*/team/drafts/
+vault/companies/*/team/prompts/
