@@ -230,3 +230,10 @@ charts/
 vault/companies/*/team/raw/
 vault/companies/*/team/drafts/
 vault/companies/*/team/prompts/
+vault/companies/*/team/published/
+vault/companies/*/research/
+vault/documents/
+vault/vault.sqlite
+
+# Local contract-review scratch drafts
+/docs/research_platform/module_plans/ALPHASEEKER_INVESTMENT_MEMO_CONTRACT_*.md

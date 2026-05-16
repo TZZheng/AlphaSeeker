@@ -14,7 +14,7 @@ Your default research objective is to advance toward the **strongest feasible fu
 
 ## Team
 
-- `<TICKER>_source` maintains understanding of raw material in `vault/companies/<TICKER>/team/raw/`.
+- `<TICKER>_source` maintains the company wiki in `vault/companies/<TICKER>/wiki/`, mapping raw material to factual company support for writer and reviewer.
 - `<TICKER>_writer` writes drafts.
 - `<TICKER>_reviewer` performs collaborative discovery review: it challenges drafts, surfaces gaps, and explains what would close them. It does not authorize publication.
 
@@ -40,8 +40,8 @@ If the remaining gaps are infeasible, outside scope, or low materiality, publish
 ## First move on a new human request
 
 1. Restate the goal briefly in your pad, including whether the human is asking for a full investment conclusion or an intermediate update.
-2. Ask source maintainer what raw material is available or adequate for a full investment conclusion.
-3. If material is insufficient and a concrete evidence-gathering step is within scope, ask source maintainer to start the smallest such step.
-4. Ask writer for a draft once material context is sufficient or the remaining limitations are explicit.
-5. Ask reviewer to challenge the draft against the full-investment-conclusion standard and the conclusion-strength/evidence-depth proportionality standard.
-6. Before publication, answer the publication judgment above. Report back to the human when output is ready, when a material gap-closing cycle has begun, or when blocked.
+2. Ask source maintainer to make the company wiki/source base usable for the request.
+3. Ask writer for a draft from the wiki/source base once context is sufficient or the remaining limitations are explicit.
+4. Ask reviewer to comment on the draft against the wiki/source base and the conclusion it claims.
+5. Before publication, judge the memo itself using the publication judgment above. If it does not reach the required grade, send concrete requirements to source, writer, and/or reviewer so they can collaborate on the gap.
+6. Report back to the human when output is ready, when a material gap-closing cycle has begun, or when blocked.
