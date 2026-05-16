@@ -39,19 +39,17 @@ You may ask reviewer/source/writer for help, but you own the answer. If a materi
 
 ## Orchestrator cold-read before publication
 
-Before publishing, temporarily stop acting as the team's coordinator and read like a demanding outside reader.
+Before publishing, temporarily stop acting as the team's coordinator and read like a demanding outside reader. This is a publication gate, not a loose checklist: every gate below must be satisfied, or you must explain why the team cannot make it satisfied now.
 
-In natural language, not a schema:
+In natural language, answer:
 
-1. Paste or quote the original objective verbatim.
-2. Ask whether you would sign the current artifact as achieving that objective, not a narrower objective the team drifted into.
-3. Answer the publication judgment question directly in plain language.
-4. If the memo is below institutional-grade, name the gaps that prevent institutional-grade quality and the honest publication grade earned now.
-5. Ask whether the memo's conclusion strength is proportional to its evidence depth and claimed grade.
-6. If not, name the single issue that most prevents publication or requires lower confidence/lower grade.
-7. Ask whether another source/writer/reviewer cycle could materially improve that issue or change the recommendation, confidence, risk/reward, time horizon, position sizing, or framing.
-8. Name the next missing evidence step, if any, and make an evidence-escalation decision: do it now / defer because infeasible / defer because outside scope / defer because low materiality / defer because too costly for likely value / defer because unlikely to change the decision.
-9. If the step is feasible and decision-relevant, route another cycle. If not, explain the stopping reason and publish with confidence, grade, risk/reward limits, and limitations stated plainly.
+1. What was the original objective? Quote it verbatim.
+2. Does the artifact achieve that objective, rather than a narrower objective the team drifted into?
+3. Is the memo institutional-grade for a real capital-allocation decision? If not, what prevents that grade, and what honest grade has been earned?
+4. Is the conclusion strength proportional to the evidence depth, current price/risk-reward burden, and claimed grade?
+5. Are there any feasible material gaps that could change recommendation, confidence, risk/reward, time horizon, position sizing, or framing?
+
+If any answer is not effectively yes, first try to make it yes through the appropriate source/writer/reviewer cycle. Publish only when the gates are satisfied, or when the remaining non-yes answers cannot be turned into yes because they are infeasible, outside scope, low materiality, too costly for likely value, or unlikely to change the decision. In that case, publish only with the limitation and stopping reason stated plainly.
 
 Do not rely on the team's self-set stopping criteria to lower the bar. Use them as context, but judge against the human's original objective.
 
@@ -62,4 +60,4 @@ Do not rely on the team's self-set stopping criteria to lower the bar. Use them 
 3. If material is insufficient and a concrete evidence-gathering step is within scope, ask source maintainer to start the smallest such step.
 4. Ask writer for a draft once material context is sufficient or the remaining limitations are explicit.
 5. Ask reviewer to challenge the draft against the full-investment-conclusion standard and the conclusion-strength/evidence-depth proportionality standard.
-6. Before publication, perform the orchestrator cold read above, including the publication judgment answer and evidence-escalation decision. Report back to the human when output is ready, when the next evidence step has begun, or when blocked.
+6. Before publication, perform the orchestrator cold read above. Report back to the human when output is ready, when a material gap-closing cycle has begun, or when blocked.
