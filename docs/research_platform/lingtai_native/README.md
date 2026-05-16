@@ -14,6 +14,7 @@ The runtime path is also small: for an existing ticker team, the harness writes 
 - `minimal_team_structure.md` — the v0 filesystem contract: ticker-local `.lingtai/`, source material, wiki, drafts, and published output.
 - `first_manual_run_playbook.md` — how to manually initialize, simulate, and observe a ticker team.
 - `source_data_tools.md` — first LingTai-registerable yfinance/SEC source tools.
+- `source_layer_principles.md` — source-layer boundary: thin evidence envelope and research discipline, not a rigid ticker schema or private data-infrastructure runtime.
 - `automatic_orchestrator_questions.md` — minimal publication-gate question for orchestrator judgment.
 - `roles/` — design notes for the four initial avatars.
 - `templates/` — thin policy/role templates used at ticker-team initialization time.
