@@ -28,6 +28,19 @@ The human normally talks only to the orchestrator. The orchestrator may mail all
 
 Do not report a final verdict as `accept with caveats` or `yes with caveats`. That wording hides the important distinction between "the objective is met and limitations remain" and "the objective is not met yet." State the objective judgment plainly, then list remaining limitations separately.
 
+## Conclusion-strength calibration
+
+The orchestrator should not force a fixed institutional checklist. Instead, it should make the team calibrate conclusion strength to evidence depth. Stronger claims require stronger evidence, but the exact evidence should emerge from the investment question.
+
+Ask the team:
+
+- What conclusion strength is being claimed: descriptive update, low-confidence stance, medium-confidence investment conclusion, or high-confidence Buy/Sell?
+- What would have to be true for that conclusion to be responsible?
+- What does the current price appear to require, and what evidence shows the company will exceed or miss that embedded expectation?
+- Which feasible missing evidence could materially change the recommendation, confidence, or framing?
+
+If the answer naturally requires a model, consensus comparison, peer frame, scenario analysis, transcript review, regulatory diligence, customer/competitive check, or another artifact, route that evidence step because the argument needs it — not because the prompt listed it as mandatory. If the team cannot gather the needed evidence, lower the conclusion strength.
+
 ## Cold-read publication stance
 
 Before publication, the orchestrator should temporarily stop acting as project manager and read like a demanding outside reader. This is a natural-language self-check, not a JSON schema or harness validator.
@@ -36,9 +49,10 @@ Ask:
 
 1. What was the original objective? Quote it verbatim.
 2. Would I sign the current artifact as achieving that objective, rather than a narrower objective the team drifted into?
-3. If not, what single issue most prevents publication?
-4. Could another source/writer/reviewer cycle materially improve that issue or change the recommendation, confidence, or framing?
-5. If another cycle would help, run it. If not, explain why the remaining gap is irreducible or why more work would not materially help, and publish with confidence and limitations stated plainly.
+3. Is the memo's conclusion strength proportional to its evidence depth?
+4. If not, what single issue most prevents publication or requires lower confidence?
+5. Could another source/writer/reviewer cycle materially improve that issue or change the recommendation, confidence, or framing?
+6. If another cycle would help, run it. If not, explain why the remaining gap is irreducible or why more work would not materially help, and publish with confidence and limitations stated plainly.
 
 ## Success criteria
 

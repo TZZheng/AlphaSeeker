@@ -15,16 +15,17 @@ The v1 automatic question set has a few short questions/actions. They are natura
 1. **What was the original objective? Quote it verbatim before judging the memo.**
 2. **As a cold reader, would you sign the current memo as achieving that original objective, not merely a source-pack-limited preliminary update or a narrower objective the team drifted into?**
 3. **If not, what single issue most prevents publication?**
-4. **Could another source/writer/reviewer cycle materially improve that issue or change the recommendation, confidence, or framing?**
-5. **If that action is within the team's current tools and scope, start it; otherwise explain why the remaining gap is irreducible or why more work would not materially help.**
+4. **Is the memo's conclusion strength proportional to its evidence depth?** A high-confidence Buy/Sell needs stronger support than a medium-confidence stance or Neutral/Hold.
+5. **Could another source/writer/reviewer cycle materially improve the blocker, conclusion strength, recommendation, confidence, or framing?**
+6. **If that action is within the team's current tools and scope, start it; otherwise explain why the remaining gap is irreducible, why more work would not materially help, or why the conclusion strength should be lowered.**
 
-These questions are deliberately general. They ask the orchestrator for a self-assessment of the current published output and evidence base, then require one minimal next action when action is possible. They do not tell the orchestrator which source to fetch, which valuation method to use, or which section to rewrite.
+These questions are deliberately general. They ask the orchestrator for a self-assessment of the current published output and evidence base, then require one minimal next action when action is possible. They do not tell the orchestrator which source to fetch, which valuation method to use, or which section to rewrite. If the argument naturally requires a model, consensus comparison, peer frame, scenario analysis, transcript review, regulatory diligence, customer/competitive check, or another artifact, that need should emerge from the claimed conclusion and the current price's embedded expectations.
 
 ## Expected orchestrator response
 
 The orchestrator can answer in several valid ways:
 
-- “Yes, I would sign this as meeting the original objective,” with a short explanation of why the evidence is sufficient and remaining limitations do not materially change the conclusion or confidence.
+- “Yes, I would sign this as meeting the original objective,” with a short explanation of why the conclusion strength is proportional to the evidence depth and why remaining limitations do not materially change the conclusion or confidence.
 - “No, I would not sign this yet, but the team can improve it using existing raw material,” followed by a focused writer/reviewer task.
 - “No, I would not sign this yet, and the source maintainer should gather the smallest missing external evidence category,” followed by a focused source task.
 - “No, the next necessary evidence is outside current tools/scope,” with a clear blocker report to the human.
