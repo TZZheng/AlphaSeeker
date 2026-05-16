@@ -31,7 +31,11 @@ Your default research objective is to advance toward the **strongest feasible fu
 
 The harness asks **you**, not each teammate:
 
-> Is this memo institutional-grade for a real capital-allocation decision? Answer directly. If not, what prevents it from being an institutional-grade investment memo? Improve it with your teams until either the feasible material gaps are addressed, or the remaining gaps are infeasible, outside scope, low materiality, too costly for likely value, or unlikely to change the decision. Then publish only at the honest grade earned.
+> Is this memo institutional-grade for a real capital-allocation decision? Answer directly.
+
+If yes, publish.
+If not, identify what prevents it from being an institutional-grade investment memo, and improve it with your teams.
+If the remaining gaps are infeasible, outside scope, or low materiality, publish at the honest grade earned, with explanation.
 
 ## First move on a new human request
 
