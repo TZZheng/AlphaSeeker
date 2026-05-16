@@ -14,17 +14,16 @@ The current automatic question set has a few short questions/actions. They are n
 
 1. **What was the original objective? Quote it verbatim before judging the memo.**
 2. **As a cold reader, would you sign the current memo as achieving that original objective, not merely a source-pack-limited preliminary update or a narrower objective the team drifted into?**
-3. **Is this memo institutional-grade for a real capital-allocation decision? Answer directly with one of: `Yes — institutional-grade`, `No — IC-ready but not institutional-grade`, `No — PM briefing/discovery-grade only`, or `No — do not publish yet`.**
-4. **If it is below institutional-grade, what specifically prevents institutional-grade quality?** Think like a skeptical PM/IC member reviewing this ticker, conclusion, evidence base, price, and risk/reward.
-5. **Is the memo's conclusion strength proportional to its evidence depth and claimed grade?** A high-confidence Buy/Sell or institutional-grade memo needs stronger support than a medium-confidence stance, PM briefing note, or discovery memo.
-6. **Could another source/writer/reviewer cycle materially improve a blocker, conclusion strength, recommendation, confidence, risk/reward, time horizon, position sizing, or framing?**
-7. **If that action is within the team's current tools and scope and could materially change the decision, start it; otherwise explain why the remaining gap is infeasible, outside scope, low materiality, too costly for likely value, unlikely to change the decision, or why the memo should publish only at a lower honest grade. Do not stop merely because a weaker conclusion is already defensible.**
+3. **Is this memo institutional-grade for a real capital-allocation decision? Answer directly. If not, what prevents it from being an institutional-grade investment memo? Improve it with your teams until either the feasible material gaps are addressed, or the remaining gaps are infeasible, outside scope, low-materiality, too costly for likely value, or unlikely to change the decision. Then publish only at the honest grade earned.**
+4. **Is the memo's conclusion strength proportional to its evidence depth and claimed grade?** A high-confidence Buy/Sell or institutional-grade memo needs stronger support than a medium-confidence stance, PM briefing note, or discovery memo.
+5. **Could another source/writer/reviewer cycle materially improve a blocker, conclusion strength, recommendation, confidence, risk/reward, time horizon, position sizing, or framing?**
+6. **If that action is within the team's current tools and scope and could materially change the decision, start it; otherwise explain why the remaining gap is infeasible, outside scope, low materiality, too costly for likely value, unlikely to change the decision, or why the memo should publish only at a lower honest grade. Do not stop merely because a weaker conclusion is already defensible.**
 
 These questions are deliberately general. They ask the orchestrator for a self-assessment of the current published output and evidence base, then require one minimal next action when action is possible. They do not tell the orchestrator which source to fetch, which valuation method to use, or which section to rewrite. If the argument naturally requires a model, consensus comparison, peer frame, scenario analysis, transcript review, regulatory diligence, customer/competitive check, or another artifact, that need should emerge from the claimed conclusion and the current price's embedded expectations.
 
 ## Expected orchestrator response
 
-The orchestrator can answer in several valid ways:
+The orchestrator must answer the institutional-grade question directly, using one of the four labels below as supporting policy:
 
 - `Yes — institutional-grade`, with a short explanation of the decision the memo supports, horizon, risk/reward, thesis-breakers, evidence depth, and why remaining limitations do not justify another cycle.
 - `No — IC-ready but not institutional-grade`, with the missing institutional-grade gaps, why the current lower grade is honest, and whether any feasible material gap should be routed now.

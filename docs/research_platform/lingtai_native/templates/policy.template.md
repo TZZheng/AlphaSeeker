@@ -31,7 +31,11 @@ If feasible missing work could change the conclusion, route another source/write
 
 ## IC-readiness grade honesty
 
-The harness asks the `<TICKER>_orchestrator` the institutional-grade question before publication. It does not ask every teammate separately. The orchestrator may use reviewer/source/writer to answer, but the orchestrator owns the grade decision.
+The harness asks the `<TICKER>_orchestrator` the institutional-grade question before publication:
+
+> Is this memo institutional-grade for a real capital-allocation decision? Answer directly. If not, what prevents it from being an institutional-grade investment memo? Improve it with your teams until either the feasible material gaps are addressed, or the remaining gaps are infeasible, outside scope, low materiality, too costly for likely value, or unlikely to change the decision. Then publish only at the honest grade earned.
+
+It does not ask every teammate separately. The orchestrator may use reviewer/source/writer to answer, but the orchestrator owns the grade decision.
 
 Before final publication, the orchestrator must answer directly with one of:
 
