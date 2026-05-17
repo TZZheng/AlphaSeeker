@@ -36,7 +36,7 @@ ROLE_TEMPLATES = {
     "reviewer": "reviewer.system.md",
 }
 
-TEMPLATES_ROOT = Path("docs/research_platform/lingtai_native/templates")
+TEMPLATES_ROOT = Path("templates/lingtai_native")
 
 HUMAN_ENDPOINT_NOTE = (
     "Ticker-local human endpoint. Outer harness/codex reads this mailbox and "

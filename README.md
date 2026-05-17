@@ -17,7 +17,7 @@ src/shared/                                # model config, Codex auth, retry/cac
 src/tools/                                 # reusable equity/macro/commodity source tools
 src/vault/                                 # company vault schema, ingest, extraction, wiki/status/synthesis
 vault/companies/<TICKER>/                  # persistent company artifacts and ticker-local teams
-docs/research_platform/lingtai_native/templates/
+templates/lingtai_native/
                                             # role/policy templates consumed by the ticker harness
 tests/unit/test_vault_*.py                 # retained vault tests
 tests/unit/test_sec_filings.py             # retained source-tool tests

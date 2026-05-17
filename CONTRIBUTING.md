@@ -30,7 +30,7 @@ uv run python -m py_compile scripts/lingtai_ticker_harness.py
 - Add or update docs when behavior changes.
 - Do not commit secrets (`.env`, API keys, OAuth tokens, or live agent credentials).
 - Keep runtime-generated artifacts out of git (`data/`, `reports/`, `charts/`, ticker `.lingtai/` directories, vault raw/draft/published/wiki artifacts unless explicitly requested).
-- Preserve the ticker-native role templates under `docs/research_platform/lingtai_native/templates/` when changing the bridge script.
+- Preserve the ticker-native role templates under `templates/lingtai_native/` when changing the bridge script.
 
 ## Coding standards
 
