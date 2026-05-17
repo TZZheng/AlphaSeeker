@@ -1,227 +1,143 @@
-<p align="center">
-  <img src="docs/examples/assets/AlphaSeeker.png" alt="AlphaSeeker — Multi-Agent Research Terminal" width="720"/>
-</p>
-
-<p align="center">
-  <a href="https://github.com/TZZheng/AlphaSeeker/actions/workflows/ci.yml">
-    <img src="https://github.com/TZZheng/AlphaSeeker/actions/workflows/ci.yml/badge.svg" alt="CI"/>
-  </a>
-  <img src="https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white" alt="Python"/>
-  <img src="https://img.shields.io/badge/package%20manager-uv-5C6AC4" alt="uv"/>
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="License"/>
-</p>
-
 # AlphaSeeker
 
-**Multi-agent quantitative research — from question to comprehensive investment memo.**
+AlphaSeeker is now a vault-first research workspace for company-centered investment work.  The old subprocess harness and Textual TUI have been removed.  The retained backend focuses on three things:
 
-AlphaSeeker is a file-based async multi-agent runtime. Give it a financial question — it spawns specialist agents, fetches real market data, builds charts, and synthesizes everything into a single well-structured report. The entire process is traceable: every agent workspace, every data fetch, every model call is written to disk.
+1. **Persistent company vaults** under `vault/companies/<TICKER>/`.
+2. **Deterministic source ingestion and wiki/status rendering** in `src/vault/`, backed by reusable market/source tools in `src/tools/` and shared model/reliability utilities in `src/shared/`.
+3. **A ticker-local LingTai team bridge** (`scripts/lingtai_ticker_harness.py`) that lets a frontend or operator send questions to long-lived ticker teams and read their replies through the ticker-local `human` mailbox.
 
-No black boxes. No hallucinated numbers. Research that actually shows its work.
+This is a breaking cleanup: legacy `src/harness`, `src/cli`, `src/research_platform`, `src/retrieval`, `main.py`, and their tests/docs are intentionally gone.
 
----
-
-## What It Produces
-
-Here is a real output from a single prompt: *"Write an investment memo on XOM."*
-
-> **ExxonMobil is an exceptional company operating at the top of the global oil industry. Its asset portfolio — anchored by the Permian Basin, Guyana, and world-scale refining — is structurally advantaged, its balance sheet is fortress-quality, and its shareholder return commitment is unmatched among integrated majors. Yet the stock at approximately $160–162 per share presents a challenging near-term risk/reward.**
->
-> **Investment verdict:** Hold/Underweight at current levels. A pullback to $130–140 would offer a materially better entry. Q1 2026 earnings (May 1, 2026) are a critical near-term catalyst.
-
-The full memo covers: executive summary and verdict, FY2025 financials (revenue, FCF, ROCE), valuation (EV/EBITDA, P/E, FCF yield, analyst consensus), balance sheet quality, shareholder return analysis, crude oil supply/demand balance, WTI futures curve structure, U.S. macro backdrop, and bull/bear cases with 12-month risk/reward.
-
-**[Read the full XOM memo →](docs/examples/assets/xom_investment_memo.md)**
-
----
-
-## How It Works
-
-```
-User Prompt
-    │
-    ▼
-Root Orchestrator Agent (subprocess)
-    │  LLM decides: delegate? which skills? when done?
-    ├─► spawns child agents (research, writer, synthesizer...)
-    │       │
-    │       ▼
-    │   Skill Tools  ←  deterministic, no hallucination
-    │       │  market data · SEC filings · FRED · EIA · CFTC
-    │       ▼
-    │   publish/  ← agent writes results here
-    │
-    ▼
-Root reads child publish/ → synthesizes final memo
-    │
-    ▼
-Final Report + full run trace on disk
-```
-
-Key design choices:
-
-- **File-based handoff** — agents communicate by writing and reading files, not in-memory state. Every intermediate result is inspectable.
-- **Subprocess isolation** — a crashed or stalled child agent cannot block the pipeline.
-- **Skill packs** — deterministic tools organized by domain: core, equity, macro, commodity.
-- **Commenter sidecar** — after each agent turn, a paired reviewer reads changed workspace state and injects advisory notes before that agent's next model call.
-
----
-
-## Why AlphaSeeker
-
-| Typical finance research | AlphaSeeker |
-|---|---|
-| Relies on a single model's training data | Fetches live market data, SEC filings, EIA, FRED |
-| You can't see how the answer was built | Every step is written to disk — inspect it all |
-| One flat response | Multi-agent parallel research synthesized into one memo |
-| Model can hallucinate numbers | Deterministic tools pull facts from external APIs |
-| Fragile on slow I/O | Subprocess isolation — one slow tool doesn't block the pipeline |
-
----
-
-## What It Can Research
-
-| Domain | Skill tools | Typical output |
-|---|---|---|
-| **Equity** | Market data, company profile, financials, SEC filings, insider activity, peer analysis, earnings calls | Equity research memo with valuation, risk factors, peer context |
-| **Macro** | FRED indicators, World Bank cross-country data | Macro brief covering growth, inflation, rates |
-| **Commodity** | EIA inventory, CFTC COT positioning, futures curve | Commodity report with supply-demand analysis |
-| **Core** | Web search, file read/write, context condensation, datetime | Used by all domains |
-
-The orchestrator decides which combination to invoke — no manual routing required.
-
-**Example prompts:**
-
-```
-Analyze AAPL from valuation and risk perspective
-US macro outlook for the next 12 months
-Crude oil supply-demand and futures curve outlook
-How do higher rates affect JPM and bank margins?
-How would a weaker dollar affect gold miners and the gold price?
-```
-
----
-
-## Quickstart
-
-**Prerequisites:** Python 3.11+, [uv](https://docs.astral.sh/uv/)
-
-```bash
-# 1. Install dependencies
-uv sync
-
-# 2. Configure API keys
-cp .env.example .env
-# Edit .env and fill in the keys for the providers you use
-
-# 3. Run
-uv run python main.py "Write an investment memo on XOM"
-
-# Or interactive mode
-uv run python main.py
-```
-
----
-
-## Configuration
-
-### Model providers
-
-Model assignments live in `config/models.yaml`. API-key providers require the corresponding key; the Codex subscription transport uses the LingTai/TUI OAuth token file instead of `OPENAI_API_KEY`:
-
-| Provider prefix | Required env var |
-|---|---|
-| `sf/` | `SILICONFLOW_API_KEY` |
-| `kimi-` | `KIMI_API_KEY` |
-| `minimax/` or `MiniMax-*` | `MINIMAX_API_KEY` |
-| `gpt-` or `o*` | `OPENAI_API_KEY` |
-| `codex/` | `~/.lingtai-tui/codex-auth.json` (created by LingTai/TUI login) |
-| `gemini-` | `GOOGLE_API_KEY` |
-| `claude-` | `ANTHROPIC_API_KEY` |
-
-**Current harness default: native Codex.** `config/models.yaml` sets both the harness agent and condense role to `codex/gpt-5.5`, which uses the ChatGPT Codex Responses backend at `https://chatgpt.com/backend-api/codex` with OAuth tokens from `~/.lingtai-tui/codex-auth.json`. This is not the OpenAI API-key path and does not shell out to the Codex CLI.
-
-MiniMax endpoint defaults to `https://api.minimaxi.com/v1`. Override with `MINIMAX_BASE_URL` if needed.
-
-### Data source keys
-
-Only required when the corresponding skills are invoked:
-
-| Key | Used for |
-|---|---|
-| `FRED_API_KEY` | Macro indicator fetches |
-| `EIA_API_KEY` | Commodity inventory fetches |
-| `FMP_API_KEY` | Insider-trading data |
-
-### Model override
-
-```bash
-# Override any model role via env var
-export ALPHASEEKER_MODEL_HARNESS_AGENT="claude-opus-4-5"
-```
-
-Priority: env var → `config/models.yaml` → fallback defaults in `src/shared/model_config.py`.
-
----
-
-## Project Structure
+## Current repository shape
 
 ```text
-AlphaSeeker/
-├── main.py                      # CLI entry point
-├── config/
-│   └── models.yaml              # Model assignments by role
-├── src/
-│   ├── harness/                 # Runtime: orchestrator, workers, skills
-│   │   ├── runtime.py           # Async supervisor kernel
-│   │   ├── agent_worker.py      # Long-lived worker process
-│   │   ├── executor.py          # File-first tools (delegate, bash, read/write)
-│   │   ├── transport.py         # MiniMax / OpenAI API adapters
-│   │   ├── commenter.py         # Paired reviewer sidecar
-│   │   └── skills/              # Deterministic skill adapters
-│   │       ├── core.py          # grep, read, condense…
-│   │       ├── equity.py        # fetch_market_data, fetch_financials…
-│   │       ├── macro.py         # fetch_macro_indicators…
-│   │       └── commodity.py     # fetch_eia_inventory, fetch_cot_report…
-│   ├── tools/                   # Shared data-fetching library
-│   │   ├── equity/              # yfinance, SEC, peers, visualization
-│   │   ├── macro/               # FRED, World Bank
-│   │   └── commodity/           # EIA, CFTC COT, futures curve
-│   └── shared/                  # LLM manager, model config, web search
-├── data/harness_runs/           # Every run's full workspace (git-ignored)
-└── tests/
-    ├── unit/                    # Deterministic logic
-    ├── component/               # Multi-function flows with mocked deps
-    └── live/                    # Real API runs
+config/models.yaml                         # model role configuration for synthesis/shared LLM calls
+scripts/lingtai_ticker_harness.py          # bridge into ticker-local LingTai teams
+src/shared/                                # model config, Codex auth, retry/cache, web/text utilities
+src/tools/                                 # reusable equity/macro/commodity source tools
+src/vault/                                 # company vault schema, ingest, extraction, wiki/status/synthesis
+vault/companies/<TICKER>/                  # persistent company artifacts and ticker-local teams
+docs/research_platform/lingtai_native/templates/
+                                            # role/policy templates consumed by the ticker harness
+tests/unit/test_vault_*.py                 # retained vault tests
+tests/unit/test_sec_filings.py             # retained source-tool tests
+tests/unit/test_reliability.py             # retained shared utility tests
 ```
 
----
+## Vault backend
 
-## Testing
+The vault backend stores company research as durable files plus a SQLite index.
+Key modules:
+
+- `src/vault/schema.py` / `src/vault/store.py` — initialize and query the vault database.
+- `src/vault/ingest.py` — ingest text, markdown, PDFs, and local files into a company vault with source metadata.
+- `src/vault/sec_import.py` — import SEC filing text through the retained equity filing tools.
+- `src/vault/extract.py` — deterministic extraction helpers for structured company records.
+- `src/vault/status.py` — status-patrol/open-question helpers.
+- `src/vault/wiki.py` — render company wiki/support pages from vault state.
+- `src/vault/synthesis.py` — build a source bundle and call the configured LLM for a company research-state synthesis.
+- `src/vault/onboard.py` — high-level onboarding flow that pulls profile/financial/SEC context and renders initial vault pages.
+
+Example direct usage:
 
 ```bash
-# Compile check + offline tests
-uv run python -m compileall -q src main.py
-uv run pytest -m "not live"
+uv run python - <<'PY'
+from src.vault.ingest import ingest_text
+from src.vault.store import VaultStore
 
-# Full live suite (requires API keys)
-uv run pytest -m "live"
+result = ingest_text(
+    "Company-provided source text or an analyst note.",
+    ticker="XOM",
+    title="XOM source note",
+    source_type="manual_file",
+    source_grade="B",
+    source_grade_rationale="manual note; provenance checked by operator",
+    root="vault",
+)
+print(result)
+print(VaultStore("vault").company_context("XOM")["documents"])
+PY
 ```
 
-GitHub Actions runs the offline suite on every push and pull request.
+Run the synthesis layer only when a model backend is configured and expected to be used:
 
----
+```bash
+uv run python - <<'PY'
+from src.vault.synthesis import synthesize_company_research_state
 
-## Further Reading
+print(synthesize_company_research_state("XOM", root="vault"))
+PY
+```
 
-- [Harness runtime deep dive](src/harness/README.md) — architecture, workspace protocol, public interface
-- [Harness task model](src/harness/TASK.md) — how tasks, artifacts, and skill state work
-- [Roadmap](TODO.md)
-- [Contributing](CONTRIBUTING.md)
-- [Security policy](SECURITY.md)
+## Ticker-local LingTai bridge
 
----
+Ticker teams live under:
 
-## License
+```text
+vault/companies/<TICKER>/.lingtai/
+```
 
-MIT. See [LICENSE](LICENSE).
+The bridge script simulates the future frontend/runtime boundary.  It does not run the team itself; it writes mailbox messages from the ticker-local pseudo-human endpoint to `<TICKER>_orchestrator`, and it can read replies sent back to the ticker-local `human` inbox.
+
+Common commands:
+
+```bash
+# Ensure vault/team directories and ticker-local human endpoint exist.
+uv run python scripts/lingtai_ticker_harness.py TSLA --root . --ensure-dirs
+
+# Review rendered role comments from the native templates.
+uv run python scripts/lingtai_ticker_harness.py TSLA --root . --render-comments
+
+# Patch rendered comments into existing ticker-local init.json files.
+uv run python scripts/lingtai_ticker_harness.py TSLA --root . --apply-comments
+
+# Send a natural-language request to TSLA_orchestrator through the pseudo-human outbox.
+uv run python scripts/lingtai_ticker_harness.py TSLA "Please refresh the latest TSLA memo." --root . --send --subject "Refresh latest memo"
+
+# Read messages that the ticker-local team sent to the pseudo-human inbox.
+uv run python scripts/lingtai_ticker_harness.py TSLA --root . --read-human
+
+# Queue one adversarial IC-chair probe if latest.md changed since the last probe.
+uv run python scripts/lingtai_ticker_harness.py TSLA --root . --probe-latest-if-changed
+
+# Queue an institutional-grade synthesis review if latest.md changed since the last synthesis.
+uv run python scripts/lingtai_ticker_harness.py TSLA --root . --synthesize-latest-if-changed
+```
+
+The ticker-local `human` directory is intentionally a pseudo-agent endpoint (`admin: null`) with metadata allowing the outer/admin harness to inspect its inbox.  Do not turn it into a runnable admin avatar just to read/write mailbox traffic; use a separate controller if one is needed.
+
+## Model configuration
+
+`config/models.yaml` controls model assignments used by retained shared/vault LLM calls.  The current default is native Codex subscription access:
+
+```yaml
+harness:
+  agent: "codex/gpt-5.5"
+  condense: "codex/gpt-5.5"
+```
+
+The key name `harness` is currently a compatibility label used by `src.shared.model_config` and `src.vault.synthesis`; it no longer refers to the removed subprocess harness.  Override with environment variables such as:
+
+```bash
+export ALPHASEEKER_MODEL_HARNESS_AGENT="minimax/MiniMax-M2.5"
+```
+
+Provider key requirements are derived by `src.shared.model_config`.  `codex/*` uses OAuth tokens from `~/.lingtai-tui/codex-auth.json`; OpenAI-compatible providers use their provider-specific API keys.
+
+## Development and validation
+
+Install dependencies with `uv`, then run:
+
+```bash
+uv run python -m compileall -q src scripts
+uv run pytest -q
+uv run python -m py_compile scripts/lingtai_ticker_harness.py
+```
+
+The CI workflow performs the same compile check and the offline pytest suite.  There is no separate live legacy-harness CI job after the cleanup.
+
+## Notes on generated artifacts
+
+- `vault/companies/<TICKER>/team/` contains published memos, drafts, raw team outputs, and version archives.
+- `vault/companies/<TICKER>/.lingtai/` contains live agent process state and mailboxes.  Treat this as runtime state; do not commit indiscriminately unless the project owner explicitly wants a network snapshot.
+- `.latest_probe_state.json` and `.latest_synthesis_state.json` under a published memo folder are guard files used by the bridge script to avoid re-queuing the same probe/synthesis request for an unchanged `latest.md`.

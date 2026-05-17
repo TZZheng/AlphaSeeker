@@ -1,9 +1,12 @@
 # AlphaSeeker Model Configuration
 #
-# Harness uses two model roles. Users can override any model
-# by editing this file or setting environment variables.
+# Retained vault/shared LLM calls use two compatibility model roles.
+# Users can override any model by editing this file or setting environment variables.
 #
 # Format: harness.ROLE = "provider/model-name"
+#
+# Note: the key name "harness" is retained as a model-config compatibility
+# label; the legacy subprocess harness itself has been removed.
 #
 # Supported provider prefixes:
 #   - "sf/*"       → SiliconFlow (e.g. "sf/Qwen/Qwen3-14B")
@@ -18,7 +21,7 @@
 #   Example: ALPHASEEKER_MODEL_HARNESS_AGENT="gpt-4o"
 
 # ---------------------------------------------------------------------------
-# Harness Runtime
+# Vault / bridge model roles
 # ---------------------------------------------------------------------------
 harness:
   agent: "codex/gpt-5.5"

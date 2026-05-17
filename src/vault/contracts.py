@@ -11,8 +11,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from src.retrieval.types import SourceGrade, SourceType
-
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -26,6 +24,18 @@ ExtractionMethod = Literal["deterministic", "llm", "manual"]
 FieldKind = Literal["narrative", "quantitative", "mixed", "unknown"]
 IngestionStatus = Literal["stored", "skipped_duplicate", "failed"]
 QuestionStatus = Literal["open", "proposed_close", "answered", "rejected"]
+SourceGrade = Literal["A", "B", "C", "unknown"]
+SourceType = Literal[
+    "manual_file",
+    "sec_filing",
+    "company_profile",
+    "financial_snapshot",
+    "market_snapshot",
+    "news",
+    "web_search_result",
+    "company_ir",
+    "other",
+]
 
 
 class DocumentRef(BaseModel):

@@ -9,36 +9,13 @@ on:
 
 jobs:
   offline-tests:
-    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
 
       - name: Compile check
-        run: uv run python -m compileall -q src main.py
+        run: uv run python -m compileall -q src scripts
 
       - name: Offline pytest suite
-        run: uv run pytest -m "not live" -q
-
-  live-tests:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup
-
-      - name: Compile check
-        run: uv run python -m compileall -q src main.py
-
-      - name: Live full-pipeline suite (model-config driven)
-        env:
-          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
-          SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-          EIA_API_KEY: ${{ secrets.EIA_API_KEY }}
-          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
-        run: uv run pytest -m "live" -q
+        run: uv run pytest -q

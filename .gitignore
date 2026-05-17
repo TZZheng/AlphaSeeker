@@ -238,3 +238,7 @@ vault/vault.sqlite
 
 # Local contract-review scratch drafts
 /docs/research_platform/module_plans/ALPHASEEKER_INVESTMENT_MEMO_CONTRACT_*.md
+# Generated company vault presentation/support artifacts
+vault/companies/*/wiki/
+vault/companies/*/team/reviews/
+vault/companies/*/team/*.md
