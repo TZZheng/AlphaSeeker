@@ -38,6 +38,19 @@ ROLE_TEMPLATES = {
 
 TEMPLATES_ROOT = Path("docs/research_platform/lingtai_native/templates")
 
+HUMAN_ENDPOINT_NOTE = (
+    "Ticker-local human endpoint. Outer harness/codex reads this mailbox and "
+    "relays selected messages to the real human UI."
+)
+
+HUMAN_INBOX_ACCESS = {
+    "mailbox": {
+        "inbox": {
+            "nirvana": True,
+        },
+    },
+}
+
 
 def company_root(root: Path, *, ticker: str) -> Path:
     return root / "vault" / "companies" / ticker.upper()
@@ -100,6 +113,74 @@ def update_init_comment(root: Path, *, ticker: str, role: str) -> Path:
     return path
 
 
+def human_manifest(ticker: str) -> dict[str, object]:
+    return {
+        "address": "human",
+        "agent_name": "human",
+        "nickname": f"{ticker.upper()} frontend harness",
+        "ticker": ticker.upper(),
+        "note": HUMAN_ENDPOINT_NOTE,
+        # Explicit null keeps this directory a pseudo-human endpoint rather
+        # than a runnable agent; the kernel/TUI both treat admin:null as human.
+        "admin": None,
+        # The outer/admin harness may inspect the ticker-local human inbox.
+        # Keep this as data rather than changing admin, so normal ticker
+        # avatars do not gain karma/nirvana powers and the endpoint remains
+        # a pseudo-agent.
+        "access": HUMAN_INBOX_ACCESS,
+    }
+
+
+def _with_human_inbox_access(data: dict[str, object], *, ticker: str) -> dict[str, object]:
+    updated = dict(data)
+    updated["address"] = "human"
+    updated["agent_name"] = "human"
+    updated.setdefault("nickname", f"{ticker.upper()} frontend harness")
+    updated["ticker"] = ticker.upper()
+    updated.setdefault("note", HUMAN_ENDPOINT_NOTE)
+    updated["admin"] = None
+
+    access = updated.get("access")
+    if not isinstance(access, dict):
+        access = {}
+    mailbox = access.get("mailbox")
+    if not isinstance(mailbox, dict):
+        mailbox = {}
+    inbox = mailbox.get("inbox")
+    if not isinstance(inbox, dict):
+        inbox = {}
+    inbox["nirvana"] = True
+    mailbox["inbox"] = inbox
+    access["mailbox"] = mailbox
+    updated["access"] = access
+    return updated
+
+
+def ensure_human_endpoint(root: Path, *, ticker: str) -> list[Path]:
+    human = network_root(root, ticker=ticker) / "human"
+    paths = [
+        human,
+        human / "mailbox",
+        human / "mailbox" / "outbox",
+        human / "mailbox" / "inbox",
+        human / "mailbox" / "sent",
+    ]
+    for path in paths:
+        path.mkdir(parents=True, exist_ok=True)
+
+    manifest_path = human / ".agent.json"
+    if manifest_path.exists():
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = _with_human_inbox_access(data, ticker=ticker)
+    else:
+        manifest = human_manifest(ticker)
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return paths + [manifest_path]
+
+
 def ensure_vault_dirs(root: Path, *, ticker: str) -> list[Path]:
     base = company_root(root, ticker=ticker)
     paths = [
@@ -108,20 +189,18 @@ def ensure_vault_dirs(root: Path, *, ticker: str) -> list[Path]:
         base / "team" / "drafts",
         base / "team" / "published",
         base / "team" / "published" / "versions",
-        base / ".lingtai" / "human" / "mailbox" / "outbox",
-        base / ".lingtai" / "human" / "mailbox" / "inbox",
     ]
     for path in paths:
         path.mkdir(parents=True, exist_ok=True)
-    return paths
+    return paths + ensure_human_endpoint(root, ticker=ticker)
 
 
 def _human_identity(root: Path, *, ticker: str) -> dict[str, object]:
     path = network_root(root, ticker=ticker) / "human" / ".agent.json"
     if path.exists():
         data = json.loads(path.read_text(encoding="utf-8"))
-        return dict(data)
-    return {"address": "human", "agent_name": "human", "via": "ticker-local-harness", "ticker": ticker.upper()}
+        return _with_human_inbox_access(data, ticker=ticker)
+    return human_manifest(ticker)
 
 
 def _mailbox_id(now: datetime) -> str:
@@ -129,6 +208,8 @@ def _mailbox_id(now: datetime) -> str:
 
 
 def enqueue_request(root: Path, *, ticker: str, request: str, subject: str = "") -> Path:
+    ensure_human_endpoint(root, ticker=ticker)
+
     recipient = agent_name(ticker, "orchestrator")
     net = network_root(root, ticker=ticker)
     recipient_dir = net / recipient
