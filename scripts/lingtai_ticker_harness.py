@@ -254,6 +254,10 @@ def latest_state_path(root: Path, *, ticker: str) -> Path:
     return company_root(root, ticker=ticker) / "team" / "published" / ".latest_probe_state.json"
 
 
+def latest_synthesis_state_path(root: Path, *, ticker: str) -> Path:
+    return company_root(root, ticker=ticker) / "team" / "published" / ".latest_synthesis_state.json"
+
+
 def file_sha256(path: Path) -> str | None:
     if not path.exists():
         return None
@@ -314,6 +318,68 @@ def enqueue_latest_probe_if_changed(root: Path, *, ticker: str) -> Path | None:
     return probe
 
 
+def latest_synthesis_question(root: Path, *, ticker: str) -> str:
+    latest = latest_md_path(root, ticker=ticker)
+    return f"""The harness observed that `{latest}` is ready for synthesis/distillation review.
+
+Stop patching. Do not add another marginal diligence item merely because one can be found. Treat the current `latest.md` as raw material produced by adversarial expansion, not as the final shape of the investment memo.
+
+Synthesis task:
+
+> Rewrite / reorganize the current memo into a coherent committee-readable investment memo. First extract the core investment thesis spine, then consolidate the discovered diligence points under 3-5 decisive underwriting variables. Keep the main body focused on evidence that actually changes the recommendation; move secondary checks, edge risks, and monitoring details into an appendix / risk register / diligence backlog.
+
+Required output:
+
+1. State the coherent thesis in one paragraph.
+2. Name the 3-5 decisive variables that drive the recommendation.
+3. Explain which existing sections should be merged, demoted to appendix, or deleted as duplicative.
+4. Update `latest.md` and the version archive/draft if you can improve coherence without weakening evidence.
+5. If you cannot safely rewrite, explain exactly what blocks synthesis.
+
+Recommendation discipline: preserve the actual investment conclusion unless the synthesis changes the conclusion for a clearly stated reason.
+""".strip()
+
+
+def enqueue_latest_synthesis_if_changed(root: Path, *, ticker: str) -> Path | None:
+    latest = latest_md_path(root, ticker=ticker)
+    current_hash = file_sha256(latest)
+    if current_hash is None:
+        raise SystemExit(f"missing latest.md for {ticker.upper()}: {latest}")
+
+    state_path = latest_synthesis_state_path(root, ticker=ticker)
+    previous_hash = None
+    if state_path.exists():
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        previous_hash = state.get("latest_sha256")
+
+    if previous_hash == current_hash:
+        return None
+
+    request = enqueue_request(
+        root,
+        ticker=ticker,
+        request=latest_synthesis_question(root, ticker=ticker),
+        subject="Harness synthesis after latest.md expansion",
+    )
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    state_path.write_text(
+        json.dumps(
+            {
+                "ticker": ticker.upper(),
+                "latest_path": str(latest),
+                "latest_sha256": current_hash,
+                "last_synthesis_queued_at": now,
+                "last_synthesis_message": str(request),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return request
+
+
 def list_human_inbox(root: Path, *, ticker: str) -> list[Path]:
     inbox = human_inbox(root, ticker=ticker)
     if not inbox.exists():
@@ -359,6 +425,11 @@ def main() -> int:
         action="store_true",
         help="Runtime mode: if team/published/latest.md changed since the last probe, queue one free-form IC-chair probe to <TICKER>_orchestrator.",
     )
+    parser.add_argument(
+        "--synthesize-latest-if-changed",
+        action="store_true",
+        help="Runtime mode: if team/published/latest.md changed since the last synthesis, queue a coherence/distillation request instead of another marginal diligence probe.",
+    )
     parser.add_argument("--read-human", action="store_true", help="Gateway mode: list messages sent to the ticker-local human inbox.")
     parser.add_argument("--subject", default="", help="Optional internal-mail subject for --send.")
     args = parser.parse_args()
@@ -393,11 +464,18 @@ def main() -> int:
         else:
             print(f"queued latest.md update probe to {agent_name(ticker, 'orchestrator')}: {path}")
 
+    if args.synthesize_latest_if_changed:
+        path = enqueue_latest_synthesis_if_changed(root, ticker=ticker)
+        if path is None:
+            print(f"latest.md unchanged since last synthesis for {ticker}; no synthesis queued")
+        else:
+            print(f"queued latest.md synthesis request to {agent_name(ticker, 'orchestrator')}: {path}")
+
     if args.read_human:
         print_human_inbox(root, ticker=ticker)
 
-    if not (args.send or args.probe_latest_if_changed or args.read_human or args.apply_comments or args.render_comments or args.ensure_dirs):
-        raise SystemExit("nothing to do; use --send for an existing team, --probe-latest-if-changed after a latest.md update, --read-human for replies, or --render-comments/--apply-comments for setup")
+    if not (args.send or args.probe_latest_if_changed or args.synthesize_latest_if_changed or args.read_human or args.apply_comments or args.render_comments or args.ensure_dirs):
+        raise SystemExit("nothing to do; use --send for an existing team, --probe-latest-if-changed after a latest.md update, --synthesize-latest-if-changed for coherence distillation, --read-human for replies, or --render-comments/--apply-comments for setup")
 
     return 0
 
