@@ -11,7 +11,6 @@ This is a breaking cleanup: legacy `src/harness`, `src/cli`, `src/research_platf
 ## Current repository shape
 
 ```text
-config/models.yaml                         # model role configuration for synthesis/shared LLM calls
 scripts/lingtai_ticker_harness.py          # bridge into ticker-local LingTai teams
 src/shared/                                # model config, Codex auth, retry/cache, web/text utilities
 src/tools/                                 # reusable equity/macro/commodity source tools
@@ -108,18 +107,16 @@ The ticker-local `human` directory is intentionally a pseudo-agent endpoint (`ad
 
 ## Model configuration
 
-`config/models.yaml` controls model assignments used by retained shared/vault LLM calls.  The current default is native Codex subscription access:
+Model defaults now live in `src/shared/model_config.py`; the old `config/models.yaml` file has been removed.  Current defaults use native Codex subscription access:
 
-```yaml
-harness:
-  agent: "codex/gpt-5.5"
-  condense: "codex/gpt-5.5"
-```
+- `vault.agent = "codex/gpt-5.5"`
+- `equity.condense = "codex/gpt-5.5"`
 
-The key name `harness` is currently a compatibility label used by `src.shared.model_config` and `src.vault.synthesis`; it no longer refers to the removed subprocess harness.  Override with environment variables such as:
+Override locally with environment variables when needed:
 
 ```bash
-export ALPHASEEKER_MODEL_HARNESS_AGENT="minimax/MiniMax-M2.5"
+export ALPHASEEKER_MODEL_VAULT_AGENT="minimax/MiniMax-M2.5"
+export ALPHASEEKER_MODEL_EQUITY_CONDENSE="gemini-2.5-flash"
 ```
 
 Provider key requirements are derived by `src.shared.model_config`.  `codex/*` uses OAuth tokens from `~/.lingtai-tui/codex-auth.json`; OpenAI-compatible providers use their provider-specific API keys.

@@ -199,10 +199,9 @@ def _completed_response_text(response: Any) -> str:
 class CodexNativeChatModel:
     """Minimal invoke-compatible native Codex model for non-agent LLM calls.
 
-    Used by condense/summarization code paths that go through get_llm(), while
-    harness agents use CodexNativeTransport directly. This uses the same
-    ChatGPT Codex Responses backend and OAuth token file; it does not use the
-    OpenAI API-key path or Codex CLI.
+    Used by retained vault/source condensation code paths that go through
+    get_llm(). This uses the ChatGPT Codex Responses backend and OAuth token
+    file; it does not use the OpenAI API-key path or Codex CLI.
     """
 
     def __init__(self, model_name: str) -> None:

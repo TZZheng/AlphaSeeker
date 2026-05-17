@@ -7,26 +7,20 @@ from src.shared import model_config
 pytestmark = pytest.mark.unit
 
 
-@pytest.fixture(autouse=True)
-def _clear_config_cache() -> None:
-    model_config._load_config.cache_clear()
-
-
-def test_required_provider_env_vars_from_default_config() -> None:
+def test_required_provider_env_vars_from_defaults() -> None:
     required = model_config.get_required_provider_env_vars()
 
-    # The harness agent and condense role both default to native Codex OAuth,
+    # The vault agent and equity condense roles default to native Codex OAuth,
     # so the model layer itself requires no API-key env var.
     assert required == set()
 
 
-def test_hardcoded_fallback_defaults_to_native_codex(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(model_config, "_load_config", lambda: {})
-    monkeypatch.delenv("ALPHASEEKER_MODEL_HARNESS_AGENT", raising=False)
-    monkeypatch.delenv("ALPHASEEKER_MODEL_HARNESS_CONDENSE", raising=False)
+def test_defaults_use_native_codex(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ALPHASEEKER_MODEL_VAULT_AGENT", raising=False)
+    monkeypatch.delenv("ALPHASEEKER_MODEL_EQUITY_CONDENSE", raising=False)
 
-    assert model_config.get_model("harness", "agent") == "codex/gpt-5.5"
-    assert model_config.get_model("harness", "condense") == "codex/gpt-5.5"
+    assert model_config.get_model("vault", "agent") == "codex/gpt-5.5"
+    assert model_config.get_model("equity", "condense") == "codex/gpt-5.5"
 
 
 def test_missing_provider_env_vars_without_keys(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -39,7 +33,7 @@ def test_missing_provider_env_vars_without_keys(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_minimax_requires_dedicated_key_no_openai_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ALPHASEEKER_MODEL_HARNESS_AGENT", "minimax/MiniMax-M2.5")
+    monkeypatch.setenv("ALPHASEEKER_MODEL_VAULT_AGENT", "minimax/MiniMax-M2.5")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key-present")
     monkeypatch.setenv("KIMI_API_KEY", "kimi-key-present")
     monkeypatch.setenv("SILICONFLOW_API_KEY", "sf-key-present")
@@ -59,7 +53,7 @@ def test_all_required_keys_present(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_minimax_requires_its_own_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ALPHASEEKER_MODEL_HARNESS_AGENT", "minimax/MiniMax-M2.5")
+    monkeypatch.setenv("ALPHASEEKER_MODEL_VAULT_AGENT", "minimax/MiniMax-M2.5")
     monkeypatch.setenv("KIMI_API_KEY", "kimi-key-present")
     monkeypatch.setenv("SILICONFLOW_API_KEY", "sf-key-present")
     monkeypatch.delenv("MINIMAX_API_KEY", raising=False)

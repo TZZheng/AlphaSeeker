@@ -320,7 +320,7 @@ def synthesize_company_research_state(
     )
     if not excerpts:
         raise ValueError(f"No vault documents found for {ticker_norm}; ingest sources before synthesis.")
-    resolved_model = model_name or get_model("harness", "agent")
+    resolved_model = model_name or get_model("vault", "agent")
     response = get_llm(resolved_model).invoke(build_synthesis_prompt(ticker_norm, company_name, excerpts))
     raw_text = _response_text(response)
     synthesis = parse_synthesis_json(raw_text)
