@@ -11,10 +11,10 @@ This is a breaking cleanup: legacy `src/harness`, `src/cli`, `src/research_platf
 ## Current repository shape
 
 ```text
-scripts/lingtai_ticker_harness.py          # bridge into ticker-local LingTai teams
-src/shared/                                # model config, Codex auth, retry/cache, web/text utilities
-src/tools/                                 # reusable equity/macro/commodity source tools
-src/vault/                                 # company vault schema, ingest, extraction, wiki/status/synthesis
+scripts/lingtai_ticker_harness.py          # operator/bridge entrypoint; executable glue, not importable library code
+src/shared/                                # importable shared code: model config, Codex auth, retry/cache, web/text utilities
+src/tools/                                 # importable reusable equity/macro/commodity source tools
+src/vault/                                 # importable company vault schema, ingest, extraction, wiki/status/synthesis
 vault/companies/<TICKER>/                  # persistent company artifacts and ticker-local teams
 templates/lingtai_native/
                                             # role/policy templates consumed by the ticker harness
@@ -22,6 +22,14 @@ tests/unit/test_vault_*.py                 # retained vault tests
 tests/unit/test_sec_filings.py             # retained source-tool tests
 tests/unit/test_reliability.py             # retained shared utility tests
 ```
+
+`src/` is the importable package surface used by tests and other Python callers.  `scripts/` is for thin command-line/operator glue that wires those modules into a concrete local workflow.
+
+Local-only working directories are not source:
+
+- `tmp/` is disposable scratch space and is ignored.
+- `.trash/` is a local safety net for old ticker-team resets; it is ignored and can be deleted once those resets are no longer needed.
+- `.venv/` is the local virtual environment managed by `uv`; it is ignored, useful for speed, and safely recreatable with `uv sync` or the next `uv run ...`.
 
 ## Vault backend
 
