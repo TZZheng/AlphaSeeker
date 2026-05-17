@@ -320,21 +320,30 @@ def enqueue_latest_probe_if_changed(root: Path, *, ticker: str) -> Path | None:
 
 def latest_synthesis_question(root: Path, *, ticker: str) -> str:
     latest = latest_md_path(root, ticker=ticker)
-    return f"""The harness observed that `{latest}` is ready for synthesis/distillation review.
+    return f"""The harness observed that `{latest}` is ready for institutional-grade synthesis review.
 
-Stop patching. Do not add another marginal diligence item merely because one can be found. Treat the current `latest.md` as raw material produced by adversarial expansion, not as the final shape of the investment memo.
+Stop patching. Do not add another marginal diligence item merely because one can be found. Read the whole investment memo and judge the artifact as a capital-allocation document.
 
-Synthesis task:
+Core gate question:
 
-> Rewrite / reorganize the current memo into a coherent committee-readable investment memo. First extract the core investment thesis spine, then consolidate the discovered diligence points under 3-5 decisive underwriting variables. Keep the main body focused on evidence that actually changes the recommendation; move secondary checks, edge risks, and monitoring details into an appendix / risk register / diligence backlog.
+> Read the whole investment memo. Do you think it is an institutional-grade memo that you would be willing to allocate capital with? If not, list what you could improve and improve it.
+
+Interpretation:
+
+- If the memo is not coherent enough for real capital-allocation discussion, rewrite / reorganize it into a committee-readable memo rather than appending another checklist section.
+- First extract the core investment thesis spine, then consolidate the discovered diligence points under 3-5 decisive underwriting variables.
+- Keep the main body focused on evidence that actually changes the recommendation; move secondary checks, edge risks, and monitoring details into an appendix / risk register / diligence backlog.
+- If a new fact is truly necessary to reach institutional-grade quality, add it only if it changes the capital-allocation judgment; otherwise prioritize synthesis and structure.
 
 Required output:
 
-1. State the coherent thesis in one paragraph.
-2. Name the 3-5 decisive variables that drive the recommendation.
-3. Explain which existing sections should be merged, demoted to appendix, or deleted as duplicative.
-4. Update `latest.md` and the version archive/draft if you can improve coherence without weakening evidence.
-5. If you cannot safely rewrite, explain exactly what blocks synthesis.
+1. State whether the current memo is institutional-grade enough to allocate capital with, and why.
+2. If not, name the improvements needed and perform them.
+3. State the coherent thesis in one paragraph.
+4. Name the 3-5 decisive variables that drive the recommendation.
+5. Explain which existing sections were merged, demoted to appendix, or deleted as duplicative.
+6. Update `latest.md` and the version archive/draft if you can improve coherence without weakening evidence.
+7. If you cannot safely rewrite, explain exactly what blocks synthesis.
 
 Recommendation discipline: preserve the actual investment conclusion unless the synthesis changes the conclusion for a clearly stated reason.
 """.strip()
