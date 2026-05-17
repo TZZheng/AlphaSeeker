@@ -84,6 +84,20 @@ The first implementation can be either:
 
 Given the file-tree requirement, a web frontend is probably the faster path to a useful first version. A terminal version can come later if the operator wants the exact TUI feel.
 
+## Recommended v1 technology stack
+
+Use a **TypeScript frontend + Python controller/backend** for v1.
+
+- **Frontend:** TypeScript, preferably React + Vite if we want to stay close to `lingtai-portal`'s existing web stack. SvelteKit would also work, but React/Vite has the lowest conceptual distance from LingTai's portal code.
+- **Controller/backend:** Python inside AlphaSeeker, starting by extracting the existing `scripts/lingtai_ticker_harness.py` logic into an importable module such as `src/vault/lingtai_team.py`, then exposing a thin local HTTP API for the frontend.
+
+Rationale:
+
+- The business state is already Python/vault/filesystem-native: company vaults, ticker-local `.lingtai/` directories, pseudo-human mailboxes, and the current harness all live in AlphaSeeker's Python world.
+- TypeScript is the right layer for ticker search, file tree UI, markdown preview, and button/control state.
+- Rewriting the controller in Go for v1 would duplicate the current Python harness logic and slow down iteration.
+- A future packaging pass can still move to a Go wrapper or Go backend that embeds the built frontend, similar to `lingtai-portal`, once the controller API stabilizes.
+
 ## Process lifecycle decision
 
 Do **not** make “open ticker management screen” imply “start the agent process.” Opening a ticker should be read-only/attach-by-default.
